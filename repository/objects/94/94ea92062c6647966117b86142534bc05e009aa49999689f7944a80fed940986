@@ -1,0 +1,31 @@
+{
+  "id": "scum-map-ultra-affine-20261114-v1",
+  "mapVersion": "scum-map-ultra-20261113",
+  "imageWidth": 5120,
+  "imageHeight": 5120,
+  "worldLeftX": 619200,
+  "worldRightX": -904800,
+  "worldTopY": 619199.9375,
+  "worldBottomY": -904800,
+  "verified": true,
+  "calibrationMethod": "affine",
+  "calibratedAt": "2026-11-14T12:47:22.382Z",
+  "affine": {
+    "a": -0.0033595800524934384,
+    "b": 0,
+    "c": 2080.251968503937,
+    "d": 0,
+    "e": -0.0033595801902714974,
+    "f": 2080.2518438423494
+  },
+  "pointCount": 5,
+  "averagePixelError": 2.5564,
+  "maximumPixelError": 4.0912,
+  "validation": {
+    "pointCount": 10,
+    "averagePixelError": 3.2802,
+    "maximumPixelError": 7.0766,
+    "averageMeterError": 9.76,
+    "maximumMeterError": 21.06
+  }
+}

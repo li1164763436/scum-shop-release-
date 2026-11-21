@@ -1,0 +1,69 @@
+import sys, sqlite3, json, os, struct, shutil, time, math
+
+SKILL_NAMES = {'BoxingSkill':'拳击','AwarenessSkill':'警觉','RiflesSkill':'步枪','SnipingSkill':'狙击','CamouflageSkill':'伪装','SurvivalSkill':'生存','MeleeWeaponsSkill':'近战武器','HandgunSkill':'手枪','RunningSkill':'跑步','EnduranceSkill':'耐力','TacticsSkill':'战术','CookingSkill':'烹饪','ThieverySkill':'偷窃/撬锁','ArcherySkill':'射箭','DrivingSkill':'驾驶','EngineeringSkill':'工程','DemolitionSkill':'爆破','MedicalSkill':'医疗','MotorcycleSkill':'摩托车','StealthSkill':'潜行','AviationSkill':'飞行','FarmingSkill':'农业','ResistanceSkill':'抵抗'}
+ATTRS = {'strength': ('BaseStrength', 8), 'constitution': ('BaseConstitution', 5), 'dexterity': ('BaseDexterity', 5), 'intelligence': ('BaseIntelligence', 5)}
+
+def fail(msg): raise RuntimeError(msg)
+def db_path(root):
+ root=os.path.abspath(root); candidates=[os.path.join(root,'SCUM','Saved','SaveFiles','SCUM.db'),os.path.join(root,'Saved','SaveFiles','SCUM.db'),os.path.join(root,'SCUM.db')]
+ for p in candidates:
+  if os.path.isfile(p): return p
+ fail('SCUM数据库不存在')
+def offset(blob,name):
+ i=blob.find(name.encode()+b'\0')
+ if i < 0: return None
+ j=blob.find(b'DoubleProperty\0',i)
+ if j < 0: return None
+ o=j+24
+ return o if o+8<=len(blob) else None
+def finite_number(v): return isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(float(v))
+def locate(con, steam): return con.execute('SELECT p.id,p.body_simulation,u.id AS user_profile_id,u.money_balance,u.last_login_time,u.last_logout_time FROM prisoner p JOIN user_profile u ON u.id=p.user_profile_id WHERE u.user_id=?',(str(steam),)).fetchone()
+def main():
+ q=json.loads(sys.stdin.read()); db=db_path(q.get('serverDirectory','')); readonly=q.get('action','read')=='read'; uri='file:'+db.replace('\\','/')+'?mode='+('ro' if readonly else 'rw'); last_error=None
+ for attempt in range(3):
+  con=None
+  try:
+   con=sqlite3.connect(uri,uri=True,timeout=2); con.execute('PRAGMA busy_timeout=2000'); con.row_factory=sqlite3.Row
+   row=locate(con,q.get('steamId'))
+   if not row: fail('玩家不存在')
+   blob=bytearray(row['body_simulation'] or b'')
+   if not blob: fail('玩家属性数据为空')
+   attrs={}
+   for key,(name,_) in ATTRS.items():
+    o=offset(blob,name)
+    if o is None: fail('属性数据格式无法识别:'+name)
+    attrs[key]=struct.unpack('<d',blob[o:o+8])[0]
+   skills=[{'name':r['name'],'cnName':SKILL_NAMES.get(r['name'],r['name']),'level':int(r['level'] or 0),'experience':float(r['experience'] or 0)} for r in con.execute('SELECT name,level,experience FROM prisoner_skill WHERE prisoner_id=? ORDER BY name',(row['id'],))]
+   if readonly:
+    currencies={r['currency_type']:r['account_balance'] for r in con.execute('SELECT c.currency_type,c.account_balance FROM bank_account_registry_currencies c JOIN bank_account_registry b ON b.id=c.bank_account_id WHERE b.account_owner_user_profile_id=?',(row['user_profile_id'],))}
+    return {'money':row['money_balance'],'gold':currencies.get(2),'attributes':attrs,'skills':skills}
+   if not row['last_logout_time'] or (row['last_login_time'] and str(row['last_login_time'])>str(row['last_logout_time'])): fail('玩家在线，无法修改属性')
+   changed=False
+   for key,(name,mx) in ATTRS.items():
+    if key not in q.get('attributes',{}): continue
+    v=q['attributes'][key]
+    if not finite_number(v) or not 0<=float(v)<=mx: fail('属性超出范围:'+key)
+    blob[offset(blob,name):offset(blob,name)+8]=struct.pack('<d',float(v)); changed=True
+   updates=[]; valid={s['name'] for s in skills}
+   for s in q.get('skills',[]):
+    name=s.get('name'); level=s.get('level'); exp=s.get('experience')
+    if name not in valid or not isinstance(level,int) or isinstance(level,bool) or not 0<=level<=3 or not finite_number(exp) or not 0<=float(exp)<=10000000: fail('技能数据无效')
+    updates.append((level,float(exp),row['id'],name))
+   if not changed and not updates: fail('没有可更新字段')
+   shutil.copy2(db,db+'.bak-'+time.strftime('%Y%m%d%H%M%S')); con.execute('BEGIN IMMEDIATE')
+   if changed: con.execute('UPDATE prisoner SET body_simulation=? WHERE id=?',(bytes(blob),row['id']))
+   for item in updates: con.execute('UPDATE prisoner_skill SET level=?,experience=? WHERE prisoner_id=? AND name=?',item)
+   con.commit(); return {'updated':True}
+  except sqlite3.OperationalError as e:
+   last_error=e
+   if con: con.rollback()
+   if attempt < 2: time.sleep(0.4); continue
+   fail('数据库忙碌，请确认玩家已离线后重试')
+  except Exception:
+   if con: con.rollback()
+   raise
+  finally:
+   if con: con.close()
+ raise last_error
+try: print(json.dumps(main(),ensure_ascii=False))
+except Exception as e: print(json.dumps({'error':str(e)},ensure_ascii=False)); sys.exit(1)

@@ -1,0 +1,59 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import mysql from 'mysql2/promise';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const imageRoot = path.join(root, 'public', 'uploads', 'products');
+const tempRoot = path.join(root, 'public', 'uploads', '.product-sort-' + Date.now());
+const generatedRoot = path.join(tempRoot, 'products');
+const backupRoot = path.join(root, 'public', 'uploads', '.product-backup-' + Date.now());
+const config = JSON.parse((await fs.readFile(path.join(root, 'data', 'config.json'), 'utf8')).replace(/^﻿/, '')).mysql;
+const safe = (value) => {
+  const result = String(value || '').trim();
+  if (!result || result.length > 100 || '<>:"/\\|?*'.split('').some((char) => result.includes(char))) throw new Error('分类名称无效：' + result);
+  return result;
+};
+const db = await mysql.createConnection({ ...config, charset: 'utf8mb4', decimalNumbers: true });
+let transaction = false, switched = false;
+try {
+  const [lock] = await db.query('SELECT GET_LOCK(?,10) acquired', ['shop-reorganize-product-images']);
+  if (Number(lock[0].acquired) !== 1) throw new Error('商品图片整理正在执行');
+  const [products] = await db.query('SELECT id,parent_category AS parentCategory,category_name AS category,image_path AS imagePath FROM products ORDER BY parent_category,category_name,id');
+  await fs.mkdir(tempRoot, { recursive: true });
+  const plans = [], counters = new Map();
+  for (const product of products) {
+    const parent = safe(product.parentCategory), category = safe(product.category), key = parent + '::' + category;
+    const index = (counters.get(key) || 0) + 1;
+    counters.set(key, index);
+    const imagePath = String(product.imagePath || '');
+    const source = path.join(root, 'public', imagePath.startsWith('/') ? imagePath.slice(1) : imagePath);
+    const extension = path.extname(source).toLowerCase() || '.png';
+    const filename = String(index).padStart(4, '0') + extension;
+    const target = path.join(generatedRoot, parent, category, filename);
+    await fs.access(source);
+    plans.push({ id: product.id, source, target, imagePath: '/uploads/products/' + parent + '/' + category + '/' + filename });
+  }
+  for (const plan of plans) { await fs.mkdir(path.dirname(plan.target), { recursive: true }); await fs.copyFile(plan.source, plan.target); }
+  await fs.rename(imageRoot, backupRoot);
+  await fs.rename(generatedRoot, imageRoot);
+  switched = true;
+  await db.beginTransaction();
+  transaction = true;
+  for (const plan of plans) await db.execute('UPDATE products SET image_path=? WHERE id=?', [plan.imagePath, plan.id]);
+  await db.commit();
+  transaction = false;
+  await fs.rm(backupRoot, { recursive: true, force: true });
+  await fs.rm(tempRoot, { recursive: true, force: true });
+  console.log(JSON.stringify({ products: plans.length, categories: counters.size }, null, 2));
+} catch (error) {
+  if (transaction) await db.rollback().catch(() => {});
+  if (switched) {
+    await fs.rm(imageRoot, { recursive: true, force: true }).catch(() => {});
+    await fs.rename(backupRoot, imageRoot).catch(() => {});
+  }
+  throw error;
+} finally {
+  await db.query('SELECT RELEASE_LOCK(?)', ['shop-reorganize-product-images']).catch(() => {});
+  await db.end();
+}

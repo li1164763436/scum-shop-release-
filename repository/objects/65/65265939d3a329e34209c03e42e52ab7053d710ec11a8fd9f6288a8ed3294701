@@ -1,0 +1,101 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ConfigStore } from '../src/services/config-store.js';
+import { createDatabase } from '../src/services/database.js';
+import { ensureSchema } from '../src/services/schema.js';
+import { isSteamId64 } from '../src/services/command-policy.js';
+import { createInitialSuperAdmin as createInitialSuperAdminService } from '../src/services/initial-super-admin-service.js';
+
+const USERNAME_PATTERN = /^[\p{L}\p{N}_.-]{3,32}$/u;
+const INITIAL_ADMIN_PASSWORD_ENV = 'SCUM_RCON_INITIAL_ADMIN_PASSWORD';
+
+export function parsePromoteArgs(argv) {
+  const values = {};
+  let createInitial = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const key = argv[index];
+    if (key === '--create-initial') {
+      if (createInitial) throw new Error('参数不可重复：--create-initial');
+      createInitial = true;
+      continue;
+    }
+    if (!['--steam-id', '--username', '--reason'].includes(key)) throw new Error(`未知参数：${key}`);
+    if (values[key]) throw new Error(`参数不可重复：${key}`);
+    const value = argv[index + 1];
+    if (!value || value.startsWith('--')) throw new Error(`参数缺少值：${key}`);
+    values[key] = value.trim();
+    index += 1;
+  }
+  if (createInitial) {
+    if (values['--steam-id'] || values['--reason']) throw new Error('创建初始超级管理员仅允许 --create-initial 和 --username');
+    const username = values['--username']?.normalize('NFKC');
+    if (!username || !USERNAME_PATTERN.test(username)) throw new Error('用户名格式无效');
+    return { createInitial: true, steamId: null, username, reason: null };
+  }
+  const identifiers = [values['--steam-id'], values['--username']].filter(Boolean);
+  if (identifiers.length !== 1) throw new Error('必须且只能指定 --steam-id 或 --username 之一');
+  if (values['--steam-id'] && !isSteamId64(values['--steam-id'])) throw new Error('SteamID 格式无效');
+  if (values['--username'] && !USERNAME_PATTERN.test(values['--username'].normalize('NFKC'))) throw new Error('用户名格式无效');
+  const reason = String(values['--reason'] || '').trim();
+  if (reason.length < 2 || reason.length > 500) throw new Error('--reason 必填，长度须为 2-500 个字符');
+  return { createInitial: false, steamId: values['--steam-id'] || null, username: values['--username']?.normalize('NFKC') || null, reason };
+}
+
+export async function createInitialSuperAdmin(db, input, options = {}) {
+  return createInitialSuperAdminService(db, input, { allowUnbound: true, createSession: false, actorType: 'cli', actorLabel: 'server-cli', reason: '服务器 CLI 创建初始超级管理员', ...options });
+}
+
+export async function promoteSuperAdmin(db, input) {
+  return db.transaction(async (tx) => {
+    const params = [input.steamId || input.username.toLocaleLowerCase('en-US')];
+    const where = input.steamId ? '`SteamID` = ?' : '`登录账号规范值` = ?';
+    const rows = await tx.query(`SELECT \`商城用户编号\` AS id, \`登录账号\` AS username, \`SteamID\` AS steamId, \`用户角色\` AS role, \`账户状态\` AS status FROM \`商城用户\` WHERE ${where} LIMIT 1 FOR UPDATE`, params);
+    const target = rows[0];
+    if (!target) throw new Error('目标商城玩家不存在');
+    if (target.status !== 'active') throw new Error('目标账户不是 active 状态');
+    if (!isSteamId64(target.steamId)) throw new Error('目标玩家未绑定合法 SteamID');
+    if (!['user', 'admin', 'super_admin'].includes(target.role)) throw new Error('目标玩家当前角色不允许任命');
+    if (target.role === 'super_admin') return { username: target.username, steamId: target.steamId, oldRole: target.role, newRole: target.role, revokedSessions: 0, idempotent: true };
+    const oldRole = target.role;
+    await tx.query("UPDATE `商城用户` SET `用户角色` = 'super_admin' WHERE `商城用户编号` = ?", [target.id]);
+    const revoked = await tx.query('UPDATE shop_sessions SET revoked_at = CURRENT_TIMESTAMP(3) WHERE user_id = ? AND revoked_at IS NULL', [target.id]);
+    await tx.query("INSERT INTO admin_role_audits (actor_user_id, actor_type, actor_label, actor_username_snapshot, target_user_id, target_username_snapshot, target_steam_id, old_role, new_role, reason) VALUES (NULL, 'cli', 'server-cli', 'server-cli', ?, ?, ?, ?, 'super_admin', ?)", [target.id, target.username, target.steamId, oldRole, input.reason]);
+    return { username: target.username, steamId: target.steamId, oldRole, newRole: 'super_admin', revokedSessions: Number(revoked.affectedRows) || 0, idempotent: false };
+  });
+}
+
+export async function runPromoteCli(argv = process.argv.slice(2), dependencies = {}) {
+  const input = parsePromoteArgs(argv);
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const store = dependencies.store || new ConfigStore(path.join(root, 'data', 'config.json'));
+  const config = await store.read();
+  const db = dependencies.db || await createDatabase(config.mysql);
+  try {
+    await ensureSchema(db);
+    if (input.createInitial) {
+      const password = process.env[INITIAL_ADMIN_PASSWORD_ENV];
+      if (password === undefined) throw new Error(`缺少进程环境变量 ${INITIAL_ADMIN_PASSWORD_ENV}`);
+      const result = await createInitialSuperAdmin(db, { username: input.username, password });
+      console.log(`用户名：${result.username}`);
+      console.log('SteamID：未绑定');
+      console.log('角色：super_admin');
+      console.log('结果：初始超级管理员创建成功。');
+      return result;
+    }
+    const result = await promoteSuperAdmin(db, input);
+    console.log(`用户名：${result.username}`);
+    console.log(`SteamID：${result.steamId}`);
+    console.log(`角色：${result.oldRole} -> ${result.newRole}`);
+    console.log(result.idempotent ? '结果：目标已经是超级管理员，无需变更。' : `结果：任命成功，已撤销 ${result.revokedSessions} 个有效会话，请重新登录。`);
+    return result;
+  } finally {
+    if (!dependencies.db) await db.close();
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runPromoteCli().catch((error) => {
+    console.error(`任命失败：${error.message}`);
+    process.exitCode = 1;
+  });
+}

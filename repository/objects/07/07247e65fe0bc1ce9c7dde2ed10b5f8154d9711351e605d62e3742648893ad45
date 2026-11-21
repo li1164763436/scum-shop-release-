@@ -1,0 +1,55 @@
+const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
+export const DEFAULT_STOCK_MARKET_CONFIG = Object.freeze({ enabled: true, tradingDays: [1, 2, 3, 4, 5, 6, 7], openTime: '00:00', closeTime: '23:59' });
+
+function minutes(value) {
+  const match = TIME_PATTERN.exec(String(value || ''));
+  return match ? Number(match[1]) * 60 + Number(match[2]) : -1;
+}
+
+export function normalizeStockMarketConfig(input = {}) {
+  const config = { ...DEFAULT_STOCK_MARKET_CONFIG, ...input };
+  config.enabled = config.enabled !== false;
+  config.tradingDays = [...new Set((Array.isArray(config.tradingDays) ? config.tradingDays : DEFAULT_STOCK_MARKET_CONFIG.tradingDays).map(Number))].sort((a, b) => a - b);
+  if (!config.tradingDays.length || config.tradingDays.some((day) => !Number.isInteger(day) || day < 1 || day > 7)) throw new Error('配置无效：股市交易日必须至少包含一个 ISO 1-7 的日期');
+  if (!TIME_PATTERN.test(String(config.openTime)) || !TIME_PATTERN.test(String(config.closeTime))) throw new Error('配置无效：股市开闭市时间必须为严格 HH:mm');
+  if (minutes(config.openTime) >= minutes(config.closeTime)) throw new Error('配置无效：股市开市时间必须早于闭市时间');
+  return config;
+}
+
+function shanghaiParts(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', weekday: 'short' }).formatToParts(date);
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const days = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+  return { year: Number(value.year), month: Number(value.month), day: Number(value.day), hour: Number(value.hour), minute: Number(value.minute), isoDay: days[value.weekday] };
+}
+
+function shanghaiInstant(year, month, day, time) {
+  const [hour, minute] = time.split(':').map(Number);
+  return new Date(Date.UTC(year, month - 1, day, hour - 8, minute));
+}
+
+export function stockMarketStatus(input, now = new Date()) {
+  const config = normalizeStockMarketConfig(input);
+  const current = now instanceof Date ? now : new Date(now);
+  const parts = shanghaiParts(current);
+  const currentMinutes = parts.hour * 60 + parts.minute;
+  const open = minutes(config.openTime), close = minutes(config.closeTime);
+  const tradingDay = config.tradingDays.includes(parts.isoDay);
+  const isOpen = config.enabled && tradingDay && currentMinutes >= open && currentMinutes < close;
+  let reason = 'OPEN';
+  if (!config.enabled) reason = 'DISABLED';
+  else if (!tradingDay) reason = 'NON_TRADING_DAY';
+  else if (currentMinutes < open) reason = 'BEFORE_OPEN';
+  else if (currentMinutes >= close) reason = 'AFTER_CLOSE';
+  let nextOpenAt = null;
+  if (!isOpen) {
+    for (let offset = 0; offset <= 7; offset += 1) {
+      const noonUtc = Date.UTC(parts.year, parts.month - 1, parts.day + offset, 4);
+      const candidateParts = shanghaiParts(new Date(noonUtc));
+      if (!config.tradingDays.includes(candidateParts.isoDay)) continue;
+      const candidate = shanghaiInstant(candidateParts.year, candidateParts.month, candidateParts.day, config.openTime);
+      if (candidate.getTime() > current.getTime()) { nextOpenAt = candidate.toISOString(); break; }
+    }
+  }
+  return { isOpen, reason, timezone: 'Asia/Shanghai', tradingDay: parts.isoDay, tradingDays: config.tradingDays, openTime: config.openTime, closeTime: config.closeTime, nextOpenAt };
+}

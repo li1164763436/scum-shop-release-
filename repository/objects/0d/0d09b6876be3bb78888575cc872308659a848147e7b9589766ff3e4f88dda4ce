@@ -1,0 +1,27 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ConfigStore } from '../src/services/config-store.js';
+import { DatabaseBackups } from '../src/services/database-backups.js';
+
+export async function runDatabaseBackup(dependencies = {}) {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const store = dependencies.store || new ConfigStore(path.join(root, 'data', 'config.json'));
+  const backups = dependencies.backups || new DatabaseBackups({ root, store });
+  const result = await backups.backup();
+  return {
+    complete: result.complete,
+    createdAt: result.createdAt,
+    database: result.database,
+    file: path.join('backups', 'database', result.file),
+    manifest: path.join('backups', 'database', result.file.replace(/\.sql$/, '.json')),
+    size: result.size,
+    sha256: result.sha256
+  };
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runDatabaseBackup().then((result) => console.log(JSON.stringify(result, null, 2))).catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}

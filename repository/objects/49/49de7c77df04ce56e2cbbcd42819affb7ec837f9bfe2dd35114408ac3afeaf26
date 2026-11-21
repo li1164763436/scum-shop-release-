@@ -1,0 +1,12 @@
+import fs from 'node:fs/promises';
+import mysql from 'mysql2/promise';
+
+const config = JSON.parse((await fs.readFile('data/config.json', 'utf8')).replace(/^\uFEFF/, '')).mysql;
+const db = await mysql.createConnection(config);
+try {
+  const [products] = await db.query('SELECT sku,name,item_id AS itemId,parent_category AS parentCategory,category_name AS category,image_path AS imagePath,fulfillment_codes AS fulfillmentCodes FROM products ORDER BY id');
+  const payload = JSON.stringify({ version: '1.0.0', products }, null, 2);
+  await fs.mkdir('data/release-catalog-1.0.0', { recursive: true });
+  await fs.writeFile('data/release-catalog-1.0.0/products.json', payload);
+  console.log(products.length);
+} finally { await db.end(); }

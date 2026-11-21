@@ -1,0 +1,39 @@
+<section class="page active" id="page-store">
+      <section class="hero">
+        <div class="hero-grid" aria-hidden="true"></div>
+        <div class="hero-copy">
+          <p class="overline"><span></span> 幸存者补给网络 / 07 区</p>
+          <h1>活下去，<br><em>别靠运气。</em></h1>
+          <p class="hero-lead">边境物资已经入库。使用商城币下单，补给将通过自动发货系统送达你的游戏角色。</p>
+          <div class="hero-actions">
+            <a class="button primary large" href="#catalog">进入物资仓库</a>
+            <button class="button line guest-only" type="button" data-auth-open="register">验证幸存者身份</button>
+          </div>
+          <div class="hero-stats">
+            <span><strong>24/7</strong><small>自动发放</small></span>
+            <span><strong>安全绑定</strong><small>SteamID 绑定</small></span>
+            <span><strong>游戏内</strong><small>游戏内送达</small></span>
+          </div>
+        </div>
+        <div class="hero-visual" aria-hidden="true">
+          <div class="target-ring ring-one"></div><div class="target-ring ring-two"></div>
+          <div class="crate"><span>补给</span><b>07</b><i>仅限授权人员</i></div>
+          <span class="coordinate north">07 区</span><span class="coordinate east">补给仓</span>
+        </div>
+      </section>
+
+      <section class="catalog" id="catalog">
+        <div class="section-heading">
+          <div><p class="overline"><span></span> 可用库存</p><h2>物资仓库</h2></div>
+          <p>库存由营地管理员维护，已下架物资不会显示。<br>购买前请确保游戏角色 SteamID 绑定正确。</p>
+        </div>
+        <div class="catalog-bar">
+          <span id="productCount">正在同步库存...</span>
+          <div class="catalog-bar-search"><input type="search" id="productSearchInput" data-product-search placeholder="输入物资名称或代码" autocomplete="off"><button class="button primary" id="productSearchButton" type="button">搜索</button></div>
+          <button class="icon-button" id="reloadProducts" type="button" title="刷新商品" aria-label="刷新商品">↻</button>
+        </div>
+        <div class="product-grid" id="productGrid" aria-live="polite">
+          <div class="state-panel loading-state"><span class="loader"></span><strong>正在连接物资网络</strong><small>正在同步库存</small></div>
+        </div>
+      </section>
+    </section>

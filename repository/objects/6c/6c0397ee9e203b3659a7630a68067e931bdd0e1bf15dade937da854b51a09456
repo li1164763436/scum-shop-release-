@@ -1,0 +1,251 @@
+function stockCurrent() {
+  const select = $('#stockSelect'), selectedId = state.selectedStockId;
+  const selected = selectedId === null ? undefined : state.stocks.find((item) => String(item.id) === selectedId);
+  if (selected) {
+    if (select) {
+      Array.from(select.options).forEach((option) => { option.selected = option.value === selectedId; });
+      select.value = selectedId;
+    }
+    return selected;
+  }
+  const domId = select?.value || '', domSelected = domId ? state.stocks.find((item) => String(item.id) === domId) : undefined;
+  if (selectedId === null && !state.stockCreateMode && domSelected) {
+    state.selectedStockId = String(domSelected.id);
+    state.stockCreateMode = false;
+    return domSelected;
+  }
+  return undefined;
+}
+function setStockSelection(value, createMode = !value) {
+  const select = $('#stockSelect'), requestedValue = String(value || '');
+  const selected = !createMode && requestedValue ? state.stocks.find((item) => String(item.id) === requestedValue) : undefined;
+  let selectedId = selected ? String(selected.id) : null, fallback = false;
+  state.selectedStockId = selectedId;
+  state.stockCreateMode = selectedId === null;
+  Array.from(select.options).forEach((option) => { option.selected = option.value === (selectedId || ''); });
+  select.value = selectedId || '';
+  if (selectedId !== null && select.value !== selectedId) {
+    fallback = true;
+    selectedId = null;
+    state.selectedStockId = null;
+    state.stockCreateMode = true;
+    Array.from(select.options).forEach((option) => { option.selected = option.value === ''; });
+    select.value = '';
+  }
+  state.stockSelectionVersion += 1;
+  state.stockHistoryMeta = null;
+}
+function renderStockOperationTarget() { const item=stockCurrent(),target=$('#stockOperationTarget'); if (!target) return; if (!item) { target.textContent='当前编辑标的：新建股票模式'; return; } const meta=state.stockHistoryMeta?.stockId===Number(item.id)?state.stockHistoryMeta:null; target.textContent=`当前编辑标的：#${item.id} · ${item.code} · ${item.name} · 价格版本 v${number(item.priceVersion)} · 价格事件 ${meta?number(meta.count):'读取中'}${meta?.latestPricedAt?` · 最近定价 ${date(meta.latestPricedAt)}`:meta?' · 尚无定价事件':''}`; }
+function renderStockForm() { const item=stockCurrent(),form=$('#stockForm');form.reset();$('#stockDelete').disabled=!item;form.elements.enabled.checked=item?item.enabled:true;form.elements.paused.checked=Boolean(item?.paused);form.elements.currentPrice.readOnly=Boolean(item);if(item) for(const name of ['code','name','description','currentPrice','basePrice','minPrice','periodSeconds','pricingMode','volumeMetric','baselineValue','autoVolumeMax','volumeSensitivityBps','volatilityBps','maxChangeBps','feeBps']) form.elements[name].value=item[name]??'';else{form.elements.pricingMode.value='hybrid';form.elements.volumeMetric.value='quantity';form.elements.baselineValue.value=1;form.elements.autoVolumeMax.value=0;form.elements.volumeSensitivityBps.value=100;} renderStockOperationTarget(); }
+function renderStockInstrumentList(){const host=$('#stockInstrumentList');if(!host)return;host.innerHTML=state.stocks.length?'<table class="stock-instrument-table"><thead><tr><th>序号</th><th>股市代码</th><th>股市名称</th><th>初始价</th><th>当前价</th><th>最低价</th><th>最高价</th><th>操作</th></tr></thead><tbody>'+state.stocks.map((item,index)=>'<tr class="'+(String(item.id)===String(state.selectedStockId)?'active':'')+'"><td>'+(index+1)+'</td><td>'+esc(item.code)+'</td><td>'+esc(item.name)+'</td><td>'+number(item.basePrice)+'</td><td>'+number(item.currentPrice)+'</td><td>'+number(item.minPrice)+'</td><td>'+(item.maxPrice==null?'未设置':number(item.maxPrice))+'</td><td><button type="button" class="btn secondary small" data-stock-edit-id="'+item.id+'">编辑</button> <button type="button" class="btn danger small" data-stock-delete-id="'+item.id+'">删除</button></td></tr>').join('')+'</tbody></table>':'<div class="stock-record-empty">暂无股票标的，请添加标的</div>';}
+function ensureStockInstrumentUi(){const form=$('#stockForm'),head=$('.card-head',form);if(!form||!head)return;if(!$('#stockAddInstrument',head)){const button=document.createElement('button');button.type='button';button.id='stockAddInstrument';button.className='btn primary';button.textContent='添加标的';button.addEventListener('click',openStockAddModal);head.appendChild(button)}if(!$('#stockInstrumentList',form)){const list=document.createElement('div');list.id='stockInstrumentList';list.className='stock-instrument-list';form.insertBefore(list,$('.stock-form-sections',form));list.addEventListener('click',async(event)=>{const edit=event.target.closest('[data-stock-edit-id]'),remove=event.target.closest('[data-stock-delete-id]'),id=edit?.dataset.stockEditId||remove?.dataset.stockDeleteId,item=state.stocks.find(stock=>String(stock.id)===String(id));if(!item)return;if(remove){await deleteStockInstrument(item,remove);return}setStockSelection(String(item.id),false);renderStockForm();renderStockInstrumentList();await loadStockHistory();openStockEditModal(item)})}}
+// 列表编辑、删除操作由事件委托处理
+function stockModalOption(value,current,label){return '<option value="'+value+'"'+(value===current?' selected':'')+'>'+label+'</option>'}
+function stockPercentValue(value){return Number((Number(value||0)/100).toFixed(2))}
+function openStockInstrumentModal(item=null){
+  const editing=Boolean(item),value=(name,fallback='')=>esc(item?.[name]??fallback);
+  const basic='<section class="stock-modal-panel" data-stock-modal-step="basic"><div class="stock-modal-section-title"><strong>基础信息</strong><span>设置股票标识与价格边界</span></div><div class="stock-add-modal-grid stock-modal-basic-grid"><label>股市代码<input name="code" maxlength="16" required value="'+value('code')+'"><small>股票唯一代码，用于前台行情和交易识别</small></label><label>股市名称<input name="name" maxlength="100" required value="'+value('name')+'"><small>前台行情列表中显示的股票名称</small></label><label>初始价<input name="currentPrice" type="number" min="1" required value="'+value('currentPrice')+'" '+(editing?'readonly':'')+'><small>创建时的起始价格，编辑时当前价只读</small></label><label>基准价<input name="basePrice" type="number" min="1" required value="'+value('basePrice')+'"><small>用于大盘指数和价格偏离参考</small></label><label>最低价<input name="minPrice" type="number" min="1" required value="'+value('minPrice')+'"><small>自动定价和人工调价允许的最低价格</small></label><label>最高价<input name="maxPrice" type="number" min="1" required value="'+value('maxPrice')+'"><small>自动定价和人工调价允许的最高价格</small></label><label class="full">说明<textarea name="description" maxlength="2000">'+value('description')+'</textarea><small>用于前台股票详情展示，可填写标的介绍</small></label></div></section>';
+  const mode=item?.pricingMode||'hybrid',metric=item?.volumeMetric||'quantity';
+  const pricing='<section class="stock-modal-panel" data-stock-modal-step="pricing" hidden><div class="stock-modal-section-title"><strong>定价信息</strong><span>设置周期、成交信号和波动限制</span></div><div class="stock-add-modal-grid stock-modal-pricing-grid"><label>定价周期<span class="stock-modal-input-unit"><input name="periodSeconds" type="number" min="1" max="86400" required value="'+value('periodSeconds',60)+'"><b>秒</b></span><small>多久自动计算一次价格</small></label><label>定价方式<select name="pricingMode">'+stockModalOption('volume',mode,'仅按成交量')+stockModalOption('hybrid',mode,'成交量 + 随机波动')+stockModalOption('manual',mode,'仅允许人工调价')+'</select><small>选择自动价格的计算方式</small></label><label>成交量统计方式<select name="volumeMetric">'+stockModalOption('quantity',metric,'按成交件数')+stockModalOption('amount',metric,'按成交金额')+'</select><small>成交信号按件数或金额统计</small></label><label>正常成交基准<span class="stock-modal-input-unit"><input name="baselineValue" type="number" min="1" required value="'+value('baselineValue',1)+'"><b id="stockBaselineUnit">件</b></span><small>正常周期的成交参考值</small></label><label>自动成交量上限<span class="stock-modal-input-unit"><input name="autoVolumeMax" type="number" min="0" max="1000000" required value="'+value('autoVolumeMax',0)+'"><b>件</b></span><small>每周期生成模拟买卖成交量，方向随机，不固定推动上涨</small></label><label>成交影响上限<span class="stock-modal-input-unit"><input name="volumeSensitivityBps" type="number" min="0" max="100" step="0.01" required value="'+stockPercentValue(item?.volumeSensitivityBps??100)+'"><b>%</b></span><small>真实成交和自动成交的单项最大影响，例如 1 表示最多 1%</small></label><label>随机波动上限<span class="stock-modal-input-unit"><input name="volatilityBps" type="number" min="0" max="100" step="0.01" required value="'+stockPercentValue(item?.volatilityBps??0)+'"><b>%</b></span><small>填 0% 表示关闭随机波动</small></label><label>单次最大涨跌<span class="stock-modal-input-unit"><input name="maxChangeBps" type="number" min="0" max="100" step="0.01" required value="'+stockPercentValue(item?.maxChangeBps??100)+'"><b>%</b></span><small>限制单次价格变化范围</small></label><label>手续费<span class="stock-modal-input-unit"><input name="feeBps" type="number" min="0" max="100" step="0.01" required value="'+stockPercentValue(item?.feeBps??300)+'"><b>%</b></span><small>交易手续费，直接填写百分比，例如 1 表示 1%</small></label></div></section>';
+  openModal({title:editing?'编辑股票标的':'添加股票标的',description:editing?item.code+' · '+item.name:'填写基础信息后，请切换至定价信息完成设置并保存。',body:'<div class="stock-modal-steps"><button class="active" type="button" data-stock-step-indicator="basic">基础信息</button><button type="button" data-stock-step-indicator="pricing">定价信息</button><p class="stock-modal-nav-help">先填写基础信息，再点击“定价信息”配置参数；保存按钮位于定价信息页面底部，统一保存两页内容。</p></div>'+basic+pricing,submitText:editing?'保存标的':'添加标的',onSubmit:async(form)=>{const values=Object.fromEntries(new FormData(form)),data={code:values.code,name:values.name,description:values.description,basePrice:Number(values.basePrice),minPrice:Number(values.minPrice),maxPrice:Number(values.maxPrice),periodSeconds:Number(values.periodSeconds),pricingMode:values.pricingMode,volumeMetric:values.volumeMetric,baselineValue:Number(values.baselineValue),autoVolumeMax:Number(values.autoVolumeMax),volumeSensitivityBps:Math.round(Number(values.volumeSensitivityBps)*100),volatilityBps:Math.round(Number(values.volatilityBps)*100),maxChangeBps:Math.round(Number(values.maxChangeBps)*100),feeBps:Math.round(Number(values.feeBps)*100),enabled:$('#stockModalEnabled').checked,paused:$('#stockModalPaused').checked};if(!editing)data.currentPrice=Number(values.currentPrice);const saved=await api(editing?'/api/stocks/'+item.id:'/api/stocks',{method:editing?'PUT':'POST',body:JSON.stringify(data)});toast(editing?'股票标的已更新':'股票标的已添加');closeModal();await loadStockMarket(saved.id)}});
+  const showStep=step=>{$$('[data-stock-modal-step]',$('#modalForm')).forEach(panel=>{panel.hidden=panel.dataset.stockModalStep!==step});$$('[data-stock-step-indicator]',$('#modalForm')).forEach(node=>node.classList.toggle('active',node.dataset.stockStepIndicator===step));$('#submitModal').hidden=step!=='pricing'};
+  const goToPricing=()=>{const panel=$('[data-stock-modal-step="basic"]',$('#modalForm')),invalid=$$('input,select,textarea',panel).find(control=>!control.checkValidity());if(invalid){invalid.reportValidity();return}showStep('pricing')};$$('[data-stock-step-indicator]',$('#modalForm')).forEach(button=>button.addEventListener('click',()=>button.dataset.stockStepIndicator==='pricing'?goToPricing():showStep('basic')));showStep('basic');$('#modalBackdrop').classList.add('centered-modal','stock-instrument-modal');const head=$('#modalTitle').closest('.modal-head'),tools=document.createElement('div');tools.className='stock-modal-title-tools';tools.innerHTML='<label class="switch"><input id="stockModalEnabled" type="checkbox" '+(item?.enabled!==false?'checked':'')+'><span></span>启用交易</label><label class="switch"><input id="stockModalPaused" type="checkbox" '+(item?.paused?'checked':'')+'><span></span>暂停交易</label>';head.insertBefore(tools,$('#closeModal'));const metricSelect=$('#modalForm').elements.volumeMetric,updateBaselineUnit=()=>{$('#stockBaselineUnit').textContent=metricSelect.value==='amount'?'商城币':'件'};metricSelect.addEventListener('change',updateBaselineUnit);updateBaselineUnit();
+}
+function openStockAddModal(){openStockInstrumentModal(null)}
+function openStockEditModal(item){openStockInstrumentModal(item)}
+async function deleteStockInstrument(item,button){if(!item||!window.confirm('确认删除股票“'+item.code+' · '+item.name+'”？所有相关交易、持仓和价格记录将被永久删除，且无法恢复。'))return;await withBusy(button,async()=>{await api('/api/stocks/'+encodeURIComponent(item.id),{method:'DELETE'});setStockSelection(null,true);toast('股票已永久删除');await loadStockMarket('')})}
+function updateStockBindingFields(){const form=$('#stockBindingForm'),product=form.elements.bindingType.value==='product';$$('[data-stock-binding-product]',form).forEach((label)=>{label.hidden=!product;});$$('[data-stock-binding-category]',form).forEach((label)=>{label.hidden=product;});}
+function resetStockBindingForm(){const form=$('#stockBindingForm');form.reset();form.elements.bindingId.value='';form.elements.weightBps.value=10000;updateStockBindingFields();}
+function editStockBinding(id){const item=state.stockBindings.find((binding)=>Number(binding.id)===Number(id));if(!item)return;const f=$('#stockBindingForm').elements;for(const name of ['bindingId','bindingType','productId','productSku','parentCategory','categoryName','weightBps'])f[name].value=item[name]??'';updateStockBindingFields();}
+function resetStockAnnouncementForm(){const form=$('#stockAnnouncementForm');form.reset();form.elements.announcementId.value='';form.elements.enabled.checked=true;}
+function ensureStockAnnouncementUi(){const form=$('#stockAnnouncementForm'),head=$('.card-head',form);if(!form||!head||$('#stockAnnouncementCreate',head))return;const button=document.createElement('button');button.type='button';button.id='stockAnnouncementCreate';button.className='btn primary';button.textContent='新建公告';button.addEventListener('click',()=>openStockAnnouncementModal());head.appendChild(button)}
+function openStockAnnouncementModal(item=null){const editing=Boolean(item),value=(name,fallback='')=>esc(item?.[name]??fallback),startText=editing?date(item.startsAt||item.createdAt):'保存公告时自动生成';openModal({title:editing?'编辑市场公告':'新建市场公告',description:editing?'修改公告内容和结束时间。':'开始时间将在创建公告时自动生成。',body:'<div class="stock-announcement-modal-form"><div class="stock-announcement-time-note"><span>发布时间</span><strong>'+esc(startText)+'</strong></div><label>公告名称<input name="title" maxlength="150" required value="'+value('title')+'"></label><label>结束时间<input name="endsAt" type="datetime-local" value="'+(editing?esc(localInput(item.endsAt)):'')+'"></label><label class="full">公告内容<textarea name="content" required>'+value('content')+'</textarea></label></div>',submitText:editing?'保存公告':'创建公告',onSubmit:async(form)=>{const f=form.elements,data={title:f.title.value,content:f.content.value,enabled:$('#stockAnnouncementModalEnabled').checked,endsAt:f.endsAt.value||null};if(editing)data.startsAt=item.startsAt||item.createdAt||null;await api(editing?'/api/stock-market-announcements/'+item.id:'/api/stock-market-announcements',{method:editing?'PUT':'POST',body:JSON.stringify(data)});toast(editing?'市场公告已更新':'市场公告已创建');closeModal();await loadStockMarket()}});$('#modalBackdrop').classList.add('centered-modal','stock-announcement-modal');const head=$('#modalTitle').closest('.modal-head'),tools=document.createElement('div');tools.className='stock-announcement-title-tools';tools.innerHTML='<label class="switch"><input id="stockAnnouncementModalEnabled" type="checkbox" '+(item?.enabled!==false?'checked':'')+'><span></span>启用公告</label>';head.insertBefore(tools,$('#closeModal'))}
+function editStockAnnouncement(id){const item=state.stockAnnouncements.find((announcement)=>Number(announcement.id)===Number(id));if(item)openStockAnnouncementModal(item);}
+function normalizeStockCode(value) { return String(value || '').trim().toUpperCase(); }
+function showStockInterfaceWarning(error) {
+  if (error?.status !== 404) return false;
+  const notice = $('#stockInterfaceNotice');
+  notice.hidden = false;
+  notice.textContent = '部分股市接口未加载，请重启服务后刷新页面。核心股票列表和已保存内容不受影响。';
+  return true;
+}
+function fillStockMarketConfig(config) {
+  const market = config?.stockMarket;
+  if (!market) return;
+  state.config = config;
+  const hoursForm = $('#stockMarketHoursForm'), hours = hoursForm.elements;
+  const tradingDays = new Set((market.tradingDays || []).map(Number));
+  hours.enabled.checked = market.enabled !== false;
+  $$('input[name="tradingDays"]', hoursForm).forEach((input) => { input.checked = tradingDays.has(Number(input.value)); });
+  hours.openTime.value = market.openTime || '';
+  hours.closeTime.value = market.closeTime || '';
+}
+function renderStockMarketStatus(status) {
+  $('#stockAdminMarketStatus').textContent = status?.isOpen ? '当前开市' : `当前闭市${status?.nextOpenAt ? ` · ${date(status.nextOpenAt)} 开市` : ''}`;
+}
+async function loadStockMarketSettings() {
+  const [status, config] = await Promise.allSettled([api('/api/stocks/market-status'), api('/api/config')]);
+  if (status.status === 'fulfilled') renderStockMarketStatus(status.value);
+  else if (!showStockInterfaceWarning(status.reason)) $('#stockAdminMarketStatus').textContent = `状态读取失败：${status.reason.message}`;
+  if (config.status === 'fulfilled') fillStockMarketConfig(config.value);
+  else showStockInterfaceWarning(config.reason);
+}
+
+function renderStockPriceHistory() {
+  const pageCount = Math.max(1, Math.ceil(state.stockPriceHistory.length / state.stockPricePageSize));
+  state.stockPricePage = Math.min(Math.max(1, state.stockPricePage), pageCount);
+  const start = (state.stockPricePage - 1) * state.stockPricePageSize;
+  const history = state.stockPriceHistory.slice(start, start + state.stockPricePageSize);
+  if ($('#stockPricePageInfo')) $('#stockPricePageInfo').textContent = `第 ${state.stockPricePage} / ${pageCount} 页`;
+  if ($('#stockPricePrev')) $('#stockPricePrev').disabled = state.stockPricePage <= 1;
+  if ($('#stockPriceNext')) $('#stockPriceNext').disabled = state.stockPricePage >= pageCount;
+  if ($('#stockPriceRows')) $('#stockPriceRows').innerHTML = history.length ? history.map((row) => `<tr><td>${row.source === 'manual' ? '人工' : '自动'}</td><td>${number(row.priceBefore)}</td><td>${number(row.priceAfter)}</td><td>${number(row.volumeQuantity)} / ${number(row.volumeAmount)}</td><td>真实 ${(Number(row.volumeChangeBps||0)/100).toFixed(2)}% · 自动 ${(Number(row.simulatedVolumeChangeBps||0)/100).toFixed(2)}% · 随机 ${(Number(row.randomChangeBps||0)/100).toFixed(2)}%</td><td>${esc(row.actorUsername || '—')} / ${esc(row.reason || '—')}</td><td>${date(row.pricedAt)}</td></tr>`).join('') : empty(7, stockCurrent() ? '暂无价格事件' : '请在股票标的下拉框中选择已有股票');
+}
+async function loadStockHistory() {
+  const item = stockCurrent(), selectionVersion = state.stockSelectionVersion, stockId = item?.id;
+  state.stockPriceHistory = [];
+  state.stockPricePage = 1;
+  if ($('#stockPriceRows')) $('#stockPriceRows').innerHTML = item ? empty(7, '正在加载...', true) : empty(7, '请在股票标的下拉框中选择已有股票');
+  if ($('#stockPricePageInfo')) $('#stockPricePageInfo').textContent = '第 1 / 1 页';
+  if ($('#stockPricePrev')) $('#stockPricePrev').disabled = true;
+  if ($('#stockPriceNext')) $('#stockPriceNext').disabled = true;
+  if ($('#stockBindingRows')) $('#stockBindingRows').innerHTML = item ? '<div class="stock-record-empty">正在加载...</div>' : '<div class="stock-record-empty">请在股票标的下拉框中选择已有股票</div>';
+  state.stockBindings = [];
+  state.stockHistoryMeta = null;
+  const manualPriceForm = $('#stockManualPriceForm');
+  if (manualPriceForm) manualPriceForm.reset();
+  resetStockBindingForm();
+  renderStockOperationTarget();
+  if (!item) return;
+  const [rows, bindings] = await Promise.allSettled([api(`/api/stocks/${item.id}/prices?limit=50`), api(`/api/stocks/${item.id}/bindings`)]);
+  if (selectionVersion !== state.stockSelectionVersion || Number(stockCurrent()?.id) !== Number(stockId)) return;
+  if (rows.status === 'fulfilled') {
+    const history = list(rows.value);
+    state.stockPriceHistory = history;
+    state.stockHistoryMeta = { stockId: Number(stockId), count: history.length, latestPricedAt: history[0]?.pricedAt || null };
+    renderStockPriceHistory();
+    renderStockOperationTarget();
+  } else {
+    state.stockPriceHistory = [];
+    renderStockPriceHistory();
+    if ($('#stockPriceRows')) $('#stockPriceRows').innerHTML = empty(7, showStockInterfaceWarning(rows.reason) ? '接口未加载，请重启服务' : rows.reason.message);
+  }
+  if (bindings.status === 'fulfilled') {
+    state.stockBindings = list(bindings.value);
+    if ($('#stockBindingRows')) $('#stockBindingRows').innerHTML = state.stockBindings.map((row) => `<div class="stock-record-item"><div><strong>${row.bindingType === 'product' ? '商品绑定' : '分类绑定'}</strong><span>${esc(row.productSku || row.productId || `${row.parentCategory || ''}/${row.categoryName || ''}`)}</span><small>权重 ${number(row.weightBps)} 基点</small></div><div class="stock-record-actions"><button type="button" class="btn secondary" data-edit-stock-binding="${row.id}">编辑</button><button type="button" class="btn danger" data-delete-stock-binding="${row.id}">删除</button></div></div>`).join('') || '<div class="stock-record-empty">暂无绑定</div>';
+  } else if ($('#stockBindingRows')) $('#stockBindingRows').innerHTML = `<div class="stock-record-empty">${esc(showStockInterfaceWarning(bindings.reason) ? '接口未加载，请重启服务' : bindings.reason.message)}</div>`;
+}
+async function loadStockMarket(preferredStockId) {
+  const selectionVersion = state.stockSelectionVersion;
+  const selectedBefore = preferredStockId === undefined ? state.selectedStockId : String(preferredStockId || '') || null;
+  const createModeBefore = preferredStockId === undefined ? state.stockCreateMode : !selectedBefore;
+  $('#stockInterfaceNotice').hidden = true;
+  const stocks = await api('/api/stocks');
+  const selectionChanged = selectionVersion !== state.stockSelectionVersion;
+  const selectedTarget = selectionChanged ? state.selectedStockId : selectedBefore;
+  const createModeTarget = selectionChanged ? state.stockCreateMode : createModeBefore;
+  state.stocks = list(stocks);
+  const selectedExists = selectedTarget !== null && state.stocks.some((item) => String(item.id) === selectedTarget);
+  const selectedId = selectedExists ? selectedTarget : (!createModeTarget && state.stocks.length ? String(state.stocks[0].id) : null);
+  const select = $('#stockSelect');
+  if (!select) return;
+  select.innerHTML = `<option value=""${selectedId === null ? ' selected' : ''}>新建股票</option>` + state.stocks.map((item) => `<option value="${item.id}"${String(item.id) === selectedId ? ' selected' : ''}>${esc(item.code)} · ${esc(item.name)}</option>`).join('');
+  setStockSelection(selectedId, selectedId === null);
+  ensureStockInstrumentUi();
+  renderStockForm();
+  renderStockInstrumentList();
+  if ($('#stockSummaryGrid')) $('#stockSummaryGrid').innerHTML = `<article><span>标的总数</span><strong>${number(state.stocks.length)}</strong></article><article><span>启用交易</span><strong>${number(state.stocks.filter((item) => item.enabled && !item.paused).length)}</strong></article><article><span>暂停标的</span><strong>${number(state.stocks.filter((item) => item.paused).length)}</strong></article>`;
+  const [trades, announcements] = await Promise.allSettled([api('/api/stock-trades?limit=50'), api('/api/stock-market-announcements'), loadStockMarketSettings(), loadStockHistory()]);
+  if ($('#stockTradeRows')) {
+  if (trades.status === 'fulfilled') {
+    state.stockTrades = list(trades.value);
+    $('#stockTradeRows').innerHTML = state.stockTrades.length ? state.stockTrades.map((item) => `<tr><td>${esc(item.steamId)}</td><td>${esc(item.code)}</td><td>${item.direction === 'buy' ? '买入' : '卖出'}</td><td>${number(item.quantity)}</td><td>${number(item.price)}</td><td>${number(item.fee)}</td><td>${number(item.netAmount)}</td></tr>`).join('') : empty(7, '暂无交易记录');
+  } else $('#stockTradeRows').innerHTML = empty(7, showStockInterfaceWarning(trades.reason) ? '接口未加载，请重启服务' : trades.reason.message);
+  }
+  if (announcements.status === 'fulfilled') {
+    state.stockAnnouncements = list(announcements.value);
+    ensureStockAnnouncementUi();
+    $('#stockAnnouncementRows').innerHTML = state.stockAnnouncements.length ? '<div class="stock-announcement-table-wrap"><table class="stock-announcement-table"><thead><tr><th>序号</th><th>公告名称</th><th>公告内容</th><th>发布时间</th><th>结束时间</th><th>操作</th></tr></thead><tbody>'+state.stockAnnouncements.map((item,index)=>{const preview=String(item.content||'').replace(/\s+/g,' ').slice(0,10)+(String(item.content||'').length>10?'…':'');return '<tr><td>'+(index+1)+'</td><td>'+esc(item.title)+'</td><td title="'+esc(item.content||'')+'">'+esc(preview)+'</td><td>'+date(item.startsAt||item.createdAt)+'</td><td>'+date(item.endsAt)+'</td><td><button type="button" class="btn secondary small" data-edit-stock-announcement="'+item.id+'">编辑</button> <button type="button" class="btn danger small" data-delete-stock-announcement="'+item.id+'">删除</button></td></tr>'}).join('')+'</tbody></table></div>' : '<div class="stock-record-empty">暂无公告</div>';
+    resetStockAnnouncementForm();
+  } else $('#stockAnnouncementRows').innerHTML = `<div class="stock-record-empty">${esc(showStockInterfaceWarning(announcements.reason) ? '接口未加载，请重启服务' : announcements.reason.message)}</div>`;
+  return stockCurrent();
+}
+
+$('#stockForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  await withBusy(event.submitter, async () => {
+    const form = event.currentTarget, item = stockCurrent(), id = item?.id ? String(item.id) : '', data = Object.fromEntries(new FormData(form));
+    const submittedCode = normalizeStockCode(data.code);
+    for (const name of ['currentPrice', 'basePrice', 'minPrice', 'periodSeconds', 'baselineValue', 'autoVolumeMax', 'volumeSensitivityBps', 'volatilityBps', 'maxChangeBps', 'feeBps']) data[name] = Number(data[name]);
+    if (id) delete data.currentPrice;
+    data.enabled = form.elements.enabled.checked;
+    data.paused = form.elements.paused.checked;
+    try {
+      const saved = await api(id ? `/api/stocks/${id}` : '/api/stocks', { method: id ? 'PUT' : 'POST', body: JSON.stringify(data) });
+      await loadStockMarket(saved.id);
+      toast('股票标的已保存');
+    } catch (error) {
+      if (!id && error.status === 409 && error.code === 'DUPLICATE_CODE') {
+        const stocks = list(await api('/api/stocks'));
+        state.stocks = stocks;
+        const existing = stocks.find((item) => normalizeStockCode(item.code) === submittedCode);
+        if (existing) {
+          await loadStockMarket(existing.id);
+          toast('该代码已存在，已切换到现有股票');
+          return;
+        }
+      }
+      throw error;
+    }
+  });
+});
+
+$('#stockSelect').addEventListener('change', async (event) => { setStockSelection(event.currentTarget.value, !event.currentTarget.value); renderStockForm(); await loadStockHistory(); });
+
+$('#stockDelete').addEventListener('click', async (event) => {
+  const item = stockCurrent();
+  if (!item || !window.confirm(`确认删除股票“${item.code} · ${item.name}”？所有相关交易、持仓和价格记录将被永久删除，且无法恢复。`)) return;
+  await withBusy(event.currentTarget, async () => {
+    await api(`/api/stocks/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+    setStockSelection(null, true);
+    toast('股票已永久删除');
+    await loadStockMarket('');
+  });
+});
+
+$('#stockReload').addEventListener('click', (event) => withBusy(event.currentTarget, loadStockMarket));
+
+$('#stockMarketHoursForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget, tradingDays = $$('input[name="tradingDays"]', form).filter((input) => input.checked).map((input) => Number(input.value));
+  if (!tradingDays.length) { toast('请至少选择一个交易日', true); return; }
+  await withBusy(event.submitter, async () => {
+    const f = form.elements;
+    const saved = await api('/api/config', { method: 'PUT', body: JSON.stringify({ stockMarket: { enabled: f.enabled.checked, tradingDays, openTime: f.openTime.value, closeTime: f.closeTime.value } }) });
+    fillStockMarketConfig(saved || state.config);
+    await loadStockMarketSettings();
+    toast('市场交易时段已保存');
+  });
+});
+
+$('#stockManualPriceForm').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget,item=stockCurrent();if(!item){toast('请先在股票标的下拉框中选择已有股票',true);return;}await withBusy(event.submitter,async()=>{const f=form.elements;await api(`/api/stocks/${item.id}/manual-price`,{method:'POST',headers:{'Idempotency-Key':uuid()},body:JSON.stringify({newPrice:Number(f.newPrice.value),reason:f.reason.value})});form.reset();toast('人工调价已记录');await loadStockMarket(item.id);});});
+
+$('#stockBindingForm').addEventListener('submit',async(event)=>{event.preventDefault();const item=stockCurrent();if(!item){toast('请先在股票标的下拉框中选择已有股票',true);return;}await withBusy(event.submitter,async()=>{const f=event.currentTarget.elements,id=f.bindingId.value,type=f.bindingType.value;if(type==='product'&&!f.productId.value&&!f.productSku.value.trim()){toast('商品绑定至少填写商品 ID 或 SKU',true);return;}if(type==='category'&&!f.parentCategory.value.trim()&&!f.categoryName.value.trim()){toast('分类绑定至少填写父分类或分类',true);return;}await api(id?`/api/stocks/${item.id}/bindings/${id}`:`/api/stocks/${item.id}/bindings`,{method:id?'PUT':'POST',body:JSON.stringify({bindingType:type,productId:f.productId.value?Number(f.productId.value):null,productSku:f.productSku.value,parentCategory:f.parentCategory.value,categoryName:f.categoryName.value,weightBps:Number(f.weightBps.value),enabled:true})});resetStockBindingForm();await loadStockMarket(item.id);});});
+
+$('#stockBindingForm').elements.bindingType.addEventListener('change',updateStockBindingFields);
+
+$('#stockBindingReset').addEventListener('click',resetStockBindingForm);
+
+$('#stockBindingRows').addEventListener('click',async(event)=>{const edit=event.target.closest('[data-edit-stock-binding]'),button=event.target.closest('[data-delete-stock-binding]'),item=stockCurrent();if(edit){editStockBinding(edit.dataset.editStockBinding);return;}if(!button||!item)return;await api(`/api/stocks/${item.id}/bindings/${button.dataset.deleteStockBinding}`,{method:'DELETE'});await loadStockHistory();});
+
+$('#stockAnnouncementForm').addEventListener('submit',async(event)=>{event.preventDefault();await withBusy(event.submitter,async()=>{const f=event.currentTarget.elements,id=f.announcementId.value;await api(id?`/api/stock-market-announcements/${id}`:'/api/stock-market-announcements',{method:id?'PUT':'POST',body:JSON.stringify({title:f.title.value,content:f.content.value,enabled:f.enabled.checked,startsAt:f.startsAt.value||null,endsAt:f.endsAt.value||null})});toast(id?'市场公告已更新':'市场公告已创建');await loadStockMarket();});});
+
+$('#stockAnnouncementReset').addEventListener('click',resetStockAnnouncementForm);
+
+$('#stockAnnouncementRows').addEventListener('click',async(event)=>{const edit=event.target.closest('[data-edit-stock-announcement]'),remove=event.target.closest('[data-delete-stock-announcement]');if(edit){editStockAnnouncement(edit.dataset.editStockAnnouncement);return;}if(!remove)return;const item=state.stockAnnouncements.find(row=>Number(row.id)===Number(remove.dataset.deleteStockAnnouncement));if(!item||!window.confirm('确认删除公告“'+item.title+'”？'))return;await withBusy(remove,async()=>{await api('/api/stock-market-announcements/'+encodeURIComponent(item.id),{method:'DELETE'});toast('市场公告已删除');await loadStockMarket()})});
+
+
+
+
+$('#stockPricePrev')?.addEventListener('click', () => { state.stockPricePage -= 1; renderStockPriceHistory(); });
+$('#stockPriceNext')?.addEventListener('click', () => { state.stockPricePage += 1; renderStockPriceHistory(); });

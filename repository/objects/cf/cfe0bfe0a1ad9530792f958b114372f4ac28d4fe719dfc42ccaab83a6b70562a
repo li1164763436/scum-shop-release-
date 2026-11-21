@@ -1,0 +1,51 @@
+import crypto from 'node:crypto';
+import { ServiceError } from './commerce-service.js';
+import { normalizeFulfillmentCodes, productDelivery, splitItemDelivery } from './commerce-service.js';
+
+const SOURCES = new Set(['checkin_reward', 'online_reward']);
+function parseJson(value) { if (!value) return {}; if (typeof value === 'object') return value; try { return JSON.parse(value); } catch { return {}; } }
+function orderNo() { return `RWD${Date.now()}${crypto.randomBytes(8).toString('hex').toUpperCase()}`; }
+
+export class RewardOrderService {
+  async createProducts({ tx, steamId, products, claimKey, source }) {
+    if (!Array.isArray(products) || !products.length) throw new ServiceError('奖励商品不能为空');
+    if (!SOURCES.has(source)) throw new ServiceError('奖励订单来源无效');
+    const number = orderNo();
+    const order = await tx.query("INSERT INTO orders (order_no,source,external_order_id,steam_id,total_amount,status) VALUES (?,?,?,?,0,'pending')", [number, source, claimKey, String(steamId)]);
+    for (const product of products) await this.appendProduct({ tx, orderId: order.insertId, steamId, product, quantity: product.quantity });
+    return { id: order.insertId, orderNo: number, status: 'pending', totalAmount: 0 };
+  }
+
+  async appendProduct({ tx, orderId, steamId, product, quantity }) {
+    const codes = normalizeFulfillmentCodes(product.fulfillmentCodes || product.itemId);
+    const detail = await tx.query('INSERT INTO order_items (order_id,product_id,sku,name,unit_price,quantity,item_id,grant_amount,currency_type,min_member_level,fulfillment_codes_snapshot) VALUES (?,?,?,?,0,?,?,?, ?,0,?)', [orderId, product.id, product.sku, product.name, quantity, product.itemId, product.grantAmount, product.currencyType || 'coin', codes.join(',')]);
+    let codeIndex = 0;
+    for (const code of codes) for (const delivery of splitItemDelivery(productDelivery(code, Number(product.grantAmount || 1) * quantity))) {
+      await tx.query("INSERT INTO fulfillment_tasks (order_id,order_item_id,code_index,steam_id,task_type,payload_json,item_id,amount,status) VALUES (?,?,?,?,?,?,?,?, 'pending')", [orderId, detail.insertId, codeIndex++, String(steamId), 'spawn_item', delivery.payload ? JSON.stringify(delivery.payload) : null, delivery.itemId, delivery.amount]);
+    }
+  }
+
+  async createProduct({ tx, steamId, product, quantity = 1, claimKey, source }) {
+    if (!tx?.query) throw new TypeError('tx 必填');
+    if (!SOURCES.has(source)) throw new ServiceError('奖励订单来源无效');
+    return this.createProducts({ tx, steamId, products: [{ ...product, quantity }], claimKey, source });
+  }
+  async create({ tx, steamId, giftId, claimKey, source, giftActions = null }) {
+    if (!tx?.query) throw new TypeError('tx 必填');
+    if (!SOURCES.has(source)) throw new ServiceError('奖励订单来源无效');
+    const actions = giftActions || await tx.query('SELECT action_index AS actionIndex,action_type AS actionType,product_id AS productId,item_id AS itemId,quantity,options_json AS optionsJson,coin_amount AS coinAmount FROM gift_actions WHERE gift_id=? ORDER BY action_index ASC FOR UPDATE', [giftId]);
+    if (!actions.length) throw new ServiceError('奖励礼包没有可执行动作', 409, 'GIFT_EMPTY');
+    if (actions.some((action) => !['spawn_item', 'shop_coin'].includes(action.actionType))) throw new ServiceError('奖励礼包包含不支持的动作', 409, 'GIFT_ACTION_UNSUPPORTED');
+    await tx.query('INSERT INTO \`商城用户\` (\`SteamID\`,\`商城币余额\`) VALUES (?,0) ON DUPLICATE KEY UPDATE \`SteamID\`=VALUES(\`SteamID\`)', [String(steamId)]);
+    const number = orderNo();
+    const order = await tx.query("INSERT INTO orders (order_no,source,external_order_id,steam_id,gift_id,total_amount,status) VALUES (?,?,?,?,?,0,'pending')", [number, source, claimKey, String(steamId), giftId]);
+    for (const action of actions) {
+      const quantity = action.actionType === 'shop_coin' ? 1 : Number(action.quantity);
+      const name = action.actionType === 'shop_coin' ? `商城币奖励 ${action.coinAmount}` : `物品 ${action.itemId}`;
+      const detail = await tx.query('INSERT INTO order_items (order_id,product_id,sku,name,unit_price,quantity,item_id,grant_amount,currency_type,min_member_level,fulfillment_codes_snapshot) VALUES (?,?,?,?,0,?,?,?,?,0,NULL)', [order.insertId, action.productId || null, `REWARD-${giftId}-${action.actionIndex}`, name, quantity, action.itemId, action.actionType === 'spawn_item' ? quantity : null, action.actionType === 'shop_coin' ? 'coin' : 'gift']);
+      const payload = action.actionType === 'spawn_item' ? { itemId: action.itemId, quantity, ...parseJson(action.optionsJson) } : null;
+      await tx.query("INSERT INTO fulfillment_tasks (order_id,order_item_id,code_index,steam_id,task_type,payload_json,coin_amount,item_id,amount,status) VALUES (?,?,?,?,?,?,?,?,?,'pending')", [order.insertId, detail.insertId, action.actionIndex, String(steamId), action.actionType, payload ? JSON.stringify(payload) : null, action.coinAmount, action.itemId, action.actionType === 'spawn_item' ? quantity : null]);
+    }
+    return { id: order.insertId, orderNo: number, status: 'pending', totalAmount: 0 };
+  }
+}

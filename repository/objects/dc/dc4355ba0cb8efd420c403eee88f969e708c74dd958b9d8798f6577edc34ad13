@@ -1,0 +1,80 @@
+import crypto from 'node:crypto';
+import { safeMessage } from '../utils/redactor.js';
+
+const ANSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const SENSITIVE_PATTERN = /(?:password|passwd|token|secret|authorization|api[-_ ]?key)\s*[:=]\s*\S+/gi;
+
+function publicProbe(row, now = Date.now(), ttlMs = 24 * 60 * 60 * 1000, endpointIdentifier = null) {
+  if (!row) return { available: false, stale: true, endpointMatches: false, mode: null, probedAt: null, capabilities: { kick: false, banPermanent: false, unban: false, banTemporary: false }, errorCode: 'NOT_PROBED', errorMessage: '尚未探测玩家管理能力' };
+  const probedAt = row.probedAt || row.probed_at;
+  const sourceTcp = row.mode === 'source-tcp';
+  const capabilities = {
+    kick: sourceTcp && Boolean(row.kickSupported ?? row.kick_supported),
+    banPermanent: sourceTcp && Boolean(row.banSupported ?? row.ban_supported),
+    unban: sourceTcp && Boolean(row.unbanSupported ?? row.unban_supported),
+    banTemporary: sourceTcp && Boolean((row.banSupported ?? row.ban_supported) && (row.unbanSupported ?? row.unban_supported))
+  };
+  const stale = !probedAt || now - new Date(probedAt).getTime() > ttlMs;
+  const storedEndpoint = row.endpointIdentifier ?? row.endpoint_identifier ?? null;
+  const endpointMatches = Boolean(endpointIdentifier && storedEndpoint && endpointIdentifier === storedEndpoint);
+  const storedErrorCode = row.errorCode ?? row.error_code ?? null;
+  const errorCode = sourceTcp ? storedErrorCode : 'PROBE_UNSUPPORTED_MODE';
+  const errorMessage = sourceTcp ? (row.errorMessage ?? row.error_message ?? (!endpointMatches ? 'RCON endpoint 已变化，需要重新探测' : null)) : '当前连接模式不支持玩家管理';
+  return { id: Number(row.id), mode: row.mode, probedAt, stale, endpointMatches, available: sourceTcp && !stale && endpointMatches && !errorCode, capabilities, responseSummary: sourceTcp ? (row.responseSummary ?? row.response_summary ?? null) : null, errorCode: errorCode || (!endpointMatches ? 'ENDPOINT_CHANGED' : null), errorMessage };
+}
+
+export function summarizeCapabilityResponse(response) {
+  return String(response ?? '').replace(ANSI_PATTERN, '').replace(SENSITIVE_PATTERN, '$1=[REDACTED]').replace(/[\u0000-\u001f]+/g, ' ').trim().slice(0, 500);
+}
+
+export function parsePlayerAdminCapabilities(response) {
+  const text = summarizeCapabilityResponse(response);
+  const tokens = new Set([...text.matchAll(/(?:^|[^A-Za-z0-9_])#?([A-Za-z][A-Za-z0-9_]*)(?=$|[^A-Za-z0-9_])/g)].map((match) => match[1].toLowerCase()));
+  const kick = tokens.has('kick');
+  const banPermanent = tokens.has('ban');
+  const unban = tokens.has('unban');
+  return { known: kick || banPermanent || unban, kick, banPermanent, unban, banTemporary: banPermanent && unban };
+}
+
+export function playerAdminEndpointIdentifier(config = {}) {
+  const rcon = config.ggcon || config;
+  if (rcon.mode === 'source-tcp') return `source-tcp://${String(rcon.host || '').toLowerCase()}:${Number(rcon.port) || 0}`;
+  if (rcon.mode === 'http-legacy') { try { const url = new URL(rcon.baseUrl); return `http-legacy://${url.host}${url.pathname.replace(/\/+$/, '')}`; } catch { return 'http-legacy://invalid'; } }
+  return `${rcon.mode || 'unknown'}://unsupported`;
+}
+
+export class PlayerAdminCapabilityService {
+  constructor({ db, clients, clock = () => Date.now(), ttlMs = 24 * 60 * 60 * 1000 }) { this.db = db; this.clients = clients; this.clock = clock; this.ttlMs = ttlMs; }
+
+  async latest(query = this.db) {
+    const { config } = await this.clients();
+    const endpointIdentifier = playerAdminEndpointIdentifier(config);
+    const rows = await query.query('SELECT id,mode,endpoint_identifier AS endpointIdentifier,probed_at AS probedAt,response_summary AS responseSummary,kick_supported AS kickSupported,ban_supported AS banSupported,unban_supported AS unbanSupported,error_code AS errorCode,error_message AS errorMessage FROM player_admin_capability_probes ORDER BY id DESC LIMIT 1');
+    return publicProbe(rows[0], this.clock(), this.ttlMs, endpointIdentifier);
+  }
+
+  async probe() {
+    let mode = 'unknown'; let endpointIdentifier = 'unknown://unsupported'; let summary = null; let parsed = { known: false, kick: false, banPermanent: false, unban: false, banTemporary: false }; let errorCode = null; let errorMessage = null; let responseHash = null;
+    try {
+      const { config, ggcon } = await this.clients();
+      mode = config?.ggcon?.mode || ggcon?.config?.mode || 'unknown';
+      endpointIdentifier = playerAdminEndpointIdentifier(config || ggcon?.config || {});
+      if (mode !== 'source-tcp') throw Object.assign(new Error('当前连接模式不支持玩家管理能力探测'), { code: 'PROBE_UNSUPPORTED_MODE' });
+      const result = await ggcon.command('#', { retry: true });
+      const raw = result?.response ?? result;
+      summary = summarizeCapabilityResponse(raw);
+      responseHash = summary ? crypto.createHash('sha256').update(String(raw)).digest('hex') : null;
+      parsed = parsePlayerAdminCapabilities(summary);
+      if (!parsed.known) throw Object.assign(new Error(summary ? '命令列表格式未知，未确认管理能力' : '命令列表响应为空，未确认管理能力'), { code: summary ? 'UNKNOWN_PROBE_FORMAT' : 'EMPTY_PROBE_RESPONSE' });
+    } catch (error) {
+      errorCode = String(error?.code || 'CAPABILITY_PROBE_FAILED').slice(0, 64);
+      errorMessage = safeMessage(error, '玩家管理能力探测失败').slice(0, 500);
+      parsed = { known: false, kick: false, banPermanent: false, unban: false, banTemporary: false };
+    }
+    const result = await this.db.query('INSERT INTO player_admin_capability_probes (mode,endpoint_identifier,probed_at,response_summary,response_hash,kick_supported,ban_supported,unban_supported,error_code,error_message) VALUES (?,?,CURRENT_TIMESTAMP(3),?,?,?,?,?,?,?)', [mode, endpointIdentifier, summary, responseHash, parsed.kick ? 1 : 0, parsed.banPermanent ? 1 : 0, parsed.unban ? 1 : 0, errorCode, errorMessage]);
+    const rows = await this.db.query('SELECT id,mode,endpoint_identifier AS endpointIdentifier,probed_at AS probedAt,response_summary AS responseSummary,kick_supported AS kickSupported,ban_supported AS banSupported,unban_supported AS unbanSupported,error_code AS errorCode,error_message AS errorMessage FROM player_admin_capability_probes WHERE id=?', [result.insertId]);
+    return publicProbe(rows[0], this.clock(), this.ttlMs, endpointIdentifier);
+  }
+}
+
+export { publicProbe as capabilityProbeValue };

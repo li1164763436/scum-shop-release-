@@ -1,0 +1,50 @@
+<section class="page" id="page-domain-access">
+  <div class="page-toolbar">
+    <div>
+      <p class="breadcrumb-inline">系统 / 域名接入</p>
+      <h2>域名接入</h2>
+      <p>查看商城当前使用的访问域名与接入状态。</p>
+    </div>
+    <button class="icon-btn domain-access-refresh" id="refreshDomainAccess" type="button" title="刷新域名状态" aria-label="刷新域名状态">↻</button>
+  </div>
+
+  <div class="domain-access-summary" id="domainAccessSummary" role="status" aria-live="polite">
+    <span class="domain-access-summary-dot is-loading" id="domainAccessSummaryDot" aria-hidden="true"></span>
+    <div>
+      <strong id="domainAccessSummaryTitle">正在读取域名状态</strong>
+      <p id="domainAccessSummaryText">正在连接域名网关...</p>
+    </div>
+    <time id="domainAccessUpdatedAt" datetime="">--</time>
+  </div>
+
+  <div class="domain-access-layout">
+    <div class="domain-access-main">
+      <div class="domain-access-section-head">
+        <div>
+          <span class="domain-access-kicker">ACCESS DOMAINS</span>
+          <h3>已绑定域名</h3>
+        </div>
+        <span class="domain-access-count" id="domainAccessCount">--</span>
+      </div>
+      <div class="domain-access-grid" id="domainAccessDomains" aria-live="polite" aria-busy="true">
+        <article class="card domain-access-record is-loading">
+          <div class="domain-access-record-icon" aria-hidden="true">◎</div>
+          <div class="domain-access-record-body">
+            <span>平台域名</span>
+            <strong>正在读取...</strong>
+            <p>等待域名网关响应</p>
+          </div>
+        </article>
+      </div>
+    </div>
+
+    <aside class="card domain-access-action">
+      <div class="domain-access-mark" aria-hidden="true">↗</div>
+      <span class="domain-access-kicker">DOMAIN CENTER</span>
+      <h3>域名管理中心</h3>
+      <p id="domainAccessStatus" role="status" aria-live="polite">管理平台域名和自有域名</p>
+      <button class="btn primary" id="openDomainAccess" type="button">进入管理中心</button>
+      <small>仅超级管理员可访问</small>
+    </aside>
+  </div>
+</section>

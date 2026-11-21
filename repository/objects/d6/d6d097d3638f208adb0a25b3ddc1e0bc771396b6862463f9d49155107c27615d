@@ -1,0 +1,104 @@
+<section class="page inner-page" id="page-account">
+      <header class="inner-heading"><p class="overline"><span></span> 幸存者账户</p><h1>我的账户</h1><p>身份信息与商城币变动记录。</p></header>
+      <nav class="account-subnav" aria-label="账户副导航">
+        <button class="active" type="button" data-account-section="accountProfileSection">档案概览</button>
+        <button type="button" data-account-section="redeemSection">兑换补给</button>
+        <button type="button" data-account-section="characterGrowthSection">属性技能</button>
+        <button type="button" data-account-section="accountLedgerSection">账户流水</button>
+      </nav>
+      <section class="account-panel account-profile" id="accountProfileSection">
+        <header class="profile-shell-heading"><span>幸存者档案</span><h2>幸存者档案</h2></header>
+        <div class="profile-overview-box">
+          <div class="identity-grid">
+            <article class="identity-card profile-base-card"><div class="identity-field">用户名：<strong id="accountUsername">—</strong></div><div class="identity-field">SteamID：<code id="accountSteamId">—</code></div></article>
+            <article class="balance-card"><small>可用商城币</small><strong id="accountBalance">0</strong><span>商城币余额</span></article>
+          </div>
+          <div class="game-asset-grid" aria-label="游戏资产">
+            <article><small>美金</small><strong id="accountGameMoney">—</strong><span>美金</span></article>
+            <article><small>金条</small><strong id="accountGameGold">—</strong><span>金条</span></article>
+          </div>
+          <section class="profile-data-panel">
+          <div class="profile-data-heading"><div><span>角色属性</span><h2>角色属性</h2></div></div>
+          <div class="attribute-grid" id="accountAttributeList">
+            <article class="attribute-card attribute-strength"><div class="attribute-meter"><strong>—</strong></div><small>力量</small></article>
+            <article class="attribute-card attribute-constitution"><div class="attribute-meter"><strong>—</strong></div><small>体质</small></article>
+            <article class="attribute-card attribute-dexterity"><div class="attribute-meter"><strong>—</strong></div><small>敏捷</small></article>
+            <article class="attribute-card attribute-intelligence"><div class="attribute-meter"><strong>—</strong></div><small>智力</small></article>
+          </div>
+        </section>
+          <section class="profile-data-panel">
+            <div class="profile-data-heading"><div><span>角色技能</span><h2>技能详情</h2></div></div>
+            <div class="skill-list" id="accountSkillList"><div class="empty-row"><strong>角色技能数据待接入</strong><small>技能数据待同步</small></div></div>
+          </section>
+        </div>
+        <aside class="reward-section profile-reward-card" id="accountRewardSection"><div class="reward-head"><div><span>签到</span><h2>签到</h2><p>仅累计已确认的在线时长，暂时读取失败不会影响已有记录。</p></div><button class="button primary reward-checkin-button" id="checkinButton" type="button" disabled>状态读取中</button></div><div class="reward-stat-grid"><article><small>今日签到</small><strong id="rewardCheckedToday">读取中</strong></article><article><small>连续签到</small><strong id="rewardStreakDays">—</strong><span>天</span></article><article><small>累计签到</small><strong id="rewardTotalDays">—</strong><span>天</span></article><article><small>可信累计在线</small><strong id="rewardOnlineTotal">—</strong></article></div><div class="reward-next" id="rewardNextOnline"><span>下一在线奖励</span><strong>正在同步奖励门槛...</strong></div><div class="reward-history" hidden><div class="reward-history-title"><span>最近奖励</span><h3>最近奖励记录</h3></div><div id="rewardClaimList" class="reward-claim-list"><div class="empty-row"><strong>正在读取奖励记录</strong><small>正在读取奖励记录</small></div></div></div></aside>
+      </section>
+      <section class="account-panel redeem-section" id="redeemSection" hidden>
+        <div class="exchange-layout">
+          <div class="exchange-main">
+            <div class="redeem-copy exchange-heading"><span>资产兑换</span><h2>资产兑换</h2><p>选择对应卡片完成兑换，实际到账数量以确认时显示的兑换比例为准。</p></div>
+            <div class="exchange-card-grid">
+          <form class="currency-exchange-form exchange-card" data-exchange-form>
+            <input name="direction" type="hidden" value="coin_to_gold">
+            <div class="exchange-card-head"><span>商城币兑换金条</span><h3>商城币兑换金条</h3><p>消耗商城币，向当前在线游戏角色发放金条。</p></div>
+            <div class="exchange-card-balance"><small>可用商城币</small><strong data-exchange-balance>0</strong></div>
+            <label><span>商城币数量</span><input name="amount" type="number" min="1" step="1" inputmode="numeric" autocomplete="off" required placeholder="输入商城币数量"></label>
+            <div class="exchange-preview"><span>当前比例</span><strong data-exchange-rate>1 商城币 = 1 金条</strong><span>预计到账</span><strong data-exchange-output>0 金条</strong></div>
+            <p class="exchange-status" data-exchange-status aria-live="polite"></p>
+            <button class="button primary" type="submit">兑换金条</button>
+          </form>
+          <form class="currency-exchange-form exchange-card" data-exchange-form>
+            <input name="direction" type="hidden" value="gold_to_coin">
+            <div class="exchange-card-head"><span>金条兑换商城币</span><h3>金条兑换商城币</h3><p>扣除在线游戏角色金条，兑换为商城币余额。</p></div>
+            <div class="exchange-card-balance"><small>游戏金条余额</small><strong data-exchange-balance>—</strong></div>
+            <label><span>金条数量</span><input name="amount" type="number" min="1" step="1" inputmode="numeric" autocomplete="off" required placeholder="输入金条数量"></label>
+            <div class="exchange-preview"><span>当前比例</span><strong data-exchange-rate>1 金条 = 1 商城币</strong><span>预计到账</span><strong data-exchange-output>0 商城币</strong></div>
+            <p class="exchange-status" data-exchange-status aria-live="polite"></p>
+            <button class="button primary" type="submit">兑换商城币</button>
+          </form>
+            </div>
+          </div>
+          <aside class="redeem-code-panel">
+            <div class="redeem-copy redeem-code-copy"><span>安全兑换</span><h2>兑换补给码</h2><p>输入营地发放的兑换码，验证成功后奖励将生成订单并进入自动发放队列。</p></div>
+            <form id="redeemCodeForm" class="redeem-form"><label for="redeemCodeInput">兑换码</label><div><input id="redeemCodeInput" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="64" placeholder="输入兑换码"><button class="button primary" type="submit">立即兑换</button></div><small>兑换码仅用于本次安全请求，不会保存在浏览器中。</small></form>
+          </aside>
+        </div>
+      </section>
+      <section class="account-panel character-growth-panel" id="characterGrowthSection" hidden>
+        <div class="character-purchase-panel">
+          <div class="character-purchase-head">
+            <div><span>角色成长</span><h2>角色属性与技能</h2><p>使用商城币提升当前在线角色的属性和技能等级。</p></div>
+            <span class="purchase-status-badge" id="characterPurchaseStatus">暂未开放</span>
+          </div>
+          <div class="character-purchase-summary">
+            <article><small>当前角色</small><strong id="characterPurchaseSteamId">等待同步</strong><span>请保证游戏角色彻底离线</span></article>
+            <article><small>可用商城币</small><strong id="characterPurchaseBalance">0</strong><span>以账户实时余额为准</span></article>
+            <article><small>购买状态</small><strong id="characterPurchaseState">暂未开放</strong><span id="characterPurchaseHint">后台设置价格后开放</span></article>
+          </div>
+          <div class="character-purchase-grid">
+            <section class="character-purchase-section">
+              <div class="character-purchase-section-head"><div><span>属性</span><h3>购买属性点</h3></div><small>每点商城币：<b id="attributePointPrice">0</b></small></div>
+              <div class="purchase-attribute-list">
+                <article class="purchase-attribute-strength active" data-purchase-attribute="strength" role="button" tabindex="0" aria-pressed="true"><i>力</i><div><strong>力量</strong><small>近战、负重与武器控制</small><span>当前等级 <b data-purchase-current="strength">—</b> · 上限 8</span></div><div class="purchase-stepper"><button type="button" data-purchase-attribute-step="-1" aria-label="减少力量属性点">−</button><output data-purchase-quantity="strength">0</output><button type="button" data-purchase-attribute-step="1" aria-label="增加力量属性点">＋</button></div></article>
+                <article class="purchase-attribute-constitution" data-purchase-attribute="constitution" role="button" tabindex="0" aria-pressed="false"><i>体</i><div><strong>体质</strong><small>耐力、恢复与生存能力</small><span>当前等级 <b data-purchase-current="constitution">—</b> · 上限 5</span></div><div class="purchase-stepper"><button type="button" data-purchase-attribute-step="-1" aria-label="减少体质属性点">−</button><output data-purchase-quantity="constitution">0</output><button type="button" data-purchase-attribute-step="1" aria-label="增加体质属性点">＋</button></div></article>
+                <article class="purchase-attribute-dexterity" data-purchase-attribute="dexterity" role="button" tabindex="0" aria-pressed="false"><i>敏</i><div><strong>敏捷</strong><small>移动、驾驶与隐蔽能力</small><span>当前等级 <b data-purchase-current="dexterity">—</b> · 上限 5</span></div><div class="purchase-stepper"><button type="button" data-purchase-attribute-step="-1" aria-label="减少敏捷属性点">−</button><output data-purchase-quantity="dexterity">0</output><button type="button" data-purchase-attribute-step="1" aria-label="增加敏捷属性点">＋</button></div></article>
+                <article class="purchase-attribute-intelligence" data-purchase-attribute="intelligence" role="button" tabindex="0" aria-pressed="false"><i>智</i><div><strong>智力</strong><small>医疗、工程与战术能力</small><span>当前等级 <b data-purchase-current="intelligence">—</b> · 上限 5</span></div><div class="purchase-stepper"><button type="button" data-purchase-attribute-step="-1" aria-label="减少智力属性点">−</button><output data-purchase-quantity="intelligence">0</output><button type="button" data-purchase-attribute-step="1" aria-label="增加智力属性点">＋</button></div></article>
+              </div>
+              <div class="purchase-total"><span>预计消耗商城币</span><strong id="attributePurchaseTotal">0</strong><button class="button primary" id="purchaseAttributeButton" type="button" disabled>购买属性点</button></div>
+            </section>
+            <section class="character-purchase-section">
+              <div class="character-purchase-section-head"><div><span>技能</span><h3 id="purchaseSkillTitle">技能等级</h3></div><small>直升 3 级：<b id="skillLevelPrice">0</b> 商城币</small></div>
+              <div class="purchase-skill-toolbar"><span>技能名称</span><span>升级目标</span><span>选择</span></div>
+              <div class="purchase-skill-list" id="purchaseSkillList"></div>
+              <div class="purchase-total"><span>预计消耗商城币</span><strong id="skillPurchaseTotal">0</strong><button class="button primary" id="purchaseSkillButton" type="button" disabled>购买技能等级</button></div>
+            </section>
+          </div>
+        </div>
+      </section>
+      <section class="account-panel data-panel" id="accountLedgerSection" hidden><div class="panel-heading"><div><span>账户流水</span><h2>账户流水</h2></div><button class="icon-button" id="reloadAccount" type="button" aria-label="刷新流水">↻</button></div><div id="ledgerList" class="ledger-list"></div></section>
+    </section>
+
+    <section class="page inner-page" id="page-orders">
+      <header class="inner-heading"><p class="overline"><span></span> 订单档案</p><h1>我的订单</h1><p>追踪物资订单与自动发放状态。</p></header>
+      <section class="data-panel"><div class="panel-heading"><div><span>订单记录</span><h2>订单记录</h2></div><button class="icon-button" id="reloadOrders" type="button" aria-label="刷新订单">↻</button></div><div id="orderList" class="order-list"></div></section>
+    </section>

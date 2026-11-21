@@ -1,0 +1,147 @@
+const STEAM_ID64 = /^\d{17}$/;
+const PARSER_VERSION = 'v1';
+
+const FIELD_ALIASES = {
+  eventTime: ['eventTime', 'event_time', 'timestamp', 'time', 'date', 'datetime', 'createdAt', 'created_at'],
+  killerName: ['killerName', 'killer_name', 'killer', 'killerPlayerName', 'killer_player_name'],
+  killerId: ['killerSteamId', 'killerSteamID', 'killerSteamID', 'killer_steam_id', 'killer_id', 'killerId'],
+  victimName: ['victimName', 'victim_name', 'victim', 'victimPlayerName', 'victim_player_name'],
+  victimId: ['victimSteamId', 'victimSteamID', 'victimSteamID', 'victim_steam_id', 'victim_id', 'victimId'],
+  weapon: ['weapon', 'weaponName', 'weapon_name'],
+  distance: ['distance', 'distanceMeters', 'distance_meters', 'distance_m']
+};
+
+export function isSteamId64(value) {
+  return STEAM_ID64.test(String(value ?? '').trim());
+}
+
+export function decodeScumLog(input) {
+  const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input || '');
+  if (!buffer.length) return { text: '', encoding: 'utf8', bomBytes: 0 };
+  if (buffer[0] === 0xff && buffer[1] === 0xfe) return { text: buffer.subarray(2).toString('utf16le'), encoding: 'utf16le', bomBytes: 2 };
+  if (buffer[0] === 0xfe && buffer[1] === 0xff) {
+    const swapped = Buffer.from(buffer.subarray(2));
+    swapped.swap16();
+    return { text: swapped.toString('utf16le'), encoding: 'utf16be', bomBytes: 2 };
+  }
+  const nulCount = buffer.subarray(0, Math.min(buffer.length, 4096)).reduce((count, byte) => count + (byte === 0 ? 1 : 0), 0);
+  if (nulCount > Math.min(buffer.length, 4096) / 8) return { text: buffer.toString('utf16le').replace(/^\uFEFF/, ''), encoding: 'utf16le', bomBytes: 0 };
+  return { text: buffer.toString('utf8').replace(/^\uFEFF/, ''), encoding: 'utf8', bomBytes: 0 };
+}
+
+function field(object, aliases) {
+  for (const name of aliases) if (Object.prototype.hasOwnProperty.call(object, name)) return object[name];
+  return undefined;
+}
+
+function cleanName(value) {
+  const text = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+  return text ? text.slice(0, 255) : null;
+}
+
+function cleanWeapon(value) {
+  const text = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+  return text ? text.slice(0, 255) : null;
+}
+
+function parseDistance(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const match = String(value).trim().match(/^(\d+(?:\.\d+)?)\s*(?:m|meters?)?$/i);
+  if (!match) return null;
+  const distance = Number(match[1]);
+  return Number.isFinite(distance) && distance >= 0 && distance <= 100000 ? distance : null;
+}
+
+function parseEventTime(value) {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const milliseconds = value < 100000000000 ? value * 1000 : value;
+    const date = new Date(milliseconds);
+    return Number.isFinite(date.getTime()) ? date : null;
+  }
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:?\d{2})$/.test(text)) return null;
+  const date = new Date(text);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+export function normalizeKillObject(object) {
+  if (!object || typeof object !== 'object' || Array.isArray(object)) return { type: 'unknown', reason: 'not_object' };
+  const killerId = String(field(object, FIELD_ALIASES.killerId) ?? '').trim();
+  const victimId = String(field(object, FIELD_ALIASES.victimId) ?? '').trim();
+  if (!isSteamId64(killerId) || !isSteamId64(victimId)) return { type: 'unknown', reason: 'missing_or_invalid_steam_ids' };
+  const eventTime = parseEventTime(field(object, FIELD_ALIASES.eventTime));
+  if (!eventTime) return { type: 'unknown', reason: 'missing_or_invalid_event_time' };
+  const suicide = killerId === victimId;
+  return {
+    type: 'event',
+    event: {
+      eventTime,
+      killerName: cleanName(field(object, FIELD_ALIASES.killerName)),
+      killerSteamId: killerId,
+      victimName: cleanName(field(object, FIELD_ALIASES.victimName)),
+      victimSteamId: victimId,
+      weapon: cleanWeapon(field(object, FIELD_ALIASES.weapon)),
+      distance: parseDistance(field(object, FIELD_ALIASES.distance)),
+      eventType: suicide ? 'suicide' : 'kill',
+      parserVersion: PARSER_VERSION
+    }
+  };
+}
+
+export function parseStrictCsv(line) {
+  const values = [];
+  let value = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (quoted) {
+      if (character === '"' && line[index + 1] === '"') { value += '"'; index += 1; }
+      else if (character === '"') quoted = false;
+      else value += character;
+    } else if (character === '"' && value === '') quoted = true;
+    else if (character === ',') { values.push(value.trim()); value = ''; }
+    else if (character === '"') return null;
+    else value += character;
+  }
+  if (quoted) return null;
+  values.push(value.trim());
+  if (values.length !== 7) return null;
+  const [eventTime, killerName, killerSteamId, victimName, victimSteamId, weapon, distance] = values;
+  if (!isSteamId64(killerSteamId) || !isSteamId64(victimSteamId)) return null;
+  return { eventTime, killerName, killerSteamId, victimName, victimSteamId, weapon, distance };
+}
+
+export function isIgnorableLine(line) {
+  const text = String(line || '').replace(/\u0000/g, '').trim();
+  if (!text) return true;
+  return /^(?:log\s*)?version\b/i.test(text)
+    || /^version\s*[:=]/i.test(text)
+    || /^\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}:\s*Game version:\s*\S+$/i.test(text);
+}
+
+export function parseScumLogLine(line) {
+  const text = String(line || '').replace(/\u0000/g, '').trim();
+  if (isIgnorableLine(text)) return { type: 'ignored' };
+  if (text.startsWith('{') || text.startsWith('[')) {
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch { return { type: 'unknown', reason: 'invalid_json' }; }
+    const objects = Array.isArray(parsed) ? parsed : [parsed];
+    if (!objects.length) return { type: 'ignored' };
+    const results = objects.map(normalizeKillObject);
+    return results.every((result) => result.type === 'event')
+      ? { type: 'events', events: results.map((result) => result.event) }
+      : { type: 'unknown', reason: results.find((result) => result.type !== 'event')?.reason || 'invalid_json_event' };
+  }
+  const csv = parseStrictCsv(text);
+  return csv ? normalizeKillObject(csv) : { type: 'unknown', reason: 'unsupported_format' };
+}
+
+export function parseScumLogText(input) {
+  const decoded = decodeScumLog(input);
+  return { ...decoded, results: decoded.text.split(/\r?\n/).map(parseScumLogLine) };
+}
+
+export { FIELD_ALIASES, PARSER_VERSION, STEAM_ID64 };

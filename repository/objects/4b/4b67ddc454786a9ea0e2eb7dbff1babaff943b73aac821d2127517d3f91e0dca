@@ -1,0 +1,27 @@
+import { execFileSync } from 'node:child_process';
+
+const SERVICE_NAMES = Object.freeze(['ScumRconMySQL', 'ScumRconBridge', 'ScumRconApp']);
+
+export function enforceManualServiceStartup({ logger, platform = process.platform, run = execFileSync } = {}) {
+  if (platform !== 'win32') return { updated: [], skipped: [...SERVICE_NAMES] };
+  const updated = [];
+  const skipped = [];
+  for (const name of SERVICE_NAMES) {
+    try {
+      run('sc.exe', ['query', name], { windowsHide: true, stdio: 'ignore' });
+    } catch {
+      skipped.push(name);
+      continue;
+    }
+    try {
+      run('sc.exe', ['config', name, 'start=', 'demand'], { windowsHide: true, stdio: 'ignore' });
+      updated.push(name);
+    } catch (error) {
+      logger?.warn?.('无法将商城 Windows 服务设为手动启动', { component: 'service-startup', service: name, error: error?.message });
+    }
+  }
+  if (updated.length) logger?.info?.('商城 Windows 服务已设为手动启动', { component: 'service-startup', services: updated });
+  return { updated, skipped };
+}
+
+export { SERVICE_NAMES };

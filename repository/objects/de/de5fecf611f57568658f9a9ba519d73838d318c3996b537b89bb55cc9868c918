@@ -1,0 +1,398 @@
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+const state = {
+  page: 'dashboard', currentUser: null, config: {}, bridge: null, products: [], productCategories: [], productParentCategories: [], accounts: [], memberships: [], membershipStrategies: [], membershipPage: 1, membershipTotal: 0, membershipLogPage: 1, membershipLogTotal: 0, membershipLogSteamId: null, orders: [], tasks: [], logs: [], gifts: [], redeemCodes: [],
+  rewardRules: [], rewardClaims: [], activities: [], lotteryPools: [], lotteryRecords: [], lotteryFulfillmentLogs: [], lotteryLogPage: 1, lotteryLogLimit: 15, lotteryLogTotal: 0, selectedLotteryPoolId: null, lotteryPoolPage: 1, lotteryPoolPageSize: 15, lotteryVersion: null, lotteryVersionDraft: null, lotteryPrizePage: 1, lotteryPrizeSort: 'asc', stocks: [], stockTrades: [], stockBindings: [], stockAnnouncements: [], stockCreateMode: false, selectedStockId: null, stockSelectionVersion: 0, stockHistoryMeta: null, stockPriceHistory: [], stockPricePage: 1, stockPricePageSize: 15, cloudWarehouse: null, cloudWarehouseSteamId: '', instances: [], players: [], chatOverview: null, chatEvents: [], modalSubmit: null, selectedGiftId: null, monitorTimer: null, versionUpdateTimer: null
+};
+state.giftProductDraft = [];
+
+const pages = {
+  dashboard: ['运行总览', '总览 / 运行总览'], products: ['商品管理', '商城 / 商品管理'],
+  'starter-gift': ['礼包管理', '商城 / 礼包管理'], 'redeem-codes': ['兑换管理', '商城 / 兑换管理'], rewards: ['签到管理', '商城 / 签到管理'],
+  'activities-lottery': ['抽奖管理', '商城 / 抽奖管理'], 'stock-market': ['股市管理', '商城 / 股市管理'], 'cloud-warehouse': ['云储管理', '商城 / 云储管理'], accounts: ['玩家管理', '玩家 / 玩家管理'], membership: ['会员中心', '玩家 / 会员中心'], 'vehicle-management': ['保险管理', '玩家 / 保险管理'], 'teleport-management': ['传送管理', '玩家 / 传送管理'],
+  orders: ['订单管理', '履约 / 订单管理'], 'game-claims': ['内置管理', '履约 / 内置管理'], announcements: ['定时公告', '履约 / 定时公告'], operations: ['日志总览', '运维 / 日志总览'],
+  'store-settings': ['商城设置', '运维 / 商城设置'], config: ['对接配置', '系统 / 对接配置'], 'domain-access': ['域名接入', '系统 / 域名接入'], gateway: ['网关状态', '运维 / 网关状态']
+};
+
+// 兼容 success/data/message 包装，同时允许未来接口直接返回数据。
+function requestAdminLogin() {
+  if (!adminLoginPromise) {
+    const flow = Promise.resolve().then(async () => {
+      try {
+        state.currentUser = await api('/api/admin/auth/exchange', { method: 'POST', body: '{}' }, false);
+      } catch (exchangeError) {
+        const username = window.prompt('首次进入后台，请输入管理员用户名');
+        if (!username) throw exchangeError;
+        const password = window.prompt('请输入管理员密码');
+        if (password === null) throw exchangeError;
+        state.currentUser = await api('/api/admin/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }, false);
+      }
+    });
+    const lockedFlow = flow.finally(() => {
+      if (adminLoginPromise === lockedFlow) adminLoginPromise = null;
+    });
+    adminLoginPromise = lockedFlow;
+  }
+  return adminLoginPromise;
+}
+async function api(url, options = {}, retryAuth = true) {
+  const response = await fetch(url, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+  });
+  let body;
+  try { body = await response.json(); } catch { body = null; }
+  if (response.status === 401 && retryAuth && !url.startsWith('/api/admin/auth/')) {
+    await requestAdminLogin();
+    return api(url, options, false);
+  }
+  if (!response.ok || body?.success === false) {
+    const error = new Error(body?.message || `请求失败（${response.status}）`);
+    error.status = response.status;
+    error.code = body?.code || null;
+    error.body = body;
+    throw error;
+  }
+  return body && Object.prototype.hasOwnProperty.call(body, 'data') ? body.data : body;
+}
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+}
+function pick(object, keys, fallback = '') {
+  for (const key of keys) {
+    const value = key.split('.').reduce((current, part) => current?.[part], object);
+    if (value !== undefined && value !== null) return value;
+  }
+  return fallback;
+}
+function list(data, keys = []) {
+  if (Array.isArray(data)) return data;
+  for (const key of keys) if (Array.isArray(data?.[key])) return data[key];
+  return [];
+}
+function number(value) { return Number(value || 0).toLocaleString('zh-CN'); }
+function optionalNumber(value) { return value === '' || value === null || value === undefined ? '--' : number(value); }
+function uuid() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, '0'));
+  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
+}
+function generateRconPassword() {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+function date(value) {
+  if (!value) return '--';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString('zh-CN', { hour12: false });
+}
+function status(value) {
+  const raw = String(value || 'pending').toLowerCase();
+  const labels = { active: '上架中', inactive: '已下架', pending: '待处理', queued: '排队中', processing: '发货中', dispatching: '发送中', retry: '待重试', retrying: '重试中', waiting_instance: '等待实例', waiting_offline: '等待玩家上线', manual_review: '人工核查', completed: '已完成', success: '成功', failed: '失败', error: '错误', cancelled: '已取消', running: '运行中', waiting: '等待中' };
+  return `<span class="badge ${esc(raw)}">${esc(labels[raw] || value || '未知')}</span>`;
+}
+function empty(colspan, message, loading = false) {
+  return `<tr><td colspan="${colspan}" class="empty${loading ? ' loading' : ''}">${esc(message)}</td></tr>`;
+}
+
+const tablePagination = new WeakMap();
+const tablePaginationExcluded = new Set(['lotteryLogRows', 'stockPriceRows', 'membershipRows', 'membershipLogRows']);
+function updateTablePagination(tbody, reset = false) {
+  if (!tbody?.matches('tbody') || tablePaginationExcluded.has(tbody.id) || tbody.closest('.lottery-prize-detail-table')) return;
+  const rows = [...tbody.children].filter((row) => row.matches('tr') && !row.querySelector('.empty'));
+  let pager = tablePagination.get(tbody);
+  if (!pager) {
+    const tableWrap = tbody.closest('.table-wrap');
+    if (!tableWrap) return;
+    const node = document.createElement('div');
+    node.className = `table-pagination${tbody.closest('.structured-audit') ? ' audit-table-pagination' : ''}`;
+    node.innerHTML = '<button type="button" data-table-prev>上一页</button><span></span><button type="button" data-table-next>下一页</button>';
+    tableWrap.insertAdjacentElement('afterend', node);
+    pager = { page: 1, node };
+    tablePagination.set(tbody, pager);
+    $('[data-table-prev]', node).addEventListener('click', () => { pager.page -= 1; updateTablePagination(tbody); });
+    $('[data-table-next]', node).addEventListener('click', () => { pager.page += 1; updateTablePagination(tbody); });
+  }
+  if (reset) pager.page = 1;
+  const pageCount = Math.max(1, Math.ceil(rows.length / 15));
+  pager.page = Math.min(Math.max(1, pager.page), pageCount);
+  const start = (pager.page - 1) * 15;
+  rows.forEach((row, index) => { row.hidden = index < start || index >= start + 15; });
+  pager.node.hidden = rows.length === 0;
+  $('span', pager.node).textContent = `第 ${pager.page} / ${pageCount} 页，共 ${rows.length} 条`;
+  $('[data-table-prev]', pager.node).disabled = pager.page <= 1;
+  $('[data-table-next]', pager.node).disabled = pager.page >= pageCount;
+}
+const recordPagination = new WeakMap();
+function updateRecordPagination(container, itemSelector, reset = false) {
+  if (!container) return;
+  const items = [...container.children].filter((item) => item.matches(itemSelector));
+  let pager = recordPagination.get(container);
+  if (container.id === 'logOutput' && items.length === 0) {
+    pager?.node.remove();
+    recordPagination.delete(container);
+    return;
+  }
+  if (!pager) {
+    const node = document.createElement('div');
+    node.className = 'table-pagination record-pagination';
+    node.innerHTML = '<button type="button" data-record-prev>上一页</button><span></span><button type="button" data-record-next>下一页</button>';
+    container.insertAdjacentElement('afterend', node);
+    pager = { page: 1, node, itemSelector };
+    recordPagination.set(container, pager);
+    $('[data-record-prev]', node).addEventListener('click', () => { pager.page -= 1; updateRecordPagination(container, pager.itemSelector); });
+    $('[data-record-next]', node).addEventListener('click', () => { pager.page += 1; updateRecordPagination(container, pager.itemSelector); });
+  }
+  if (reset) pager.page = 1;
+  const pageCount = Math.max(1, Math.ceil(items.length / 15));
+  pager.page = Math.min(Math.max(1, pager.page), pageCount);
+  const start = (pager.page - 1) * 15;
+  items.forEach((item, index) => { item.hidden = index < start || index >= start + 15; });
+  pager.node.hidden = items.length === 0;
+  $('span', pager.node).textContent = `第 ${pager.page} / ${pageCount} 页，共 ${items.length} 条`;
+  $('[data-record-prev]', pager.node).disabled = pager.page <= 1;
+  $('[data-record-next]', pager.node).disabled = pager.page >= pageCount;
+}
+function initializeTablePagination() {
+  $$('tbody').forEach((tbody) => updateTablePagination(tbody));
+  updateRecordPagination($('#starterGiftList'), '.gift-list-item');
+  updateRecordPagination($('#logOutput'), '.log-line');
+  const observer = new MutationObserver((mutations) => {
+    const tableTargets = new Set();
+    const recordTargets = new Set();
+    mutations.forEach((mutation) => {
+      if (mutation.target.matches?.('tbody')) tableTargets.add(mutation.target);
+      if (mutation.target.id === 'starterGiftList' || mutation.target.id === 'logOutput') recordTargets.add(mutation.target);
+      mutation.addedNodes.forEach((node) => {
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        if (node.matches?.('tbody')) tableTargets.add(node);
+        node.querySelectorAll?.('tbody').forEach((tbody) => tableTargets.add(tbody));
+      });
+    });
+    tableTargets.forEach((tbody) => updateTablePagination(tbody, true));
+    recordTargets.forEach((container) => updateRecordPagination(container, container.id === 'starterGiftList' ? '.gift-list-item' : '.log-line', true));
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+function toast(message, isError = false) {
+  const node = document.createElement('div');
+  node.className = `toast${isError ? ' error' : ''}`;
+  node.textContent = message;
+  $('#toastStack').append(node);
+  setTimeout(() => node.remove(), 3800);
+}
+async function withBusy(button, task) {
+  if (button) button.disabled = true;
+  try { return await task(); } catch (error) { toast(error.message, true); return null; }
+  finally { if (button) button.disabled = false; }
+}
+function showPage(name, load = true) {
+  if (!pages[name] || (typeof canAccessAdminPage === 'function' && !canAccessAdminPage(name))) return;
+  state.page = name;
+  sessionStorage.setItem('admin-current-page', name);
+  localStorage.setItem('admin-current-page', name);
+  if (window.location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
+  $$('.page').forEach((node) => node.classList.toggle('active', node.id === `page-${name}`));
+  $$('.nav-item').forEach((node) => node.classList.toggle('active', node.dataset.page === name));
+  $('#pageTitle').textContent = pages[name][0];
+  $('#breadcrumb').textContent = pages[name][1];
+  $('#sidebar').classList.remove('open');
+  syncMonitorTimer();
+  if (load) loadPage(name);
+}
+function syncMonitorTimer() {
+  if (state.monitorTimer) clearInterval(state.monitorTimer);
+  state.monitorTimer = state.page === 'dashboard' ? setInterval(() => Promise.allSettled([loadMonitor(), loadHealth()]), 15000) : null;
+}
+
+async function loadPage(name) {
+  const loaders = { dashboard: loadDashboard, products: loadProducts, 'starter-gift': loadStarterGiftPage, 'redeem-codes': loadRedeemCodes, rewards: loadRewards, 'activities-lottery': loadActivitiesLottery, 'stock-market': loadStockMarket, 'cloud-warehouse': loadCloudWarehouseAdmin, accounts: loadAccounts, membership: loadMembership, 'vehicle-management': loadVehicleManagement, 'teleport-management': loadTeleportManagement, orders: loadOrders, 'game-claims': loadGameClaims, announcements: loadAnnouncements, operations: async () => Promise.allSettled([loadTasks(), loadLotteryLogs(), loadLogOverview()]), 'version-update': loadVersionUpdate, 'store-settings': loadStoreSettings, config: loadConfig, 'domain-access': loadDomainAccess, gateway: loadGateway };
+  try {
+    await loaders[name]?.();
+  } catch (error) {
+    if (name === 'rewards') {
+      state.rewardRules = [];
+      state.rewardClaims = [];
+      renderRewardRules(error.message || '奖励规则加载失败');
+      renderRewardClaims(error.message || '领取记录加载失败');
+    }
+    toast(error.message || '页面加载失败', true);
+  }
+}
+
+function renderBridgeStatus(bridge) {
+  if (!bridge) return;
+  state.bridge = bridge;
+  const capabilities = bridge.capabilities || {};
+  const values = {
+    host: bridge.connected,
+    ipcAuth: capabilities.ipcAuth ?? capabilities.authenticated ?? bridge.connected,
+    players: capabilities.players === true,
+    message: capabilities.message === true || capabilities.command === true,
+    giveItem: capabilities.giveItem === true || capabilities.item === true || capabilities.items === true || capabilities.command === true,
+    fulfillment: bridge.readyForFulfillment === true
+  };
+  $$('[data-cap]').forEach((node) => {
+    const value = values[node.dataset.cap];
+    node.textContent = value ? '可用' : '未接入';
+    node.className = value ? 'ok' : 'bad';
+  });
+  $$('[data-bridge-reason]').forEach((node) => {
+    node.textContent = bridge.degradedReason || '桥接与自动发货能力已就绪';
+    node.classList.toggle('ok', bridge.readyForFulfillment === true);
+    node.classList.toggle('bad', bridge.readyForFulfillment !== true);
+  });
+  $$('[data-bridge-title]').forEach((node) => { node.textContent = bridge.readyForFulfillment ? 'SCUM 商城桥接正常' : bridge.connected ? '桥接在线，游戏能力未接入' : 'SCUM 商城桥接离线'; });
+  const worker = $('#basicConfigForm')?.elements.workerEnabled;
+  if (worker) {
+    worker.disabled = !bridge.readyForFulfillment;
+    if (!bridge.readyForFulfillment) worker.checked = false;
+    $('#workerBridgeReason').textContent = bridge.readyForFulfillment ? '' : `（${bridge.degradedReason || '桥接能力不足，无法启用'}）`;
+  }
+}
+async function loadBridgeStatus() {
+  try { const bridge = await api('/api/bridge/status'); renderBridgeStatus(bridge); return bridge; }
+  catch (error) { renderBridgeStatus({ connected: false, capabilities: {}, readyForFulfillment: false, degradedReason: error.message }); return null; }
+}
+async function loadHealth() {
+  try {
+    const data = await api('/api/health');
+    const connections = data?.connections || {};
+    const gsm3 = connections.gsm3 || {};
+    const ggcon = connections.ggcon || {};
+    const bridge = connections.bridge || state.bridge;
+    if (bridge) renderBridgeStatus(bridge);
+    renderGameConnectionNote(bridge);
+    const worker = data?.worker || {};
+    const monitor = data?.monitor || {};
+    const scumLogs = data?.scumLogs || {};
+    const chatLogs = data?.chatLogs || {};
+    const checked = gsm3.checkedAt || ggcon.checkedAt || bridge?.checkedAt;
+    const allOk = Boolean(gsm3.ok && bridge?.readyForFulfillment);
+    const uptimeSeconds = Number(data?.uptime);
+    $('#serviceStatus').textContent = `运行 ${number(uptimeSeconds)} 秒`;
+    if (Number.isFinite(uptimeSeconds)) {
+      const uptimeHours = Math.floor(uptimeSeconds / 3600);
+      const uptimeMinutes = Math.floor((uptimeSeconds % 3600) / 60);
+      $('#serviceStartedAt').textContent = date(Date.now() - uptimeSeconds * 1000);
+      $('#serviceUptime').textContent = `${uptimeHours} 小时 ${uptimeMinutes} 分钟`;
+    }
+    $('#gatewayDot').className = checked ? (allOk ? 'ok' : 'bad') : '';
+    $('#gatewayStatus').textContent = !checked ? '网关等待检测' : bridge?.readyForFulfillment ? '游戏网关正常' : bridge?.connected ? '桥接在线，游戏能力未接入' : '网关连接异常';
+    const rows = $('#serviceList');
+    if (rows) {
+      setService($('[data-service="gsm3"]', rows), gsm3.checkedAt ? gsm3.ok : null, gsm3.checkedAt ? (gsm3.ok ? '已连接' : '异常') : '未检测');
+      const gameConnectionReady = Boolean(bridge?.connected && bridge?.capabilities?.players === true);
+      setService($('[data-service="bridge"]', rows), bridge ? gameConnectionReady : null, bridge ? (gameConnectionReady ? '在线' : '离线') : '检测中');
+      const fulfillmentReady = Boolean(bridge?.readyForFulfillment);
+      const workerKnown = typeof worker.enabled === 'boolean' && typeof worker.running === 'boolean' && typeof worker.polling === 'boolean';
+      const workerOk = !fulfillmentReady ? false : workerKnown ? (worker.enabled && !worker.paused && (worker.polling || worker.running)) : null;
+      const workerText = !fulfillmentReady ? '离线' : !workerKnown ? '检测中' : worker.paused ? '已暂停' : workerOk ? '在线' : '离线';
+      setService($('[data-service="fulfillment"]', rows), workerOk, workerText);
+      const monitorKnown = typeof monitor.enabled === 'boolean' && typeof monitor.running === 'boolean' && typeof monitor.polling === 'boolean';
+      const monitorOk = !fulfillmentReady ? false : monitorKnown ? (monitor.enabled && (monitor.polling || monitor.running)) : null;
+      const monitorText = !fulfillmentReady ? '离线' : !monitorKnown ? '检测中' : monitorOk ? '在线' : '离线';
+      setService($('[data-service="monitor"]', rows), monitorOk, monitorText);
+      const scumLogsKnown = typeof scumLogs.enabled === 'boolean' && typeof scumLogs.running === 'boolean' && typeof scumLogs.polling === 'boolean';
+      const scumLogsOk = scumLogsKnown ? (scumLogs.enabled && scumLogs.directoryConfigured && (scumLogs.polling || scumLogs.running)) : null;
+      const scumLogsText = !scumLogsKnown ? '检测中' : scumLogsOk ? '在线' : '离线';
+      setService($('[data-service="scumLogs"]', rows), scumLogsOk, scumLogsText);
+    }
+  } catch {
+    $('#serviceStatus').textContent = '服务状态未知';
+    $('#gatewayDot').className = 'bad';
+    $('#gatewayStatus').textContent = '后台连接异常';
+  }
+}
+function setService(row, ok, text) {
+  if (!row) return;
+  const dot = $('i', row);
+  dot.className = `status-dot ${ok === null ? 'waiting' : ok ? 'ok' : 'bad'}`;
+  row.classList.toggle('service-ok', ok === true);
+  row.classList.toggle('service-bad', ok === false);
+  row.classList.toggle('service-waiting', ok === null);
+  $('b', row).textContent = text;
+}
+function renderGameConnectionNote(bridge) {
+  const card = $('.monitor-error-detail');
+  const message = $('#monitorLastError');
+  if (!card || !message) return;
+  const title = $('dt', card);
+  const connected = Boolean(bridge?.connected);
+  state.gameConnectionOnline = connected;
+  if (title) title.textContent = '游戏连接说明';
+  card.classList.toggle('connection-ok', connected);
+  message.textContent = connected
+    ? 'RCON连接正常，如商城功能不可用时请查看插件状态。'
+    : 'RCON连接被拒绝，请检查游戏是否开启/和插件状态。';
+  const retries = Number($('#monitorFailureCount')?.closest('div')?.dataset.retries || 0);
+  renderMonitorConnectionMetric(connected, retries);
+}
+function renderMonitorConnectionMetric(connected, retries = 0) {
+  const value = $('#monitorFailureCount');
+  const item = value?.closest('div');
+  if (!value || !item) return;
+  const label = $('dt', item);
+  item.classList.toggle('connection-online', connected === true);
+  item.classList.toggle('connection-offline', connected === false);
+  if (label) label.textContent = connected ? '连接状态' : '重试次数';
+  value.textContent = connected ? '在线' : `${Number(retries || 0)} 次`;
+}
+
+function openModal({ title, description = '', body, submitText = '确认', onSubmit }) {
+  $$('.lottery-enabled-switch', $('#modalBackdrop')).forEach((node) => node.remove());
+  $('.warehouse-recycle-title-tools')?.remove();
+  $('.stock-modal-title-tools')?.remove();
+  $('.stock-announcement-title-tools')?.remove();
+  $('.account-consumption-title-tools')?.remove();
+  $('.game-qa-title-tools')?.remove();
+  $('.announcement-task-title-tools')?.remove();
+  $('#modalBackdrop').classList.remove('centered-modal', 'stock-announcement-modal', 'gift-type-action-modal', 'lottery-pool-editor-modal', 'lottery-version-editor-modal', 'lottery-prize-editor-modal', 'membership-log-modal', 'membership-strategy-modal', 'membership-adjust-modal', 'game-qa-modal', 'announcement-task-modal', 'modal-static-backdrop');
+  $('#submitModal').classList.remove('danger');
+  $('#cancelModal').hidden = false;
+  $('#closeModal').hidden = false;
+  $('#submitModal').disabled = false;
+  $('#submitModal').hidden = false;
+  $('#modalTitle').textContent = title;
+  $('#modalDescription').textContent = description;
+  $('#modalBody').innerHTML = body;
+  $('#submitModal').textContent = submitText;
+  state.modalSubmit = onSubmit;
+  $('#modalBackdrop').classList.add('open');
+  $('#modalBackdrop').setAttribute('aria-hidden', 'false');
+  $('#modalBody input, #modalBody select')?.focus();
+}
+function closeModal() {
+  $$('.lottery-enabled-switch', $('#modalBackdrop')).forEach((node) => node.remove());
+  $('.warehouse-recycle-title-tools')?.remove();
+  $('.stock-modal-title-tools')?.remove();
+  $('.stock-announcement-title-tools')?.remove();
+  $('.account-consumption-title-tools')?.remove();
+  $('.game-qa-title-tools')?.remove();
+  $('.announcement-task-title-tools')?.remove();
+  $('#closeModal').hidden = false;
+  $('#modalBackdrop').classList.remove('open', 'centered-modal', 'stock-instrument-modal', 'stock-announcement-modal', 'gift-product-picker-backdrop', 'gift-type-settings-modal', 'gift-type-action-modal', 'lottery-pool-editor-modal', 'lottery-version-editor-modal', 'lottery-prize-editor-modal', 'membership-log-modal', 'membership-strategy-modal', 'membership-adjust-modal', 'game-qa-modal', 'announcement-task-modal', 'modal-static-backdrop');
+  $('#submitModal').classList.remove('danger');
+  $('#submitModal').hidden = false;
+  $('#modalBackdrop').setAttribute('aria-hidden', 'true');
+  $('#modalForm').reset();
+  state.modalSubmit = null;
+}
+async function uploadImage(file, endpoint) {
+  const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/x-png', 'image/webp', 'image/gif'];
+  if (!allowed.includes(file.type)) throw new Error('仅支持 JPG、PNG、WebP 或 GIF 图片');
+  const maxSize = endpoint === '/api/website/background' ? 8 * 1024 * 1024 : 2 * 1024 * 1024;
+  if (file.size > maxSize) throw new Error(`图片大小不能超过 ${maxSize / 1024 / 1024}MB`);
+  const data = await api(endpoint, { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
+  return data?.imagePath || data?.path || data;
+}
+
+
+

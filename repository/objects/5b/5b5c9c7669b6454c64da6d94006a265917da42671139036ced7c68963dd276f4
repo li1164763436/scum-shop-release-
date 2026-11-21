@@ -1,0 +1,80 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
+
+function safeMessage(value, fallback) {
+  return String(value || fallback).replace(/[A-Za-z]:\\[^\r\n]*/g, '[路径已隐藏]').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 500) || fallback;
+}
+
+export function validateLockedVehicleSnapshot(result) {
+  if (result?.complete !== true || !Array.isArray(result?.lockedVehicles)) throw Object.assign(new Error('SCUM上锁载具快照不完整'), { code: 'SCUM_VEHICLE_READ_INCOMPLETE' });
+  const seen = new Set();
+  for (const vehicle of result.lockedVehicles) {
+    const entityId = Number(vehicle?.entityId);
+    const ownerSteamId = String(vehicle?.ownerSteamId || '');
+    if (!Number.isSafeInteger(entityId) || entityId < 1 || seen.has(entityId) || !/^\d{17}$/.test(ownerSteamId)) throw Object.assign(new Error('SCUM上锁载具快照包含无效记录'), { code: 'SCUM_VEHICLE_READ_INVALID' });
+    for (const key of ['worldX','worldY','worldZ']) if (!Number.isFinite(Number(vehicle?.[key]))) throw Object.assign(new Error('SCUM上锁载具坐标无效'), { code: 'SCUM_VEHICLE_READ_INVALID' });
+    seen.add(entityId);
+  }
+  return result;
+}
+
+export class ScumLockedVehicleReader {
+  constructor({ root, timeoutMs = 20000, spawnProcess = spawn } = {}) {
+    this.root = root || path.resolve(import.meta.dirname, '..', '..');
+    this.timeoutMs = timeoutMs;
+    this.spawnProcess = spawnProcess;
+  }
+
+  read(serverDirectory) {
+    return new Promise((resolve, reject) => {
+      const script = path.join(this.root, 'scripts', 'read-scum-locked-vehicles.py');
+      const bundledPython = path.join(this.root, 'scripts', 'python', 'python.exe');
+      const executable = fs.existsSync(bundledPython) ? bundledPython : (process.platform === 'win32' ? 'python.exe' : 'python3');
+      const child = this.spawnProcess(executable, ['-X', 'utf8', script], { env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, windowsHide: true });
+      const stdout = new StringDecoder('utf8');
+      const stderr = new StringDecoder('utf8');
+      let output = '';
+      let errorOutput = '';
+      let settled = false;
+      const finish = (callback) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        callback();
+      };
+      const timer = setTimeout(() => {
+        child.kill();
+        finish(() => reject(Object.assign(new Error('SCUM载具档案读取超时'), { code: 'SCUM_VEHICLE_READ_TIMEOUT' })));
+      }, this.timeoutMs);
+      child.stdout.on('data', (data) => { output += stdout.write(data); });
+      child.stderr.on('data', (data) => { errorOutput += stderr.write(data); });
+      child.on('error', (error) => finish(() => reject(Object.assign(new Error(`无法启动SCUM载具读取脚本：${safeMessage(error?.message, '启动失败')}`), { code: 'SCUM_VEHICLE_READ_START_FAILED' }))));
+      child.on('close', (code) => finish(() => {
+        output += stdout.end();
+        errorOutput += stderr.end();
+        try {
+          const result = JSON.parse(output.trim());
+          if (result.error || code) throw Object.assign(new Error(result.error || errorOutput.trim() || '读取SCUM载具档案失败'), { code: 'SCUM_VEHICLE_READ_FAILED' });
+          resolve(validateLockedVehicleSnapshot(result));
+        } catch (error) {
+          reject(Object.assign(new Error(safeMessage(error?.message || errorOutput, 'SCUM载具读取结果无效')), { code: error?.code || 'SCUM_VEHICLE_READ_INVALID' }));
+        }
+      }));
+      child.stdin.end(JSON.stringify({ serverDirectory }));
+    });
+  }
+}
+
+export function parseVehicleLocation(response, expectedEntityId) {
+  const text = String(response?.response ?? response ?? '').replace(/\r\n?/g, '\n');
+  const fields = Object.fromEntries(text.split('\n').map((line) => {
+    const index = line.indexOf('=');
+    return index > 0 ? [line.slice(0, index).trim(), line.slice(index + 1).trim()] : [];
+  }).filter((parts) => parts.length === 2));
+  const entityId = Number(fields.vehicle_entity_id);
+  const coordinates = ['x', 'y', 'z'].map((key) => Number(fields[key]));
+  if (entityId !== Number(expectedEntityId) || coordinates.some((value) => !Number.isFinite(value) || Math.abs(value) > 10_000_000)) throw Object.assign(new Error('载具位置查询返回数据无效'), { code: 'RCON_VEHICLE_LOCATION_INVALID' });
+  return { worldX: coordinates[0], worldY: coordinates[1], worldZ: coordinates[2], locationSource: fields.realtime === 'true' ? 'rcon_live' : 'rcon_saved' };
+}

@@ -1,0 +1,10 @@
+export function gameMessageName(config) {
+  return String(config?.fulfillment?.deliveryName || '').replace(/["#;\r\n]/g, ' ').trim();
+}
+
+export function formatGameMessage(config, message) {
+  const name = gameMessageName(config);
+  const text = String(message || '').trim();
+  if (!name || text.startsWith(name + '：') || text.startsWith(name + ':')) return text;
+  return `${name}：${text}`;
+}

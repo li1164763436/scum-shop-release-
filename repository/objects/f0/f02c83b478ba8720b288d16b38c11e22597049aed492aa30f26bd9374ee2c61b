@@ -1,0 +1,70 @@
+import Joi from 'joi';
+
+const steamIdSchema = Joi.string().pattern(/^7656119\d{10}$/).required().messages({
+  'string.pattern.base': 'SteamID 格式无效',
+  'any.required': '请选择目标玩家'
+});
+
+function normalizeMessage(message) {
+  return String(message).replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
+export function buildMessageCommand(input, policy) {
+  const schema = Joi.object({
+    steamId: steamIdSchema.optional().allow(null, ''),
+    global: Joi.boolean().default(false),
+    message: Joi.string().trim().min(1).max(policy.allowedMessageLength).required().messages({
+      'string.empty': '消息不能为空',
+      'string.max': `消息不能超过 ${policy.allowedMessageLength} 个字符`,
+      'any.required': '消息不能为空'
+    })
+  }).unknown(false);
+  const { value, error } = schema.validate(input);
+  if (error) throw new Error(error.details[0].message);
+  const message = normalizeMessage(value.message);
+  if (!message) throw new Error('消息不能为空');
+  if (/"/.test(message)) throw new Error('消息不能包含双引号');
+  if (!value.global && /[#;]/.test(message)) throw new Error('个人消息不允许发送游戏命令');
+  if (value.global) return `SendChat 4 "${message}"`;
+  if (!value.steamId) throw new Error('请选择目标玩家');
+  return `SendChat 4 "${message}" ${value.steamId}`;
+}
+
+export function buildRawCommand(input) {
+  const command = String(input?.command || '').trim();
+  if (!command.startsWith('#') || !/^#[A-Za-z][A-Za-z0-9]*(?:\s+[A-Za-z0-9_.-]+)*$/.test(command)) throw new Error('游戏命令格式无效');
+  return command;
+}
+
+export function buildAnnouncementCommand(input) {
+  const command = String(input?.command || '').trim();
+  if (!command.startsWith('#') || command.length > 500 || !/^#[^\s;#]+(?:\s+[^;#\r\n\u0000-\u001f\u007f]+)?$/.test(command)) throw new Error('游戏命令格式无效');
+  return command;
+}
+
+export function buildItemCommand(input, policy) {
+  const schema = Joi.object({
+    steamId: steamIdSchema,
+    itemId: Joi.string().pattern(/^[A-Za-z0-9_]{1,80}$/).required().messages({
+      'string.pattern.base': '物品 ID 格式无效',
+      'any.required': '请选择测试物品'
+    }),
+    amount: Joi.number().integer().min(1).max(100).required().messages({
+      'number.base': '数量必须是整数',
+      'number.integer': '数量必须是整数',
+      'number.min': '数量必须大于 0',
+      'number.max': '单次生成数量不能超过 100',
+      'any.required': '请输入数量'
+    })
+  }).unknown(false);
+  const { value, error } = schema.validate(input);
+  if (error) throw new Error(error.details[0].message);
+  const item = policy.allowedItems.find((candidate) => candidate.id === value.itemId);
+  if (!item) throw new Error('该物品不在测试白名单中');
+  if (value.amount > item.maxAmount) throw new Error(`该物品单次最多发放 ${item.maxAmount} 个`);
+  return `SpawnItem ${item.id} ${value.amount} Location ${value.steamId}`;
+}
+
+export function isSteamId64(value) {
+  return /^7656119\d{10}$/.test(String(value));
+}

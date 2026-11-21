@@ -1,0 +1,207 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ConfigStore } from '../src/services/config-store.js';
+import { createDatabase } from '../src/services/database.js';
+
+const STEAM_ID = /^\d{17}$/;
+
+export function parseAuditArgs(argv) {
+  const options = {};
+  for (let index = 0; index < argv.length; index += 2) {
+    const key = argv[index];
+    const value = argv[index + 1];
+    if (!key?.startsWith('--') || value == null) throw new Error('参数格式错误');
+    if (key === '--expected-user-id') {
+      if (!/^\d+$/.test(value)) throw new Error('--expected-user-id 必须是正整数');
+      options.expectedUserId = value;
+    } else if (key === '--expected-login') {
+      const normalized = value.trim().normalize('NFKC').toLowerCase();
+      if (!normalized) throw new Error('--expected-login 不能为空');
+      options.expectedLogin = value.trim();
+      options.expectedNormalizedLogin = normalized;
+    } else if (key === '--expected-steam-id') {
+      if (!STEAM_ID.test(value)) throw new Error('--expected-steam-id 必须是17位数字');
+      options.expectedSteamId = value;
+    } else if (key === '--expected-steam-suffix') {
+      if (!/^\d{4,17}$/.test(value)) throw new Error('--expected-steam-suffix 必须是4至17位数字');
+      options.expectedSteamSuffix = value;
+    } else if (key === '--forbidden-user-id') {
+      if (!/^\d+$/.test(value)) throw new Error('--forbidden-user-id 必须是正整数');
+      options.forbiddenUserId = value;
+    } else {
+      throw new Error(`未知参数 ${key}`);
+    }
+  }
+  if (options.expectedSteamId && options.expectedSteamSuffix) throw new Error('--expected-steam-id 与 --expected-steam-suffix 只能提供一个');
+  const hasProtectedOption = Boolean(options.expectedUserId || options.expectedLogin || options.expectedSteamId || options.expectedSteamSuffix);
+  if (hasProtectedOption && (!options.expectedUserId || !options.expectedLogin || (!options.expectedSteamId && !options.expectedSteamSuffix))) throw new Error('受保护身份核验必须同时提供用户编号、登录账号和 SteamID（完整值或尾号）');
+  return options;
+}
+
+async function tableNames(db) {
+  const rows = await db.query("SELECT table_name AS tableName FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'");
+  return new Set(rows.map((row) => row.tableName));
+}
+
+async function scalar(db, sql, params = []) {
+  const rows = await db.query(sql, params);
+  return Number(rows?.[0]?.count || 0);
+}
+
+async function auditLegacyConflicts(db, failures) {
+  const definitions = [
+    ['用户角色', 's.role', 'p.role', 'p.role IS NOT NULL AND s.role<>p.role'],
+    ['账户状态', 's.status', 'p.status', 'p.status IS NOT NULL AND s.status<>p.status'],
+    ['会员等级', 's.member_level', 'p.member_level', 's.member_level<>p.member_level'],
+    ['会员到期时间', 's.member_expires_at', 'p.member_expires_at', 'NOT (s.member_expires_at <=> p.member_expires_at)']
+  ];
+  const conflicts = [];
+  for (const [field, shopExpression, playerExpression, predicate] of definitions) {
+    const rows = await db.query(`SELECT s.steam_id AS steamId,${shopExpression} AS shopValue,${playerExpression} AS playerValue FROM shop_users s JOIN player_accounts p ON BINARY p.steam_id=BINARY s.steam_id WHERE s.steam_id IS NOT NULL AND ${predicate} ORDER BY s.steam_id LIMIT 21`);
+    for (const row of rows.slice(0, 20)) conflicts.push({ steamId: row.steamId, field, shopValue: row.shopValue, playerValue: row.playerValue });
+    if (rows.length > 20) conflicts.push({ more: true, field });
+  }
+  const missingRows = await db.query('SELECT s.steam_id AS steamId FROM shop_users s LEFT JOIN player_accounts p ON BINARY p.steam_id=BINARY s.steam_id WHERE s.steam_id IS NOT NULL AND p.steam_id IS NULL ORDER BY s.steam_id LIMIT 21');
+  const missingPlayerAccounts = missingRows.slice(0, 20).map((row) => row.steamId);
+  if (missingRows.length > 20) missingPlayerAccounts.push('MORE');
+  if (conflicts.length) failures.push('旧账号表存在角色、状态或会员字段冲突');
+  if (missingPlayerAccounts.length) failures.push('商城账号 SteamID 缺少玩家账号映射');
+  return { conflicts, missingPlayerAccounts };
+}
+
+async function auditStorageAndOrphans(db, tables) {
+  const storageRows = await db.query("SELECT s.default_character_set_name AS databaseCharset,s.default_collation_name AS databaseCollation,c.table_name AS accountTable,c.character_set_name AS steamIdCharset,c.collation_name AS steamIdCollation FROM information_schema.schemata s LEFT JOIN information_schema.columns c ON c.table_schema=s.schema_name AND c.column_name IN ('SteamID','steam_id') AND c.table_name IN ('商城用户','player_accounts') WHERE s.schema_name=DATABASE() ORDER BY c.table_name LIMIT 1");
+  const storage = storageRows[0] || null;
+  const accountSource = tables.has('商城用户')
+    ? '(SELECT `SteamID` AS steamId FROM `商城用户` WHERE `SteamID` IS NOT NULL)'
+    : tables.has('shop_users') && tables.has('player_accounts')
+      ? '(SELECT steam_id AS steamId FROM shop_users WHERE steam_id IS NOT NULL UNION SELECT steam_id FROM player_accounts WHERE steam_id IS NOT NULL)'
+      : null;
+  const commerceSource = tables.has('商城用户')
+    ? '(SELECT `SteamID` AS steamId FROM `商城用户` WHERE `SteamID` IS NOT NULL)'
+    : tables.has('shop_users') ? '(SELECT steam_id AS steamId FROM shop_users WHERE steam_id IS NOT NULL)' : null;
+  const orphans = { playerSnapshotsWithoutCommerceAccount: 0, playerSnapshotsWithoutAnyAccount: 0, squadMembersWithoutCommerceAccount: 0, squadMembersWithoutAnyAccount: 0, flagsWithoutAnyAccount: 0 };
+  if (tables.has('传送位置快照') && commerceSource) orphans.playerSnapshotsWithoutCommerceAccount = await scalar(db, `SELECT COUNT(*) AS count FROM \`传送位置快照\` p LEFT JOIN ${commerceSource} a ON BINARY a.steamId=BINARY p.\`实体标识\` WHERE p.\`实体类型\`='player' AND a.steamId IS NULL`);
+  if (tables.has('传送位置快照') && accountSource) {
+    orphans.playerSnapshotsWithoutAnyAccount = await scalar(db, `SELECT COUNT(*) AS count FROM \`传送位置快照\` p LEFT JOIN ${accountSource} a ON BINARY a.steamId=BINARY p.\`实体标识\` WHERE p.\`实体类型\`='player' AND a.steamId IS NULL`);
+    orphans.flagsWithoutAnyAccount = await scalar(db, `SELECT COUNT(*) AS count FROM \`传送位置快照\` f LEFT JOIN ${accountSource} a ON BINARY a.steamId=BINARY f.\`归属SteamID\` WHERE f.\`实体类型\`='flag' AND a.steamId IS NULL`);
+  }
+  if (tables.has('player_squads') && commerceSource) orphans.squadMembersWithoutCommerceAccount = await scalar(db, `SELECT COUNT(*) AS count FROM player_squads s LEFT JOIN ${commerceSource} a ON BINARY a.steamId=BINARY s.steam_id WHERE a.steamId IS NULL`);
+  if (tables.has('player_squads') && accountSource) orphans.squadMembersWithoutAnyAccount = await scalar(db, `SELECT COUNT(*) AS count FROM player_squads s LEFT JOIN ${accountSource} a ON BINARY a.steamId=BINARY s.steam_id WHERE a.steamId IS NULL`);
+  return { storage, orphans };
+}
+
+async function auditProtectedIdentity(db, tables, options, failures) {
+  if (!options.expectedUserId) return null;
+  const steamPredicate = options.expectedSteamId ? 'BINARY %STEAM%=BINARY ?' : 'RIGHT(%STEAM%,CHAR_LENGTH(?))=?';
+  const steamParams = options.expectedSteamId ? [options.expectedSteamId] : [options.expectedSteamSuffix, options.expectedSteamSuffix];
+  let rows;
+  if (tables.has('商城用户')) {
+    rows = await db.query(`SELECT \`商城用户编号\` AS userId,\`SteamID\` AS steamId,\`登录账号\` AS login,\`登录账号规范值\` AS normalizedLogin,\`用户角色\` AS role FROM \`商城用户\` WHERE \`商城用户编号\`=? OR ${steamPredicate.replaceAll('%STEAM%', '\`SteamID\`')} OR BINARY \`登录账号规范值\`=BINARY ?`, [options.expectedUserId, ...steamParams, options.expectedNormalizedLogin]);
+  } else if (tables.has('shop_users')) {
+    rows = await db.query(`SELECT id AS userId,steam_id AS steamId,username AS login,normalized AS normalizedLogin,role FROM shop_users WHERE id=? OR ${steamPredicate.replaceAll('%STEAM%', 'steam_id')} OR BINARY normalized=BINARY ?`, [options.expectedUserId, ...steamParams, options.expectedNormalizedLogin]);
+  } else {
+    failures.push('无法定位受保护身份：账号表不存在');
+    return null;
+  }
+  const exact = rows.filter((row) => String(row.userId) === options.expectedUserId && (options.expectedSteamId ? row.steamId === options.expectedSteamId : String(row.steamId || '').endsWith(options.expectedSteamSuffix)) && row.normalizedLogin === options.expectedNormalizedLogin);
+  if (rows.length !== 1 || exact.length !== 1) failures.push('受保护身份的用户编号、登录账号与 SteamID 未唯一绑定到同一行');
+  if (exact[0]?.role !== 'super_admin') failures.push('受保护身份不是 super_admin');
+  let forbiddenRecord = null;
+  if (options.forbiddenUserId) {
+    const forbiddenRows = tables.has('商城用户')
+      ? await db.query('SELECT `商城用户编号` AS userId,`SteamID` AS steamId,`登录账号规范值` AS normalizedLogin FROM `商城用户` WHERE `商城用户编号`=?', [options.forbiddenUserId])
+      : await db.query('SELECT id AS userId,steam_id AS steamId,normalized AS normalizedLogin FROM shop_users WHERE id=?', [options.forbiddenUserId]);
+    const forbidden = forbiddenRows[0];
+    const matchesExpectedSteam = Boolean(forbidden && (options.expectedSteamId ? forbidden.steamId === options.expectedSteamId : String(forbidden.steamId || '').endsWith(options.expectedSteamSuffix)));
+    const matchesExpectedLogin = forbidden?.normalizedLogin === options.expectedNormalizedLogin;
+    forbiddenRecord = { exists: Boolean(forbidden), userId: forbidden ? String(forbidden.userId) : options.forbiddenUserId, login: forbidden?.normalizedLogin || null, steamSuffix: forbidden?.steamId ? String(forbidden.steamId).slice(-4) : null, matchesExpectedLogin, matchesExpectedSteam };
+    if (matchesExpectedLogin || matchesExpectedSteam || rows.some((row) => String(row.userId) === options.forbiddenUserId)) failures.push('受保护登录账号或 SteamID 错误绑定到禁止用户编号');
+  }
+  return { matchedRows: rows.length, exactMatch: exact.length === 1, role: exact[0]?.role || null, forbiddenRecord };
+}
+
+export async function auditAccountMigration(db, options = {}) {
+  const tables = await tableNames(db);
+  const hasTarget = tables.has('商城用户');
+  const hasPlayers = tables.has('player_accounts');
+  const hasShops = tables.has('shop_users');
+  const failures = [];
+  let phase;
+  if (hasTarget && !hasPlayers && !hasShops) phase = 'migrated';
+  else if (!hasTarget && hasPlayers && hasShops) phase = 'legacy';
+  else if (!hasTarget && !hasPlayers && !hasShops) phase = 'fresh';
+  else {
+    phase = 'inconsistent';
+    failures.push('账号表处于不一致状态：商城用户与两张旧账号表必须符合完整迁移前或迁移后布局');
+  }
+
+  const snapshots = { players: 0, flags: 0, unknown: 0 };
+  if (tables.has('传送位置快照')) {
+    const rows = await db.query("SELECT `实体类型` AS entityType,COUNT(*) AS count FROM `传送位置快照` GROUP BY `实体类型`");
+    for (const row of rows) {
+      if (row.entityType === 'player') snapshots.players = Number(row.count);
+      else if (row.entityType === 'flag') snapshots.flags = Number(row.count);
+      else snapshots.unknown += Number(row.count);
+    }
+    if (snapshots.unknown) failures.push('传送位置快照包含未知实体类型');
+  }
+
+  const squads = { rows: 0 };
+  if (tables.has('player_squads')) squads.rows = await scalar(db, 'SELECT COUNT(*) AS count FROM player_squads');
+  const accountRows = hasTarget
+    ? await scalar(db, 'SELECT COUNT(*) AS count FROM `商城用户`')
+    : hasShops ? await scalar(db, 'SELECT COUNT(*) AS count FROM shop_users') : 0;
+  const playerRows = hasPlayers ? await scalar(db, 'SELECT COUNT(*) AS count FROM player_accounts') : 0;
+  const duplicateSteamIds = hasTarget
+    ? await scalar(db, 'SELECT COUNT(*) AS count FROM (SELECT `SteamID` FROM `商城用户` WHERE `SteamID` IS NOT NULL GROUP BY `SteamID` HAVING COUNT(*)>1) d')
+    : hasPlayers ? await scalar(db, 'SELECT COUNT(*) AS count FROM (SELECT steam_id FROM player_accounts WHERE steam_id IS NOT NULL GROUP BY steam_id HAVING COUNT(*)>1) d') : 0;
+  const duplicateLogins = hasTarget
+    ? await scalar(db, 'SELECT COUNT(*) AS count FROM (SELECT `登录账号规范值` FROM `商城用户` WHERE `登录账号规范值` IS NOT NULL GROUP BY `登录账号规范值` HAVING COUNT(*)>1) d')
+    : hasShops ? await scalar(db, 'SELECT COUNT(*) AS count FROM (SELECT normalized FROM shop_users WHERE normalized IS NOT NULL GROUP BY normalized HAVING COUNT(*)>1) d') : 0;
+  if (duplicateSteamIds) failures.push('存在重复 SteamID');
+  if (duplicateLogins) failures.push('存在重复规范化登录账号');
+  const legacyPreflight = phase === 'legacy' ? await auditLegacyConflicts(db, failures) : null;
+  const protectedIdentity = await auditProtectedIdentity(db, tables, options, failures);
+  const accountBusinessSummary = tables.has('商城用户') ? await db.query("SELECT `商城用户编号` AS userId,RIGHT(`SteamID`,4) AS steamSuffix,`登录账号` AS login,`用户角色` AS role,`商城币余额` AS shopBalance,`游戏币` AS gameMoney,`游戏金条` AS gameGold,(`位置观测时间` IS NOT NULL) AS hasLocation,(`小队编号` IS NOT NULL) AS hasSquad FROM `商城用户` ORDER BY `商城用户编号`") : [];
+  const { storage, orphans } = await auditStorageAndOrphans(db, tables);
+  const internalTables = ['账号表合并迁移状态', '账号表合并外键记录', '玩家账户_账号合并备份', '商城登录账户_账号合并备份', '商城用户_合并中间表'].filter((name) => tables.has(name));
+
+  return {
+    safe: failures.length === 0,
+    phase,
+    tables: { account: hasTarget, playerAccounts: hasPlayers, shopUsers: hasShops, playerSquads: tables.has('player_squads'), teleportSnapshots: tables.has('传送位置快照') },
+    counts: { accounts: accountRows, playerAccounts: playerRows, snapshots, squads: squads.rows },
+    uniqueness: { duplicateSteamIds, duplicateLogins },
+    storage,
+    orphans,
+    internalTables,
+    legacyPreflight,
+    protectedIdentity,
+    accountBusinessSummary: Array.isArray(accountBusinessSummary) ? accountBusinessSummary : [],
+    failures
+  };
+}
+
+export async function runAuditAccountMigration(argv = process.argv.slice(2), dependencies = {}) {
+  const options = parseAuditArgs(argv);
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const store = dependencies.store || new ConfigStore(path.join(root, 'data', 'config.json'));
+  const config = await store.read();
+  const db = dependencies.db || await createDatabase(config.mysql);
+  try {
+    const report = await auditAccountMigration(db, options);
+    console.log(JSON.stringify(report, null, 2));
+    if (!report.safe) process.exitCode = 2;
+    return report;
+  } finally {
+    if (!dependencies.db) await db.close();
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runAuditAccountMigration().catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}

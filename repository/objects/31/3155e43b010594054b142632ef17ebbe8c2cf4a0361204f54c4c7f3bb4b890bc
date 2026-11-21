@@ -1,0 +1,90 @@
+import { ServiceError } from './commerce-service.js';
+
+const PAGE_LINE = /^Page\s+(\d+)\/(\d+)$/i;
+const NUMBER = '([-+]?(?:\\d+(?:\\.\\d+)?|\\.\\d+))';
+const FLAG_LINE = new RegExp(`^Flag ID:\\s*(\\d+)\\s*\\|\\s*Owner:\\s*\\[(\\d{17})\\]\\s*(.*?)\\s+\\((\\d+)\\)\\s*\\|\\s*Location:\\s*X=${NUMBER}\\s+Y=${NUMBER}\\s+Z=${NUMBER}$`);
+
+function responseText(value) {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object') return String(value ?? '');
+  for (const key of ['response', 'output', 'result', 'message', 'data']) if (typeof value[key] === 'string') return value[key];
+  return '';
+}
+
+export function parseTeleportFlagPage(input) {
+  const lines = responseText(input).replace(/^\uFEFF/, '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const pageMatch = lines.shift()?.match(PAGE_LINE);
+  if (!pageMatch) throw new ServiceError('ListFlags分页格式与实测样本不一致', 502, 'TELEPORT_FLAG_PAGE_FORMAT_INVALID');
+  const page = Number(pageMatch[1]);
+  const totalPages = Number(pageMatch[2]);
+  if (!Number.isSafeInteger(page) || !Number.isSafeInteger(totalPages) || page < 1 || totalPages < page || totalPages > 100) {
+    throw new ServiceError('ListFlags分页范围无效', 502, 'TELEPORT_FLAG_PAGE_INVALID');
+  }
+  const flags = lines.map((line) => {
+    const match = line.match(FLAG_LINE);
+    if (!match) throw new ServiceError('ListFlags旗帜行格式与实测样本不一致', 502, 'TELEPORT_FLAG_LINE_FORMAT_INVALID');
+    const worldX = Number(match[5]);
+    const worldY = Number(match[6]);
+    const worldZ = Number(match[7]);
+    if (![worldX, worldY, worldZ].every(Number.isFinite)) throw new ServiceError('ListFlags旗帜坐标无效', 502, 'TELEPORT_FLAG_COORDINATE_INVALID');
+    const ownerName = match[3].trim();
+    return {
+      id: match[1],
+      ownerSteamId: match[2],
+      ownerName,
+      ownerCharacterId: Number(match[4]),
+      name: ownerName ? `${ownerName} 的领地旗` : '本人领地旗',
+      visibleToSteamIds: [match[2]],
+      worldX,
+      worldY,
+      worldZ,
+      source: 'rcon_list_flags'
+    };
+  });
+  return { page, totalPages, flags };
+}
+
+export class TeleportFlagLocationProvider {
+  constructor({ clients, reader = null, logger, clock = () => Date.now(), maxPages = 100 }) {
+    this.clients = clients;
+    this.reader = reader;
+    this.logger = logger;
+    this.clock = clock;
+    this.maxPages = Math.min(100, Math.max(1, Number(maxPages) || 100));
+  }
+
+  async collectRcon(ggcon, observedAt) {
+    const flags = [];
+    const ids = new Set();
+    let expectedPages = 1;
+    for (let page = 1; page <= expectedPages; page += 1) {
+      if (page > this.maxPages) throw new ServiceError('ListFlags分页超过安全上限', 502, 'TELEPORT_FLAG_PAGE_LIMIT');
+      const result = await ggcon.command(`ListFlags ${page} true`, { retry: false, priority: 'normal', skipHealth: true });
+      const parsed = parseTeleportFlagPage(result?.response ?? result);
+      if (parsed.page !== page) throw new ServiceError('ListFlags返回页码与请求不一致', 502, 'TELEPORT_FLAG_PAGE_MISMATCH');
+      if (page === 1) expectedPages = parsed.totalPages;
+      else if (parsed.totalPages !== expectedPages) throw new ServiceError('ListFlags采集期间总页数发生变化', 409, 'TELEPORT_FLAG_PAGES_CHANGED');
+      for (const flag of parsed.flags) {
+        if (ids.has(flag.id)) throw new ServiceError('ListFlags完整快照包含重复旗帜', 502, 'TELEPORT_FLAG_DUPLICATE');
+        ids.add(flag.id);
+        flags.push({ ...flag, observedAt });
+      }
+    }
+    return { complete: true, observedAt, flags, source: 'rcon_list_flags' };
+  }
+
+  async collect() {
+    const { ggcon, config } = await this.clients();
+    const observedAt = new Date(this.clock()).toISOString();
+    try {
+      return await this.collectRcon(ggcon, observedAt);
+    } catch (error) {
+      if (!this.reader) throw error;
+      this.logger?.warn?.('RCON领地旗位置采集失败，使用SCUM.db完整快照', { component: 'teleport-flag-location', errorCode: error?.code || error?.name || 'TELEPORT_FLAG_RCON_FAILED' });
+      const snapshot = await this.reader.read(config?.ggcon?.serverDirectory);
+      return { complete: true, observedAt: snapshot.observedAt || observedAt, flags: snapshot.flags, source: 'scum_saved_database' };
+    }
+  }
+}
+
+export const teleportFlagLocationInternals = { PAGE_LINE, FLAG_LINE, responseText };

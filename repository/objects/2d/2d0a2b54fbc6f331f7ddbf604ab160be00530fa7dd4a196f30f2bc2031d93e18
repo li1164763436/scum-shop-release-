@@ -1,0 +1,86 @@
+function safeError(error) {
+  return String(error?.message || error?.code || '载具传送复核失败')
+    .replace(/[A-Za-z]:\\[^\r\n]*/g, '[路径已隐藏]')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .trim()
+    .slice(0, 500) || '载具传送复核失败';
+}
+
+export class VehicleTeleportVerificationWorker {
+  constructor({ service, logger, intervalMs = 15000, batchSize = 20, setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout } = {}) {
+    this.service = service;
+    this.logger = logger;
+    this.intervalMs = Math.max(5000, Number(intervalMs) || 15000);
+    this.batchSize = Math.max(1, Math.min(100, Number(batchSize) || 20));
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+    this.timer = null;
+    this.activeTick = null;
+    this.stopped = true;
+    this.lastStartedAt = null;
+    this.lastCompletedAt = null;
+    this.lastSuccessAt = null;
+    this.lastError = null;
+    this.lastResult = null;
+  }
+
+  status() {
+    return {
+      enabled: !this.stopped,
+      running: Boolean(this.activeTick),
+      polling: Boolean(this.timer),
+      intervalMs: this.intervalMs,
+      batchSize: this.batchSize,
+      lastStartedAt: this.lastStartedAt,
+      lastCompletedAt: this.lastCompletedAt,
+      lastSuccessAt: this.lastSuccessAt,
+      lastError: this.lastError,
+      lastResult: this.lastResult
+    };
+  }
+
+  async start() {
+    if (!this.stopped) return this.status();
+    this.stopped = false;
+    void this.tick();
+    return this.status();
+  }
+
+  schedule() {
+    if (this.stopped || this.timer) return;
+    this.timer = this.setTimer(() => { this.timer = null; void this.tick(); }, this.intervalMs);
+    this.timer?.unref?.();
+  }
+
+  async tick() {
+    if (this.stopped || this.activeTick) return this.activeTick;
+    this.lastStartedAt = new Date().toISOString();
+    this.activeTick = (async () => {
+      try {
+        this.lastResult = await this.service.processDue({ limit: this.batchSize });
+        this.lastSuccessAt = new Date().toISOString();
+        this.lastError = null;
+        return this.lastResult;
+      } catch (error) {
+        this.lastError = safeError(error);
+        this.logger?.warn?.('载具传送复核Worker失败', { component: 'vehicle-teleport-verification', errorCode: error?.code || error?.name || 'VEHICLE_TELEPORT_VERIFICATION_FAILED' });
+        return null;
+      } finally {
+        this.lastCompletedAt = new Date().toISOString();
+        this.activeTick = null;
+        this.schedule();
+      }
+    })();
+    return this.activeTick;
+  }
+
+  async stopAndDrain() {
+    this.stopped = true;
+    if (this.timer) this.clearTimer(this.timer);
+    this.timer = null;
+    if (this.activeTick) await this.activeTick;
+    return this.status();
+  }
+}
+
+export { safeError as safeVehicleTeleportVerificationError };

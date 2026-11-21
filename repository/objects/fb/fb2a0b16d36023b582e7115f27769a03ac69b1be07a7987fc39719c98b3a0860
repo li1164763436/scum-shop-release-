@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090b0b">
+  <title>页面不存在 · 边境补给站</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="/shop/css/errors.css?v=202611171354">
+</head>
+<body class="storefront-error-page" data-error-kind="not-found">
+  <header class="error-header">
+    <a class="error-brand" href="/" aria-label="返回商城首页">
+      <span class="error-brand-mark">S</span>
+      <span><strong>边境补给站</strong><small>SCUM 生存补给</small></span>
+    </a>
+    <span class="error-system-state"><i aria-hidden="true"></i>商城服务在线</span>
+  </header>
+  <main class="error-layout" id="page-error-not-found">
+    <section class="error-copy" aria-labelledby="errorTitle">
+      <p class="error-kicker">页面不存在</p>
+      <div class="error-code" aria-hidden="true">页面失效</div>
+      <h1 id="errorTitle">补给坐标不存在</h1>
+      <p class="error-description">你访问的页面可能已经移动、链接输入有误，或该功能尚未开放。商城服务仍然正常运行。</p>
+      <div class="error-actions">
+        <a class="error-button primary" href="/">返回商城</a>
+        <button class="error-button secondary" type="button" data-error-back>返回上一页</button>
+      </div>
+    </section>
+    <aside class="error-status" aria-label="请求状态">
+      <div class="error-status-head"><span>页面状态</span><b>未找到</b></div>
+      <dl>
+        <div><dt>商城主体</dt><dd class="state-online">正常</dd></div>
+        <div><dt>请求状态</dt><dd>目标不存在</dd></div>
+        <div><dt>建议操作</dt><dd>返回有效入口</dd></div>
+      </dl>
+      <p>当前页面地址无效或内容已被移除</p>
+    </aside>
+  </main>
+  <footer class="error-footer"><span>SCUM 生存补给网络</span><span>连接状态：正常</span></footer>
+  <script src="/shop/js/errors.js?v=202611171354" defer></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+<section class="page" id="page-activities-lottery">
+  <div class="page-toolbar">
+    <div>
+      <span class="section-kicker">LOTTERY OPERATIONS</span>
+      <h2>抽奖管理</h2>
+      <p>统一管理奖池状态、抽奖价格和奖励版本。</p>
+    </div>
+    <div class="toolbar-actions">
+      <button class="btn secondary" id="activityReload" type="button">刷新数据</button>
+      <button class="btn primary" id="lotteryPoolAdd" type="button">＋ 添加奖池</button>
+    </div>
+  </div>
+  <section class="card lottery-pool-directory">
+    <div class="card-head">
+      <div>
+        <h3>奖池列表</h3>
+        <p>点击“查看奖品”管理奖励版本，每页最多显示 5 个奖池。</p>
+      </div>
+      <strong id="lotteryPoolCount">0 个奖池</strong>
+    </div>
+    <div class="lottery-pool-list" id="lotteryPoolList">
+      <div class="stock-record-empty">正在加载奖池...</div>
+    </div>
+    <div class="table-pagination lottery-pool-footer">
+      <button id="lotteryPoolPrev" type="button">上一页</button>
+      <span id="lotteryPoolPageInfo">第 1 页</span>
+      <button id="lotteryPoolNext" type="button">下一页</button>
+    </div>
+  </section>
+</section>

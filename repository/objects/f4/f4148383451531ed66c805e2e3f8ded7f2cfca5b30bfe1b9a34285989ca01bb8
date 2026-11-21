@@ -1,0 +1,102 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { ConfigStore } from '../src/services/config-store.js';
+import { createDatabase } from '../src/services/database.js';
+import { finalizeAccountSchemaMigration } from '../src/services/account-schema-migration.js';
+
+const CONFIRMATION = 'FINALIZE_ACCOUNT_SCHEMA';
+
+export function parseFinalizeArgs(argv) {
+  const values = new Map();
+  for (let index = 0; index < argv.length; index += 2) {
+    const key = argv[index];
+    const value = argv[index + 1];
+    if (!key?.startsWith('--') || value == null) throw new Error('参数格式错误');
+    values.set(key, value);
+  }
+  if (values.get('--confirm') !== CONFIRMATION) throw new Error(`拒绝执行：必须提供 --confirm ${CONFIRMATION}`);
+  const backup = values.get('--backup');
+  if (!backup) throw new Error('拒绝执行：必须提供 --backup 备份文件路径');
+  const sha256 = String(values.get('--sha256') || '').toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('拒绝执行：必须提供64位 --sha256');
+  const manifest = values.get('--manifest');
+  if (!manifest) throw new Error('拒绝执行：必须提供 --manifest 备份清单路径');
+  return { backup: path.resolve(backup), manifest: path.resolve(manifest), sha256 };
+}
+
+export async function verifyBackupArtifact(file, expectedSha256, manifestFile, expectedDatabase, migrationCompletedAt, backupCounts = {}) {
+  const [stat, manifestText] = await Promise.all([fs.promises.stat(file), fs.promises.readFile(manifestFile, 'utf8')]);
+  if (!stat.isFile() || stat.size <= 0) throw new Error('账号合并收尾失败：备份文件不存在或为空');
+  let manifest;
+  try { manifest = JSON.parse(manifestText); } catch { throw new Error('账号合并收尾失败：备份清单不是有效 JSON'); }
+  const manifestCreatedAt = Date.parse(manifest.createdAt);
+  if (manifest.complete !== true || !Number.isFinite(manifestCreatedAt)) throw new Error('账号合并收尾失败：备份清单未标记为完整');
+  if (manifest.database !== expectedDatabase) throw new Error('账号合并收尾失败：备份清单不属于当前数据库');
+  if (!migrationCompletedAt || manifestCreatedAt < new Date(migrationCompletedAt).getTime()) throw new Error('账号合并收尾失败：备份早于本次账号合并完成时间');
+  if (manifest.file !== path.basename(file) || Number(manifest.size) !== stat.size || manifest.sha256 !== expectedSha256) throw new Error('账号合并收尾失败：备份文件与清单不匹配');
+  const requiredSql = new Map([
+    ['商城用户表', /CREATE TABLE(?: IF NOT EXISTS)? `商城用户`/],
+    ['玩家账户备份表', /CREATE TABLE(?: IF NOT EXISTS)? `玩家账户_账号合并备份`/],
+    ['商城登录备份表', /CREATE TABLE(?: IF NOT EXISTS)? `商城登录账户_账号合并备份`/],
+    ['迁移状态表', /CREATE TABLE(?: IF NOT EXISTS)? `账号表合并迁移状态`/],
+    ['外键记录表', /CREATE TABLE(?: IF NOT EXISTS)? `账号表合并外键记录`/]
+  ]);
+  if (Number(backupCounts.playerAccounts) > 0) requiredSql.set('玩家账户备份数据', /INSERT INTO `玩家账户_账号合并备份`/);
+  if (Number(backupCounts.shopAccounts) > 0) requiredSql.set('商城登录备份数据', /INSERT INTO `商城登录账户_账号合并备份`/);
+  const foundSql = new Set();
+  const hash = crypto.createHash('sha256');
+  let overlap = Buffer.alloc(0);
+  for await (const chunk of fs.createReadStream(file)) {
+    hash.update(chunk);
+    const text = Buffer.concat([overlap, chunk]).toString('utf8');
+    for (const [name, pattern] of requiredSql) if (pattern.test(text)) foundSql.add(name);
+    overlap = chunk.subarray(Math.max(0, chunk.length - 512));
+  }
+  const actualSha256 = hash.digest('hex');
+  const missingSql = [...requiredSql.keys()].filter((name) => !foundSql.has(name));
+  if (missingSql.length) throw new Error(`账号合并收尾失败：SQL 备份缺少 ${missingSql.join('、')}`);
+  if (actualSha256 !== expectedSha256) throw new Error(`账号合并收尾失败：备份文件 SHA-256 不匹配（实际 ${actualSha256}）`);
+  const handle = await fs.promises.open(file, 'r');
+  let tail;
+  try {
+    const bytes = Buffer.alloc(Math.min(stat.size, 4096));
+    await handle.read(bytes, 0, bytes.length, stat.size - bytes.length);
+    tail = bytes.toString('utf8');
+  } finally { await handle.close(); }
+  if (!/-- Dump completed on/.test(tail)) throw new Error('账号合并收尾失败：SQL 备份缺少完整导出标记');
+  return { file, manifest: manifestFile, database: expectedDatabase, createdAt: manifest.createdAt, size: stat.size, sha256: actualSha256 };
+}
+
+export async function runFinalizeAccountSchema(argv = process.argv.slice(2), dependencies = {}) {
+  const options = parseFinalizeArgs(argv);
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const store = dependencies.store || new ConfigStore(path.join(root, 'data', 'config.json'));
+  const config = await store.read();
+  const db = dependencies.db || await createDatabase(config.mysql);
+  try {
+    const stateRows = await db.query("SELECT `更新时间` AS completedAt FROM `账号表合并迁移状态` WHERE `迁移名称`='账号物理表合并' AND `迁移阶段`='已完成' LIMIT 1");
+    if (!stateRows[0]?.completedAt) throw new Error('账号合并收尾失败：没有已完成的账号合并状态');
+    const [playerCountRows, shopCountRows] = await Promise.all([
+      db.query('SELECT COUNT(*) AS count FROM `玩家账户_账号合并备份`'),
+      db.query('SELECT COUNT(*) AS count FROM `商城登录账户_账号合并备份`')
+    ]);
+    const backup = await verifyBackupArtifact(options.backup, options.sha256, options.manifest, config.mysql.database, stateRows[0].completedAt, {
+      playerAccounts: Number(playerCountRows[0]?.count || 0),
+      shopAccounts: Number(shopCountRows[0]?.count || 0)
+    });
+    const result = await finalizeAccountSchemaMigration(db);
+    console.log(JSON.stringify({ finalized: result.finalized, backup }, null, 2));
+    return { ...result, backup };
+  } finally {
+    if (!dependencies.db) await db.close();
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runFinalizeAccountSchema().catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}

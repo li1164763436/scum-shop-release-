@@ -1,0 +1,37 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import mysql from 'mysql2/promise';
+import { ConfigStore } from '../src/services/config-store.js';
+import { migrateVehicleTablesToChinese } from '../src/services/schema.js';
+
+const root = path.resolve(import.meta.dirname, '..');
+const config = (await new ConfigStore(path.join(root, 'data', 'config.json')).read()).mysql;
+const connection = await mysql.createConnection({ ...config, charset: 'utf8mb4', timezone: 'Z' });
+const query = async (sql, params = []) => (await connection.execute(sql, params))[0];
+const legacyTables = ['vehicles', 'vehicle_insurance_strategies', 'vehicle_insurance', 'vehicle_insurance_purchases', 'vehicle_insurance_claims', 'vehicle_audit_logs'];
+const chineseTables = ['载具档案', '载具保险销售策略', '载具保险', '载具保险购买记录', '载具保险索赔记录', '载具操作审计'];
+
+try {
+  const pre = { createdAt:new Date().toISOString(), counts:{}, tables:await query("SELECT TABLE_NAME AS tableName,TABLE_ROWS AS estimatedRows,AUTO_INCREMENT AS autoIncrement FROM information_schema.tables WHERE table_schema=DATABASE() AND TABLE_NAME IN (?,?,?,?,?,?) ORDER BY TABLE_NAME", legacyTables) };
+  for (const table of legacyTables) pre.counts[table] = Number((await query(`SELECT COUNT(*) AS count FROM \`${table}\``))[0].count);
+  const report = path.join(root, 'backups', 'database', `vehicle-schema-pre-${pre.createdAt.replace(/[:.Z]/g, '-')}.json`);
+  await fs.writeFile(report, JSON.stringify(pre, null, 2));
+
+  await migrateVehicleTablesToChinese({ query });
+
+  const correction = await query("UPDATE `载具档案` v JOIN products p ON p.id=(SELECT MAX(p2.id) FROM products p2 WHERE p2.enabled=1 AND p2.parent_category='载具交通' AND p2.category_name='载具' AND LOWER(COALESCE(NULLIF(p2.item_id,''),SUBSTRING_INDEX(p2.fulfillment_codes,',',1)))=LOWER(REPLACE(COALESCE(v.`来源资产标识`,v.`来源载具别名`,v.`来源实体类名`,''),'Vehicle:',''))) SET v.`型号名称`=p.name,v.`载具类型`=p.name WHERE v.`来源类型`='scum_locked_vehicle'");
+  const post = {};
+  for (const table of chineseTables) post[table] = Number((await query(`SELECT COUNT(*) AS count FROM \`${table}\``))[0].count);
+  const englishBaseTables = await query("SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema=DATABASE() AND TABLE_TYPE='BASE TABLE' AND TABLE_NAME IN (?,?,?,?,?,?)", legacyTables);
+  const englishPhysicalColumns = await query("SELECT COUNT(*) AS count FROM information_schema.columns WHERE table_schema=DATABASE() AND TABLE_NAME IN (?,?,?,?,?,?) AND COLUMN_NAME REGEXP '^[a-z]'", chineseTables);
+  const constraints = await query("SELECT CONSTRAINT_TYPE AS type,COUNT(*) AS count FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND TABLE_NAME IN (?,?,?,?,?,?) GROUP BY CONSTRAINT_TYPE ORDER BY CONSTRAINT_TYPE", chineseTables);
+  const indexes = await query("SELECT COUNT(DISTINCT CONCAT(TABLE_NAME,':',INDEX_NAME)) AS count FROM information_schema.statistics WHERE table_schema=DATABASE() AND TABLE_NAME IN (?,?,?,?,?,?)", chineseTables);
+  const compatibilityViews = await query("SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema=DATABASE() AND TABLE_TYPE='VIEW' AND TABLE_NAME IN (?,?,?,?,?,?)", legacyTables);
+  const models = await query("SELECT `来源资产标识` AS sourceAssetId,`型号名称` AS modelName,`载具类型` AS vehicleType,COUNT(*) AS quantity FROM `载具档案` GROUP BY `来源资产标识`,`型号名称`,`载具类型` ORDER BY `来源资产标识`");
+  const result = { report:path.basename(report), correctedVehicles:Number(correction.affectedRows || 0), pre:pre.counts, post, englishBaseTables:Number(englishBaseTables[0].count), englishPhysicalColumns:Number(englishPhysicalColumns[0].count), compatibilityViews:Number(compatibilityViews[0].count), constraints:Object.fromEntries(constraints.map((row) => [row.type,Number(row.count)])), indexes:Number(indexes[0].count), models };
+  if (Object.values(pre.counts).some((count, index) => count !== Object.values(post)[index])) throw new Error('载具表迁移前后行数不一致');
+  if (result.englishBaseTables || result.englishPhysicalColumns) throw new Error('载具英文物理表或字段仍然存在');
+  console.log(JSON.stringify(result));
+} finally {
+  await connection.end();
+}

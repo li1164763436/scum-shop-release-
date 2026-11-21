@@ -1,0 +1,73 @@
+<section class="page" id="page-starter-gift">
+  <div class="page-toolbar">
+    <div><span class="section-kicker">SUPPLY PACKAGES</span><h2>礼包管理</h2><p>数据库礼包按自动编号排序，代码保存前执行严格安全解析。</p></div>
+    <div class="toolbar-actions"><button class="btn secondary" id="giftTypeSettings" type="button">礼包类型设置</button><button class="btn primary" id="addStarterGift" type="button">＋ 新增礼包</button></div>
+  </div>
+  <section class="card gift-list-panel">
+    <div class="card-head"><div><h3>礼包列表</h3><p>按礼包编号升序，点击礼包可编辑。</p></div></div>
+    <div class="gift-list-table-head"><span>ID</span><span>礼包名称</span><span>礼包图片</span><span>礼包类型</span><span>礼包代码</span><span>商品预览</span><span>次数</span><span>价格</span><span>等级</span><span>重置时间</span><span>操作</span></div>
+    <div id="starterGiftList" class="gift-list"></div>
+  </section>
+  <div class="modal-backdrop centered-modal gift-editor-backdrop" id="starterGiftModal" aria-hidden="true">
+    <form id="starterGiftForm" class="modal gift-editor-modal" role="dialog" aria-modal="true" aria-labelledby="giftEditorTitle">
+      <div class="modal-head"><div><h2 id="giftEditorTitle">新增礼包</h2><p>按步骤配置礼包展示、领取规则和实际发放内容；礼包编号由数据库自动生成。</p></div><button class="icon-btn" id="closeStarterGiftModal" type="button" aria-label="关闭">×</button></div>
+      <div class="gift-editor-modal-body">
+        <input name="enabled" type="checkbox" hidden>
+        <input name="giftId" type="hidden">
+        <div class="gift-fields advanced-gift-fields">
+          <div class="gift-editor-guide full">
+            <span class="gift-editor-guide-icon">i</span>
+            <div><strong>礼包配置说明</strong><p>建议依次填写基础信息、领取限制、展示设置和发放内容。带“必填”标记的字段保存前必须填写。</p></div>
+            <div class="gift-editor-steps"><span><b>1</b>基础信息</span><span><b>2</b>领取限制</span><span><b>3</b>展示设置</span><span><b>4</b>发放内容</span></div>
+          </div>
+          <section class="gift-form-section gift-basic-section full">
+            <div class="gift-form-section-title"><div class="gift-section-heading"><span class="gift-section-index">01</span><div><b>基础信息</b><span>设置礼包名称、业务类型、重置周期和玩家看到的说明。</span></div></div><em class="gift-section-tag required">必填</em></div>
+            <div class="gift-form-grid gift-basic-grid">
+              <label><span class="gift-field-title">礼包名称 <em>必填</em></span><input name="giftName" required maxlength="100" placeholder="例如：新玩家基础补给"><span class="field-hint">显示在礼包列表及玩家领取界面，建议使用清晰易识别的名称</span></label>
+              <label><span class="gift-field-title">礼包类型 <em>必填</em></span><select name="giftType"><option value="normal">普通</option><option value="private">私人</option><option value="title">称号</option><option value="squad">小队</option><option value="monthly">月度</option><option value="weekly">周度</option><option value="quarterly">季度</option></select><span class="field-hint">类型决定可用的领取对象和周期规则</span></label>
+              <label><span class="gift-field-title">重置周期（天）</span><input name="resetDays" type="number" min="1" max="3650" step="1" placeholder="留空表示不按天重置"><span class="field-hint">填写后按指定天数恢复周期领取次数；留空时不设置自定义周期</span></label>
+              <label class="full"><span class="gift-field-title">说明</span><textarea name="description" maxlength="2000" placeholder="填写礼包用途、领取条件或注意事项"></textarea><span class="field-hint">用于向管理员和玩家说明礼包内容，不会作为游戏命令执行</span></label>
+            </div>
+          </section>
+          <section class="gift-form-section gift-limit-section full">
+            <div class="gift-form-section-title"><div class="gift-section-heading"><span class="gift-section-index">02</span><div><b>领取限制</b><span>设置领取对象、会员门槛、领取次数、价格和下次重置时间。</span></div></div><em class="gift-section-tag">规则设置</em></div>
+            <div class="gift-form-grid gift-limit-grid">
+              <label data-gift-private><span class="gift-field-title">目标 SteamID <em>必填</em></span><input name="targetSteamId" maxlength="17" placeholder="输入指定玩家的 SteamID"><span class="field-hint">仅私人礼包使用，填写后只有该 SteamID 可以领取</span></label>
+              <label data-gift-title><span class="gift-field-title">指定称号 <em>必填</em></span><input name="requiredTitle" maxlength="100" placeholder="输入允许领取的称号"><span class="field-hint">仅称号礼包使用，玩家需拥有完全一致的称号</span></label>
+              <label><span class="gift-field-title">会员等级 <em>必填</em></span><input name="memberLevel" type="number" min="0" value="0" required><span class="field-hint">0 表示不限制会员等级</span></label>
+              <label><span class="gift-field-title">会员模式</span><select name="memberMode"><option value="minimum">最低等级</option><option value="exact">精确等级</option></select><span class="field-hint">最低等级允许更高等级领取；精确等级只允许指定等级领取</span></label>
+              <label><span class="gift-field-title">历史总次数 <em>必填</em></span><input name="totalLimit" type="number" min="1" max="99999" value="1" required><span class="field-hint">单个玩家在礼包有效期内累计可领取的最大次数</span></label>
+              <label><span class="gift-field-title">每日次数 <em>必填</em></span><input name="dailyLimit" type="number" min="1" max="99999" value="1" required><span class="field-hint">单个玩家每天最多可领取的次数</span></label>
+              <label data-gift-period><span class="gift-field-title">周期次数 <em>必填</em></span><input name="periodLimit" type="number" min="1" max="99999" value="1" required><span class="field-hint">周度、月度或季度礼包在每个周期内可领取的次数</span></label>
+              <label><span class="gift-field-title">价格（商城币） <em>必填</em></span><input name="price" type="number" min="0" value="0" required><span class="field-hint">0 表示免费领取，大于 0 时从玩家商城币余额扣除</span></label>
+              <label class="full"><span class="gift-field-title">下次重置时间</span><input name="nextResetAt" type="datetime-local"><span class="field-hint">可手动指定下一次次数重置时间；留空时由礼包周期规则自动处理</span></label>
+            </div>
+          </section>
+          <section class="gift-form-section gift-media-section full">
+            <div class="gift-form-section-title"><div class="gift-section-heading"><span class="gift-section-index">03</span><div><b>礼包展示</b><span>设置礼包封面图片、图片地址和领取截止时间。</span></div></div><em class="gift-section-tag media">展示设置</em></div>
+            <div class="gift-media-layout">
+              <div class="gift-image-upload"><div class="gift-image-preview" id="giftImagePreview"><span>暂无图片</span></div><input id="giftImageFile" type="file" accept="image/png" hidden><button class="btn secondary" type="button" data-upload-gift-image>上传图片</button><small>仅支持 PNG，建议使用比例统一、主体清晰的礼包封面。</small></div>
+              <div class="gift-media-fields">
+                <label><span class="gift-field-title">图片地址</span><input name="imagePath" maxlength="500" placeholder="上传成功后自动填写"><span class="field-hint">通常无需手动填写；上传成功后系统会自动保存站内图片路径</span></label>
+                <label><span class="gift-field-title">礼包到期</span><input name="expiresAt" type="datetime-local"><span class="field-hint">到达此时间后礼包停止领取；留空表示不设置固定到期时间</span></label>
+              </div>
+            </div>
+          </section>
+          <div class="gift-content-layout full">
+            <section class="gift-form-section gift-code-section">
+              <div class="gift-form-section-title"><div class="gift-section-heading"><span class="gift-section-index">04A</span><div><b>礼包代码</b><span>直接填写游戏发放命令，每行代表一次发放动作。</span></div></div></div>
+              <label><span class="gift-field-title">手动发放内容</span><textarea name="codes" class="gift-code-editor" placeholder="#spawnitem Break_Oil 1&#10;#spawnitem Magazine_RPK 10 AmmoCount 100&#10;#spawnitem Cash 1 CashValue 10000 2&#10;[50000商城币]"></textarea></label>
+              <div class="gift-code-help"><strong>代码安全说明</strong><span>支持 SpawnItem 的物品参数和 [数量商城币]</span><span>每行一条，按填写顺序依次执行</span><span>禁止 Location、分号、引号及其他管理命令</span></div>
+            </section>
+            <section class="gift-form-section gift-product-section">
+              <div class="gift-form-section-title"><div class="gift-section-heading"><span class="gift-section-index">04B</span><div><b>商品内容</b><span>从商品管理选择商品，并读取其已配置的物品代码。</span></div></div><button class="btn secondary" type="button" data-manage-gift-product>管理商品</button></div>
+              <div class="gift-product-intro"><strong>商品与手动代码可以同时使用</strong><p>领取礼包时会合并执行所选商品代码和左侧手动填写的礼包代码。</p></div>
+              <div class="gift-product-code-preview" id="giftProductCodePreview">暂无已添加商品</div>
+            </section>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions"><div><button class="btn secondary" id="cancelStarterGiftModal" type="button">取消</button><button class="btn primary" type="submit">保存礼包</button></div></div>
+    </form>
+  </div>
+</section>

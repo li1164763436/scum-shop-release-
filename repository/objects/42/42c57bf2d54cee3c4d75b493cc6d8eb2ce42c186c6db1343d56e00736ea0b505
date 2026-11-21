@@ -1,0 +1,58 @@
+import path from 'node:path';
+import mysql from 'mysql2/promise';
+import { ConfigStore } from '../src/services/config-store.js';
+import { Gsm3Client } from '../src/services/gsm3-client.js';
+import { GgconClient } from '../src/services/ggcon-client.js';
+import { TeleportService } from '../src/services/teleport-service.js';
+import { TeleportMapService } from '../src/services/teleport-map-service.js';
+
+const root = path.resolve(import.meta.dirname, '..');
+const config = await new ConfigStore(path.join(root, 'data', 'config.json')).read();
+const db = await mysql.createConnection({ ...config.mysql, charset: 'utf8mb4' });
+const gsm3 = new Gsm3Client(config.gsm3, config.reconnect);
+const ggcon = new GgconClient(config.ggcon, config.reconnect, { gsm3, instanceId: config.fulfillment.instanceId });
+
+try {
+  const [columns] = await db.query("SELECT COLUMN_NAME AS name,DATA_TYPE AS type,IS_NULLABLE AS nullable FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='传送位置快照' ORDER BY ORDINAL_POSITION");
+  const [snapshots] = await db.query("SELECT `实体类型` AS entityType,`是否当前有效` AS online,COUNT(*) AS total,MAX(`观测时间`) AS latestObservedAt FROM `传送位置快照` GROUP BY `实体类型`,`是否当前有效` ORDER BY `实体类型`,`是否当前有效`");
+  const [vehicles] = await db.query("SELECT CASE WHEN source_sync_state='present' AND source_synchronized_at>=DATE_SUB(NOW(),INTERVAL 5 MINUTE) THEN 'online' ELSE 'offline' END AS locationState,COUNT(*) AS total,MAX(source_synchronized_at) AS latestObservedAt FROM vehicles WHERE source_type='scum_locked_vehicle' AND source_lock_slots>0 AND world_x IS NOT NULL AND world_y IS NOT NULL AND status NOT IN ('lost','destroyed','retired') GROUP BY locationState ORDER BY locationState");
+  const [vehicleStatuses] = await db.query("SELECT status,source_sync_state AS sourceSyncState,COUNT(*) AS total FROM vehicles WHERE source_type='scum_locked_vehicle' AND source_lock_slots>0 AND world_x IS NOT NULL AND world_y IS NOT NULL GROUP BY status,source_sync_state ORDER BY status,source_sync_state");
+  const [settings] = await db.query("SELECT `传送总开关` AS enabled,`小队玩家互传` AS playerEnabled,`玩家到小队载具` AS ownedVehicleEnabled,`玩家到授权领地旗` AS territoryFlagEnabled,`领地内载具到玩家` AS vehicleToTerritoryFlagEnabled,`远距离载具到玩家` AS vehicleToPlayerEnabled FROM `传送管理设置` WHERE `配置编号`=1");
+  let capabilities = {};
+  let capabilityError = null;
+  try { capabilities = await ggcon.capabilities(); } catch (error) { capabilityError = error?.code || error?.name || 'CAPABILITY_CHECK_FAILED'; }
+  const [sessionUsers] = await db.query("SELECT DISTINCT u.`SteamID` AS steamId FROM shop_sessions s JOIN `商城用户` u ON u.`商城用户编号`=s.user_id WHERE s.expires_at>CURRENT_TIMESTAMP(3) AND s.revoked_at IS NULL AND u.`账户状态`='active' AND u.`SteamID` REGEXP '^[0-9]{17}$' ORDER BY u.`SteamID`");
+  const adapter = { query: async (sql, parameters = []) => (await db.query(sql, parameters))[0], transaction: async (work) => work(adapter) };
+  const teleport = new TeleportService({ db: adapter, clients: async () => ({ ggcon }), membershipEntitlements: async () => ({ memberLevel: 0, dailyTeleports: 0, teleportDiscount: 100 }) });
+  const teleportMap = new TeleportMapService({ db: adapter });
+  const sessionOverviews = [];
+  for (const [index, user] of sessionUsers.entries()) {
+    const [overview, map] = await Promise.all([teleport.overview(user.steamId), teleportMap.overview(user.steamId)]);
+    sessionOverviews.push({
+      session: index + 1,
+      enabled: overview.enabled,
+      capabilities: overview.capabilities,
+      targets: Object.fromEntries(Object.entries(overview.targets).map(([key, value]) => [key, value.length])),
+      map: { player: Boolean(map.player), teammates: map.teammates.length, vehicles: map.vehicles.length, flags: map.flags.length }
+    });
+  }
+  console.log(JSON.stringify({
+    snapshotColumns: columns,
+    snapshots: snapshots.map((row) => ({ entityType: row.entityType, online: Boolean(row.online), total: Number(row.total), latestObservedAt: row.latestObservedAt })),
+    vehicles: vehicles.map((row) => ({ locationState: row.locationState, total: Number(row.total), latestObservedAt: row.latestObservedAt })),
+    vehicleStatuses: vehicleStatuses.map((row) => ({ status: row.status, sourceSyncState: row.sourceSyncState, total: Number(row.total) })),
+    settings: settings[0] ? Object.fromEntries(Object.entries(settings[0]).map(([key, value]) => [key, Boolean(value)])) : null,
+    capabilities: {
+      teleportPlayerToPlayer: capabilities.teleportPlayerToPlayer === true,
+      teleportPlayerToOwnedVehicle: capabilities.teleportPlayerToOwnedVehicle === true,
+      teleportPlayerToTerritoryFlag: capabilities.teleportPlayerToTerritoryFlag === true,
+      teleportOwnedVehicleToPlayerInTerritory: capabilities.teleportOwnedVehicleToPlayerInTerritory === true,
+      teleportOwnedVehicleToPlayerLongDistance: capabilities.teleportOwnedVehicleToPlayerLongDistance === true
+    },
+    capabilityError,
+    sessionOverviews
+  }));
+} finally {
+  ggcon.close();
+  await db.end();
+}

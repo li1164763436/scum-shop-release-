@@ -1,0 +1,14 @@
+<section class="page" id="page-redeem-codes">
+          <div class="page-toolbar"><div><span class="section-kicker">SECURE REDEMPTION</span><h2>兑换管理</h2><p>创建和维护安全兑换入口；后台只展示卡密，不提供完整兑换码或哈希。</p></div><div class="toolbar-actions"><button class="btn secondary" id="reloadRedeemCodes" type="button">↻ 刷新</button></div></div>
+          <div class="redeem-config-grid">
+          <form id="exchangeConfigForm" class="config-stack">
+            <section class="card form-card"><div class="card-head"><div><h3>账户资产兑换</h3><p>设置前台商城币与游戏金条的双向兑换比例，兑换数量按输入数量乘以对应比例向下取整。</p></div><label class="switch"><input name="enabled" type="checkbox"><span></span>启用兑换</label></div><div class="form-grid cols-3"><label>商城币数量<input name="coinToGoldRate" type="number" min="1" max="1000000" step="1" required><span class="field-hint">设置 X 商城币可兑换 1 根金条</span></label><label>金条兑换商城币比例<input name="goldToCoinRate" type="number" min="0.00000001" max="1000000" step="0.00000001" required><span class="field-hint">设置 1 根金条可兑换 X 商城币</span></label><label>单次兑换上限<input name="maxAmount" type="number" min="1" max="1000000000" step="1" required><span class="field-hint">限制用户单次提交的输入数量</span></label></div><div class="form-actions"><button class="btn primary" type="submit">保存兑换设置</button></div></section>
+          </form>
+          <form id="characterGrowthConfigForm" class="config-stack">
+            <section class="card form-card"><div class="card-head"><div><h3>购买设置</h3><p>设置前台角色属性点与技能等级的商城币价格。</p></div></div><div class="form-grid cols-3"><label>属性点单价<input name="attributePointPrice" type="number" min="0" max="1000000000" step="1" required><span class="field-hint">每购买 1 点属性消耗的商城币</span></label><label>技能等级单价<input name="skillLevelPrice" type="number" min="0" max="1000000000" step="1" required><span class="field-hint">技能直升 3 级、经验 9999999 的价格</span></label></div><div class="form-actions"><button class="btn primary" type="submit">保存购买设置</button></div></section>
+          </form>
+          </div>
+          <section class="card redeem-code-directory"><div class="redeem-code-directory-head"><h3>兑换码列表</h3><button class="btn primary" data-action="new-redeem-code" type="button">＋ 新增CDK</button></div><div class="table-wrap"><table class="redeem-code-table"><thead><tr><th>ID</th><th>名称</th><th>卡密</th><th>类型</th><th>状态</th><th>总使用数 / 限制</th><th>有效期</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="redeemCodeRows"><tr><td colspan="9" class="empty loading">正在加载兑换码...</td></tr></tbody></table></div></section>
+        </section>
+
+        

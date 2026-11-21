@@ -1,0 +1,46 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+export async function importReleaseProductCatalog(db, root, version, logger) {
+  const stateKey = 'release_product_catalog_initialized';
+  const states = await db.query('SELECT completed_at AS completedAt FROM bootstrap_states WHERE state_key=?', [stateKey]);
+  if (states[0]?.completedAt) return { imported: 0, skipped: 0, initialized: true };
+  const productCount = await db.query('SELECT COUNT(*) AS count FROM products');
+  if (Number(productCount[0]?.count || 0) > 0) {
+    await db.query('INSERT INTO bootstrap_states (state_key,completed_at) VALUES (?,CURRENT_TIMESTAMP(3)) ON DUPLICATE KEY UPDATE completed_at=VALUES(completed_at)', [stateKey]);
+    return { imported: 0, skipped: 0, initialized: true };
+  }
+  const candidates = [
+    path.join(root, 'data', `release-catalog-${version}`, 'products.json'),
+    path.join(root, 'data', 'release-catalog-1.0.0', 'products.json')
+  ];
+  let file;
+  for (const candidate of candidates) { try { await fs.access(candidate); file = candidate; break; } catch {} }
+  if (!file) return { imported: 0, skipped: 0 };
+  const catalog = JSON.parse(await fs.readFile(file, 'utf8'));
+  if (!Array.isArray(catalog.products)) throw new Error('商品目录格式无效');
+  let imported = 0, skipped = 0;
+  await db.transaction(async (tx) => {
+    if (catalog.snapshot) {
+      for (const parent of catalog.parents || []) await tx.query('INSERT INTO product_parent_categories (name,sort_order) VALUES (?,?) ON DUPLICATE KEY UPDATE sort_order=VALUES(sort_order)', [parent.name, parent.sortOrder]);
+      for (const category of catalog.categories || []) await tx.query('INSERT INTO product_categories (parent_name,name,sort_order) VALUES (?,?,?) ON DUPLICATE KEY UPDATE sort_order=VALUES(sort_order)', [category.parentName, category.name, category.sortOrder]);
+    }
+    for (const product of catalog.products) {
+      if (catalog.snapshot) {
+        await tx.query('INSERT INTO products (sku,name,price,item_id,grant_amount,parent_category,category_name,currency_type,min_member_level,max_uses,image_path,fulfillment_codes,enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [product.sku, product.name, product.price, product.itemId, product.grantAmount, product.parentCategory, product.category, product.currencyType, product.minMemberLevel, product.maxUses, product.imagePath, product.fulfillmentCodes, product.enabled]);
+        imported++;
+        continue;
+      }
+      const existing = await tx.query('SELECT id FROM products WHERE item_id=? LIMIT 1', [product.itemId]);
+      if (existing.length) { skipped++; continue; }
+      let sku = product.sku;
+      const duplicateSku = await tx.query('SELECT id FROM products WHERE sku=? LIMIT 1', [sku]);
+      if (duplicateSku.length) sku = `CAT-${product.itemId}`.slice(0, 64);
+      await tx.query('INSERT INTO products (sku,name,price,item_id,grant_amount,parent_category,category_name,currency_type,min_member_level,image_path,fulfillment_codes,enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [sku, product.name, 0, product.itemId, 1, product.parentCategory || null, product.category || null, 'coin', 0, product.imagePath || null, product.fulfillmentCodes || `#spawnitem ${product.itemId}`, 0]);
+      imported++;
+    }
+    await tx.query('INSERT INTO bootstrap_states (state_key,completed_at) VALUES (?,CURRENT_TIMESTAMP(3)) ON DUPLICATE KEY UPDATE completed_at=VALUES(completed_at)', [stateKey]);
+  });
+  logger?.info('发布商品目录导入完成', { component: 'release-product-catalog', imported, skipped, file });
+  return { imported, skipped };
+}

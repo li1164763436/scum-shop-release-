@@ -1,0 +1,270 @@
+function productCodes(product) {
+  if (Array.isArray(product.codes)) return product.codes.map(String);
+  const raw = product.fulfillmentCodes || product.itemId || '';
+  return String(raw).split(',').map((code) => code.trim()).filter(Boolean);
+}
+async function loadProducts() {
+  $('#productRows').innerHTML = empty(8, '正在加载商品...', true);
+  try {
+    const [data, categories, parents] = await Promise.all([api('/api/products'), api('/api/product-categories'), api('/api/product-parent-categories')]);
+    state.products = list(data, ['products', 'items']);
+    state.productCategories = list(categories);
+    state.productParentCategories = list(parents);
+    syncProductFilters();
+    renderProducts();
+    refreshStarterGiftProductData();
+  } catch (error) { $('#productRows').innerHTML = empty(8, error.message === '接口不存在' ? '商品接口尚未启用' : error.message); }
+}
+function uniqueProductValues(key, parent = '') {
+  return [...new Set(state.products.filter((item) => !parent || String(item.parentCategory || '') === parent).map((item) => String(item[key] || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+function syncProductFilters() {
+  const parentSelect = $('#productParentFilter');
+  const categorySelect = $('#productCategoryFilter');
+  const selectedParent = parentSelect.value;
+  const selectedCategory = categorySelect.value;
+  parentSelect.innerHTML = '<option value="">全部分类</option>' + uniqueProductValues('parentCategory').map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  parentSelect.value = uniqueProductValues('parentCategory').includes(selectedParent) ? selectedParent : '';
+  if (!parentSelect.value) {
+    categorySelect.innerHTML = '';
+    categorySelect.value = '';
+    categorySelect.hidden = true;
+    categorySelect.disabled = true;
+    return;
+  }
+  const categories = uniqueProductValues('category', parentSelect.value);
+  categorySelect.innerHTML = categories.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  categorySelect.value = categories.includes(selectedCategory) ? selectedCategory : '';
+  categorySelect.hidden = false;
+  categorySelect.disabled = false;
+}
+function renderProducts() {
+  const keyword = $('#productSearch').value.trim().toLowerCase();
+  const filter = $('#productStatusFilter').value;
+  const parentFilter = $('#productParentFilter').value;
+  const categoryFilter = $('#productCategoryFilter').value;
+  const rows = state.products.filter((item) => {
+    const text = [item.name, item.parentCategory, item.category, item.sku, ...productCodes(item)].join(' ').toLowerCase();
+    const itemStatus = item.enabled === false ? 'inactive' : 'active';
+    return (!keyword || text.includes(keyword)) && (!filter || itemStatus === filter) && (!parentFilter || item.parentCategory === parentFilter) && (!categoryFilter || item.category === categoryFilter);
+  });
+  $('#productResultCount').textContent = `${rows.length} / ${state.products.length} 项`;
+  $('#productRows').innerHTML = rows.length ? rows.map((item) => {
+    const itemStatus = item.enabled === false ? 'inactive' : 'active';
+    const codes = productCodes(item);
+    const fullCodes = codes.join(', ');
+    const codePreview = codes.slice(0, 3).join(', ') + (codes.length > 3 ? ` 等 ${codes.length} 条` : '');
+    const image = item.imagePath ? `<img class="product-thumb" src="${esc(item.imagePath)}" alt="${esc(item.name || '商品')}" loading="lazy">` : '<span class="product-thumb placeholder">无图</span>';
+    const memberLevel = Number(item.minMemberLevel || 0);
+    return `<tr><td class="product-id">${esc(item.id ?? '--')}</td><td><strong class="product-name" title="${esc(item.name || '未命名商品')}">${esc(item.name || '未命名商品')}</strong></td><td>${image}</td><td><span class="category-path">${esc(item.parentCategory || '未分组')}<i>/</i>${esc(item.category || '未分类')}</span></td><td><code class="code-preview" title="${esc(fullCodes)}">${esc(codePreview || '--')}</code><small class="table-note">${codes.length} 条发货代码</small></td><td><span class="money">${number(item.price)} ${esc({ money: '美金', gold: '金条' }[item.currencyType] || '商城币')}</span></td><td>${memberLevel > 0 ? `Lv.${number(memberLevel)}` : '无限制'}</td><td>${status(itemStatus)}</td><td><div class="row-actions product-actions"><button class="row-btn product-action edit" data-edit-product="${esc(item.id)}">编辑</button><button class="row-btn product-action danger" data-delete-product="${esc(item.id)}">删除</button></div></td></tr>`;
+  }).join('') : empty(9, '暂无符合条件的商品');
+}
+
+function productCodeRow(value = '') {
+  return `<div class="product-code-row"><input type="search" name="fulfillmentCode" value="${esc(value)}" placeholder="#spawnanimal / #SpawnZombie / #SpawnItem / 纯物品代码" maxlength="160" aria-label="物品代码"><button class="row-btn danger" type="button" data-remove-product-code>删除</button></div>`;
+}
+function normalizeProductCode(value, parentCategory = '', category = '') {
+  const code = String(value || '').trim();
+  if (parentCategory !== 'NPC' || category !== '动物') return code;
+  if (/^#spawnanimal\b/i.test(code)) return code.replace(/^#spawnanimal\b/i, '#spawnanimal');
+  if (/^#spawnitem\s+/i.test(code)) return code.replace(/^#spawnitem\s+/i, '#spawnanimal ');
+  return code.startsWith('#') || !code ? code : `#spawnanimal ${code}`;
+}
+function appendProductCode(value = '') {
+  $('#productCodeRows')?.insertAdjacentHTML('beforeend', productCodeRow(value));
+}
+async function uploadProductImage(file, form) {
+  const query = new URLSearchParams({ parentCategory: form.elements.parentCategory?.value || '', category: form.elements.category?.value || '' });
+  return uploadImage(file, `/api/products/image?${query}`);
+}
+function updateProductImagePreview(path) {
+  const preview = $('#productImagePreview');
+  if (!preview) return;
+  preview.innerHTML = path ? `<img src="${esc(path)}" alt="商品图片预览">` : '<span>暂无图片</span>';
+}
+function productCategoryOptions(selectedParent = '', selectedCategory = '') {
+  const parents = [...new Set(state.productCategories.map((item) => item.parentCategory))];
+  const parentOptions = parents.map((value) => `<option value="${esc(value)}" ${value === selectedParent ? 'selected' : ''}>${esc(value)}</option>`).join('');
+  const categories = state.productCategories.filter((item) => item.parentCategory === selectedParent);
+  const categoryOptions = categories.map((item) => `<option value="${esc(item.category)}" ${item.category === selectedCategory ? 'selected' : ''}>${esc(item.category)}</option>`).join('');
+  return { parentOptions, categoryOptions };
+}
+function syncProductModalCategories() {
+  const form = $('#modalForm');
+  const parent = form?.elements.parentCategory;
+  const category = form?.elements.category;
+  if (!parent || !category) return;
+  const selected = category.value;
+  const values = state.productCategories.filter((item) => item.parentCategory === parent.value).map((item) => item.category);
+  category.innerHTML = '<option value="">请选择副分类</option>' + values.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  category.value = values.includes(selected) ? selected : '';
+}
+function productCategoriesModal() {
+  const rows = state.productParentCategories.map((item, index) => `<div class="category-setting-row"><span><b>${esc(item.name)}</b></span><div class="category-setting-actions"><button class="category-action move" type="button" data-move-product-parent="${item.id}" data-direction="-1" ${index === 0 ? 'disabled' : ''}>↑ 上移</button><button class="category-action move" type="button" data-move-product-parent="${item.id}" data-direction="1" ${index === state.productParentCategories.length - 1 ? 'disabled' : ''}>↓ 下移</button><button class="category-action edit" type="button" data-edit-product-parent="${item.id}">编辑</button><button class="category-action delete" type="button" data-delete-product-parent="${item.id}">删除</button></div></div>`).join('');
+  openModal({
+    title: '分类设置', description: '使用上移、下移设置前台主分类顺序。', submitText: '新增主分类',
+    body: `<section class="modal-section full"><div class="modal-section-grid"><label>主分类<input name="name" maxlength="100" required></label></div></section><section class="modal-section full"><h3>主分类</h3><div class="category-setting-list">${rows || '<div class="empty">暂无主分类</div>'}</div></section>`,
+    onSubmit: async (form) => {
+      const values = Object.fromEntries(new FormData(form));
+      await api('/api/product-parent-categories', { method: 'POST', body: JSON.stringify({ name: values.name.trim() }) });
+      state.productParentCategories = list(await api('/api/product-parent-categories'));
+      toast('主分类已新增'); productCategoriesModal();
+    }
+  });
+  $('#modalBackdrop').classList.add('centered-modal');
+}
+function productParentModal(parent) {
+  const categories = state.productCategories.filter((item) => item.parentCategory === parent.name);
+  const rows = categories.map((item) => `<div class="category-setting-row"><span>${esc(item.category)}</span><div class="category-setting-actions"><button class="category-action edit" type="button" data-rename-product-category="${item.id}" data-parent-id="${parent.id}">修改</button><button class="category-action delete" type="button" data-delete-product-category="${item.id}" data-parent-id="${parent.id}">删除</button></div></div>`).join('');
+  openModal({
+    title: `编辑主分类：${parent.name}`, description: '管理该主分类下的副分类。', submitText: '添加副分类',
+    body: `<input type="hidden" name="parentId" value="${parent.id}"><input type="hidden" name="parentCategory" value="${esc(parent.name)}"><section class="modal-section full"><div class="modal-section-grid"><label>主分类名称<input name="parentName" value="${esc(parent.name)}" maxlength="100" required></label><label>新增副分类<input name="category" maxlength="100" required></label></div><div class="form-actions"><button class="btn secondary" type="button" data-rename-product-parent="${parent.id}">修改主分类名称</button><button class="btn secondary" type="button" data-back-product-categories>返回主分类</button></div></section><section class="modal-section full"><h3>副分类</h3><div class="category-setting-list">${rows || '<div class="empty">暂无副分类</div>'}</div></section>`,
+    onSubmit: async (form) => {
+      const values = Object.fromEntries(new FormData(form));
+      await api('/api/product-categories', { method: 'POST', body: JSON.stringify({ parentCategory: parent.name, category: values.category.trim() }) });
+      state.productCategories = list(await api('/api/product-categories'));
+      toast('副分类已新增'); productParentModal(parent);
+    }
+  });
+  $('#modalBackdrop').classList.add('centered-modal');
+}
+function productModal(product = {}) {
+  const codes = productCodes(product).map((code) => normalizeProductCode(code, product.parentCategory, product.category));
+  const categoryOptions = productCategoryOptions(product.parentCategory || '', product.category || '');
+  openModal({
+    title: product.id ? '编辑商品' : '新增商品', description: '配置商城展示信息与实际发放的物品代码。', submitText: '保存商品',
+    body: `<input type="hidden" name="id" value="${esc(product.id || '')}">
+      <div class="product-modal-guide full"><div class="product-modal-guide-icon">i</div><div class="product-modal-guide-copy"><strong>商品配置说明</strong><p>建议依次完成分类与名称、交易与图片、物品代码和上架状态。带“必填”标记的内容保存前必须填写。</p></div><div class="product-modal-steps"><span><b>1</b>基础信息</span><span><b>2</b>交易展示</span><span><b>3</b>发放内容</span><span><b>4</b>销售状态</span></div></div>
+      <section class="modal-section full product-basic-section"><div class="product-modal-card-head"><div class="product-card-heading"><span class="product-section-index">01</span><div><h3>基础信息</h3><p>设置商品在商城中的分类位置和玩家看到的名称。</p></div></div><span class="product-card-tag required">必填</span></div><div class="modal-section-grid product-basic-grid"><label><span class="product-field-title">主分类 <em>必填</em></span><select name="parentCategory" required><option value="">请选择主分类</option>${categoryOptions.parentOptions}</select><span class="field-hint">用于商城一级导航和后台筛选；选择后才会加载对应副分类</span></label><label><span class="product-field-title">副分类 <em>必填</em></span><select name="category" required><option value="">请选择副分类</option>${categoryOptions.categoryOptions}</select><span class="field-hint">仅显示当前主分类下的可用分类，决定商品的最终展示位置</span></label><label class="full"><span class="product-field-title">商品名称 <em>必填</em></span><input name="name" value="${esc(product.name || '')}" required maxlength="100" placeholder="例如：高级武器补给箱"><span class="field-hint">显示在商城列表、订单和领取记录中，建议使用玩家容易识别的名称</span></label></div></section>
+      <section class="modal-section full product-pricing-section"><div class="product-modal-card-head"><div class="product-card-heading"><span class="product-section-index">02</span><div><h3>交易与图片</h3><p>配置支付账户、售价、购买门槛和商城展示图片。</p></div></div><span class="product-card-tag">交易展示</span></div><div class="product-commerce-fields"><div class="product-transaction-grid"><label><span class="product-field-title">货币类型</span><select name="currencyType"><option value="coin" ${(product.currencyType || 'coin') === 'coin' ? 'selected' : ''}>商城币</option><option value="money" ${(product.currencyType || 'coin') === 'money' ? 'selected' : ''}>美金</option><option value="gold" ${(product.currencyType || 'coin') === 'gold' ? 'selected' : ''}>金条</option></select><span class="field-hint">决定购买时从玩家的哪类账户扣除</span></label><label><span class="product-field-title">商品价格 <em>必填</em></span><input name="price" type="number" min="0" step="1" value="${esc(product.price ?? 0)}" required><span class="field-hint">填写不小于 0 的整数；填写 0 时商品可免费购买</span></label><label><span class="product-field-title">会员限制等级 <em>必填</em></span><input name="minMemberLevel" type="number" min="0" step="1" value="${esc(product.minMemberLevel ?? 0)}" required><span class="field-hint">0 表示所有玩家均可购买，大于 0 时需达到对应会员等级</span></label></div><div class="product-image-settings"><label><span class="product-field-title">图片路径</span><input name="imagePath" value="${esc(product.imagePath || '')}" maxlength="500" placeholder="上传后自动回填，也可填写站内图片路径"><span class="field-hint">上传成功后自动填写；手动填写时请使用后台可访问的站内路径</span></label><div class="image-upload"><div class="image-preview" id="productImagePreview">${product.imagePath ? `<img src="${esc(product.imagePath)}" alt="商品图片预览">` : '<span>暂无图片</span>'}</div><div class="product-image-upload-copy"><strong>商品图片预览</strong><p>支持 JPG、PNG、WebP、GIF，最大 2MB；建议使用比例统一、主体清晰的图片。</p><input id="productImageFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden><button class="btn secondary" type="button" data-upload-product-image>选择并上传图片</button></div></div></div></div></section>
+      <section class="modal-section full product-codes-section"><div class="section-title"><div class="product-card-heading"><span class="product-section-index">03</span><div><h3>物品代码</h3><p>每行代表一次发放动作，支持 #SpawnItem、#SpawnZombie、#spawnanimal 或纯物品代码。</p></div></div><div class="section-tools"><button class="btn secondary" type="button" data-clean-product-codes>清理空行</button><button class="btn secondary" type="button" data-add-product-code>＋ 新增一行</button></div></div><div class="product-code-notice"><strong>保存前检查</strong><span>代码会按从左到右、从上到下的顺序依次发放</span><span>重复代码不会自动合并，会重复发放</span><span>空行会被忽略，至少需要保留一条有效代码</span></div><div class="product-code-rows" id="productCodeRows">${(codes.length ? codes : ['']).map(productCodeRow).join('')}</div>${product.grantAmount ? `<p class="legacy-note">旧商品发放数量：${number(product.grantAmount)}（新表单按每行一条代码发放）</p>` : ''}</section>
+      <section class="modal-section full product-status-section"><div class="product-modal-card-head"><div class="product-card-heading"><span class="product-section-index">04</span><div><h3>上架状态</h3><p>决定商品是否在商城中展示，以及玩家当前能否购买。</p></div></div><span class="product-card-tag status">销售控制</span></div><div class="product-status-control"><label><span class="product-field-title">商品状态</span><select name="enabled"><option value="true" ${product.enabled !== false ? 'selected' : ''}>上架中</option><option value="false" ${product.enabled === false ? 'selected' : ''}>已下架</option></select><span class="field-hint">上架后商品可见并可购买；下架不会删除历史订单和领取记录，只会停止新购买</span></label><div class="product-status-note"><b>提示</b><span>需要暂时隐藏商品时请选择“已下架”，无需删除商品。</span></div></div></section>
+      <details class="advanced-fields full"><summary><span>高级信息</span><small>SKU 与堆叠物品展示参数，通常保持默认即可</small></summary><div class="advanced-fields-intro">以下字段用于系统识别和前台展示，不影响商品价格、库存或购买次数。</div><div class="advanced-fields-grid"><label><span class="product-field-title">内部 SKU</span><input name="sku" value="${esc(product.sku || '')}" maxlength="64" pattern="[A-Za-z0-9_.-]+" ${product.id ? 'readonly' : ''}><span class="field-hint">新增时留空将自动生成；仅支持字母、数字、下划线、点和短横线，创建后不可修改</span></label><label><span class="product-field-title">默认次数（选填）</span><input name="maxUses" type="number" min="1" max="1000000" step="1" value="${esc(product.maxUses ?? '')}" placeholder="例如：10"><span class="field-hint">仅用于商城展示堆叠物品的最大使用次数，不限制商品购买或实际使用次数</span></label></div></details>`, 
+    onSubmit: async (form) => {
+      const values = Object.fromEntries(new FormData(form));
+      const id = values.id;
+      const codesToSave = $$('[name="fulfillmentCode"]', form).map((input) => normalizeProductCode(input.value, values.parentCategory, values.category)).filter(Boolean);
+      if (!codesToSave.length) { toast('请至少填写一条物品代码', true); $('[name="fulfillmentCode"]', form)?.focus(); return; }
+      const body = { sku: values.sku.trim(), name: values.name.trim(), parentCategory: values.parentCategory.trim(), category: values.category.trim(), currencyType: values.currencyType, minMemberLevel: Number(values.minMemberLevel), maxUses: values.maxUses === '' ? null : Number(values.maxUses), imagePath: values.imagePath.trim(), fulfillmentCodes: codesToSave.join(','), price: Number(values.price), enabled: values.enabled === 'true' };
+      await api(id ? `/api/products/${encodeURIComponent(id)}` : '/api/products', { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) });
+      toast(id ? '商品已更新' : '商品已创建'); closeModal(); await loadProducts();
+    }
+  });
+  $('#modalBackdrop').classList.add('centered-modal');
+}
+$('#reloadProducts').addEventListener('click', loadProducts);
+
+$('#searchProducts').addEventListener('click', renderProducts);
+
+$('#productSearch').addEventListener('keydown', (event) => { if (event.key === 'Enter') renderProducts(); });
+
+$('#productStatusFilter').addEventListener('change', renderProducts);
+
+$('#productParentFilter').addEventListener('change', () => { syncProductFilters(); renderProducts(); });
+
+$('#productCategoryFilter').addEventListener('change', renderProducts);
+
+$('#resetProductFilters').addEventListener('click', () => {
+  $('#productSearch').value = '';
+  $('#productStatusFilter').value = '';
+  $('#productParentFilter').value = '';
+  $('#productCategoryFilter').value = '';
+  syncProductFilters();
+  renderProducts();
+});
+
+async function handleProductCategoryClick(event) {
+  const renameProductParentId = event.target.closest('[data-rename-product-parent]')?.dataset.renameProductParent;
+  if (renameProductParentId) {
+    const name = $('#modalForm')?.elements.parentName?.value.trim();
+    if (!name) { toast('主分类名称不能为空', true); return true; }
+    await api(`/api/product-parent-categories/${encodeURIComponent(renameProductParentId)}/name`, { method: 'PUT', body: JSON.stringify({ name }) });
+    [state.productParentCategories, state.productCategories, state.products] = await Promise.all([api('/api/product-parent-categories'), api('/api/product-categories'), api('/api/products')]);
+    toast('主分类名称已修改');
+    const parent = list(state.productParentCategories).find((item) => String(item.id) === renameProductParentId);
+    if (parent) productParentModal(parent);
+    return true;
+  }
+  const renameProductCategoryId = event.target.closest('[data-rename-product-category]')?.dataset.renameProductCategory;
+  if (renameProductCategoryId) {
+    const category = state.productCategories.find((item) => String(item.id) === renameProductCategoryId);
+    const name = window.prompt('请输入新的副分类名称', category?.category || '')?.trim();
+    if (!name || name === category?.category) return true;
+    await api(`/api/product-categories/${encodeURIComponent(renameProductCategoryId)}`, { method: 'PUT', body: JSON.stringify({ name }) });
+    [state.productCategories, state.products] = await Promise.all([api('/api/product-categories'), api('/api/products')]);
+    toast('副分类名称已修改');
+    const parentId = event.target.closest('[data-rename-product-category]')?.dataset.parentId;
+    const parent = state.productParentCategories.find((item) => String(item.id) === parentId);
+    if (parent) productParentModal(parent);
+    return true;
+  }
+  const deleteProductParentId = event.target.closest('[data-delete-product-parent]')?.dataset.deleteProductParent;
+  if (deleteProductParentId) {
+    if (!window.confirm('确认删除该主分类及其副分类？正在被商品使用时将无法删除。')) return true;
+    await api(`/api/product-parent-categories/${encodeURIComponent(deleteProductParentId)}`, { method: 'DELETE' });
+    [state.productParentCategories, state.productCategories] = await Promise.all([api('/api/product-parent-categories'), api('/api/product-categories')]);
+    toast('主分类已删除'); productCategoriesModal(); return true;
+  }
+  if (event.target.closest('[data-back-product-categories]')) { productCategoriesModal(); return true; }
+  const editProductParentId = event.target.closest('[data-edit-product-parent]')?.dataset.editProductParent;
+  if (editProductParentId) {
+    const parent = state.productParentCategories.find((item) => String(item.id) === editProductParentId);
+    if (parent) productParentModal(parent);
+    return true;
+  }
+  const moveProductParent = event.target.closest('[data-move-product-parent]');
+  if (moveProductParent) {
+    const index = state.productParentCategories.findIndex((item) => String(item.id) === moveProductParent.dataset.moveProductParent);
+    const target = index + Number(moveProductParent.dataset.direction);
+    if (index < 0 || target < 0 || target >= state.productParentCategories.length) return true;
+    const ordered = [...state.productParentCategories];
+    [ordered[index], ordered[target]] = [ordered[target], ordered[index]];
+    await api('/api/product-parent-categories/order', { method: 'PUT', body: JSON.stringify({ ids: ordered.map((item) => item.id) }) });
+    state.productParentCategories = list(await api('/api/product-parent-categories'));
+    toast('主分类顺序已更新'); productCategoriesModal();
+    return true;
+  }
+  const deleteProductCategoryId = event.target.closest('[data-delete-product-category]')?.dataset.deleteProductCategory;
+  if (deleteProductCategoryId) {
+    if (!window.confirm('确认删除该分类？')) return true;
+    await api(`/api/product-categories/${encodeURIComponent(deleteProductCategoryId)}`, { method: 'DELETE' });
+    state.productCategories = list(await api('/api/product-categories'));
+    const parentId = event.target.closest('[data-delete-product-category]')?.dataset.parentId;
+    toast('副分类已删除');
+    const parent = state.productParentCategories.find((item) => String(item.id) === parentId);
+    if (parent) productParentModal(parent); else productCategoriesModal();
+    return true;
+  }
+}
+
+async function handleProductClick(event) {
+  const productId = event.target.closest('[data-edit-product]')?.dataset.editProduct;
+  if (productId) productModal(state.products.find((item) => String(item.id) === productId) || {});
+  const productStatus = event.target.closest('[data-product-status]')?.dataset.productStatus;
+  if (productStatus !== undefined && window.confirm(productStatus === 'true' ? '确认将全部商品上架？' : '确认将全部商品下架？')) await withBusy(event.target.closest('[data-product-status]'), async () => {
+    const result = await api('/api/products/status', { method: 'PATCH', body: JSON.stringify({ enabled: productStatus === 'true' }) });
+    toast(`${productStatus === 'true' ? '上架' : '下架'}完成，共更新 ${Number(result?.affectedRows || result?.data?.affectedRows || 0)} 个商品`);
+    await loadProducts();
+  });
+  const deleteProductId = event.target.closest('[data-delete-product]')?.dataset.deleteProduct;
+  if (deleteProductId && window.confirm('确认删除该商品？所有相关订单、明细、履约和关联数据将被永久删除，且无法恢复。')) await withBusy(event.target, async () => {
+    await api(`/api/products/${encodeURIComponent(deleteProductId)}`, { method: 'DELETE' });
+    toast('商品已删除'); await loadProducts();
+  });
+  if (event.target.closest('[data-add-product-code]')) appendProductCode();
+  const removeProductCode = event.target.closest('[data-remove-product-code]');
+  if (removeProductCode) removeProductCode.closest('.product-code-row')?.remove();
+  if (event.target.closest('[data-clean-product-codes]')) {
+    $$('.product-code-row', $('#productCodeRows')).forEach((row) => { if (!normalizeProductCode($('input', row).value)) row.remove(); });
+    if (!$('#productCodeRows')?.children.length) appendProductCode();
+  }
+  if (event.target.closest('[data-upload-product-image]')) $('#productImageFile')?.click();
+}
+
+function handleProductCreateClick(event) {
+  const action = event.target.closest('[data-action]')?.dataset.action;
+  if (action === 'product-categories') productCategoriesModal();
+  if (action === 'new-product') productModal();
+}
+
+

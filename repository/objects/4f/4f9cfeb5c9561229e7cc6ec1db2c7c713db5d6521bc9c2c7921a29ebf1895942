@@ -1,0 +1,269 @@
+import crypto from 'node:crypto';
+import { isSteamId64 } from './command-policy.js';
+import { GiftCodeError, parseGiftCodes } from './gift-code-policy.js';
+import { ServiceError } from './commerce-service.js';
+
+const TYPES = new Set(['normal', 'single', 'limited', 'timed', 'member', 'private']);
+const MODES = new Set(['minimum', 'exact']);
+const CODE_PATTERN = /^[A-Za-z0-9_!@#$%&*\-]{6,64}$/;
+
+function duplicate(error) { return error?.code === 'ER_DUP_ENTRY' || error?.errno === 1062; }
+function positive(value, name, max = 4294967295) { const number = Number(value); if (!Number.isSafeInteger(number) || number < 1 || number > max) throw new ServiceError(`${name}必须是 1-${max} 的整数`); return number; }
+function nonNegative(value, name) { const number = Number(value); if (!Number.isSafeInteger(number) || number < 0) throw new ServiceError(`${name}必须是非负整数`); return number; }
+function id(value) { return positive(value, '兑换码 ID', Number.MAX_SAFE_INTEGER); }
+function text(value, name, max, required = false) { const result = String(value || '').trim(); if ((required && !result) || result.length > max) throw new ServiceError(`${name}长度必须为 ${required ? '1-' : '0-'}${max}`); return result; }
+function parseJson(value) { if (!value) return {}; if (typeof value === 'object') return value; try { return JSON.parse(value); } catch { return {}; } }
+function sameDate(left, right) { return (left ? new Date(left).getTime() : null) === (right ? new Date(right).getTime() : null); }
+
+function normalizeCode(value) {
+  const code = String(value || '').trim().toUpperCase();
+  if (!CODE_PATTERN.test(code)) throw new ServiceError('兑换码长度必须为 6-64，且仅允许 A-Z、0-9 和指定符号', 400, 'INVALID_REDEEM_CODE');
+  return { hash: crypto.createHash('sha256').update(code).digest('hex'), hint: code.slice(-4) };
+}
+
+function optionalDate(value, name) {
+  if (value === undefined || value === null || value === '') return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new ServiceError(`${name}无效`);
+  return date;
+}
+
+function claimDay(now) {
+  const shanghai = new Date(now.getTime() + 8 * 3600000);
+  return `${shanghai.getUTCFullYear()}-${String(shanghai.getUTCMonth() + 1).padStart(2, '0')}-${String(shanghai.getUTCDate()).padStart(2, '0')}`;
+}
+
+function parseActions(value) {
+  try { return parseGiftCodes(value); }
+  catch (error) { if (error instanceof GiftCodeError) throw new ServiceError(error.message, 400, 'INVALID_GIFT_CODE'); throw error; }
+}
+
+function normalizeInput(input, existing = null) {
+  const source = input || {};
+  const name = text(source.name ?? existing?.name, '兑换码名称', 100, true);
+  const description = text(source.description ?? existing?.description, '兑换码说明', 2000);
+  const type = String(source.type ?? source.codeType ?? existing?.type ?? 'normal').trim();
+  if (!TYPES.has(type)) throw new ServiceError('兑换码类型无效');
+  const memberMode = String(source.memberMode ?? existing?.memberMode ?? 'minimum').trim();
+  if (!MODES.has(memberMode)) throw new ServiceError('会员模式无效');
+  let memberLevel = nonNegative(source.memberLevel ?? existing?.memberLevel ?? 0, '会员等级');
+  let targetSteamId = String(source.targetSteamId ?? existing?.targetSteamId ?? '').trim();
+  let totalLimit = source.totalLimit !== undefined ? (source.totalLimit === null || source.totalLimit === '' ? null : positive(source.totalLimit, '总次数限制')) : (existing?.totalLimit ?? null);
+  let perUserLimit = source.perUserLimit !== undefined ? (source.perUserLimit === null || source.perUserLimit === '' ? null : positive(source.perUserLimit, '单用户次数限制')) : (existing?.perUserLimit ?? 1);
+  const startsAt = source.startsAt !== undefined ? optionalDate(source.startsAt, '开始时间') : optionalDate(existing?.startsAt, '开始时间');
+  const expiresAt = source.expiresAt !== undefined ? optionalDate(source.expiresAt, '过期时间') : optionalDate(existing?.expiresAt, '过期时间');
+  if (startsAt && expiresAt && startsAt >= expiresAt) throw new ServiceError('开始时间必须早于过期时间');
+  if (type === 'single') { totalLimit = 1; perUserLimit = 1; }
+  if (type === 'limited' && totalLimit === null) throw new ServiceError('限量兑换码必须填写总次数限制');
+  if (type === 'timed' && !startsAt && !expiresAt) throw new ServiceError('限时兑换码必须至少填写开始时间或过期时间');
+  if (type === 'member' && memberLevel < 1) throw new ServiceError('会员兑换码的会员等级必须至少为 1');
+  if (type === 'private' && !isSteamId64(targetSteamId)) throw new ServiceError('私人兑换码必须填写有效目标 SteamID');
+  if (type !== 'private') targetSteamId = null;
+  if (type !== 'member') memberLevel = 0;
+  if (totalLimit !== null && perUserLimit !== null && perUserLimit > totalLimit) throw new ServiceError('单用户次数限制不能超过总次数限制');
+  const actionsSource = source.codes ?? source.actionsText ?? source.actions;
+  const actions = actionsSource === undefined && existing ? existing.actions : parseActions(actionsSource ?? '');
+  const code = existing ? { hash: existing.codeHash, hint: existing.codeHint } : normalizeCode(source.code);
+  const createdBy = text(existing ? existing.createdBy : source.createdBy, '创建人', 100);
+  return { name, description, type, enabled: source.enabled === undefined ? (existing?.enabled ?? true) : Boolean(source.enabled), targetSteamId, memberLevel, memberMode, totalLimit, perUserLimit, startsAt, expiresAt, createdBy, actions, codeHash: code.hash, codeHint: code.hint };
+}
+
+function mapCode(row) {
+  const hint = row.codeHint ?? row.code_hint;
+  return {
+    id: Number(row.id), name: row.name, codePlain: row.codePlain ?? row.code_plain ?? null, codeHint: hint || null,
+    type: row.type || row.codeType || row.code_type, description: row.description || '', enabled: Boolean(row.enabled),
+    targetSteamId: row.targetSteamId ?? row.target_steam_id ?? null,
+    memberLevel: Number(row.memberLevel ?? row.member_level ?? 0), memberMode: row.memberMode || row.member_mode || 'minimum',
+    totalLimit: row.totalLimit ?? row.total_limit ?? null, perUserLimit: row.perUserLimit ?? row.per_user_limit ?? null,
+    usedCount: Number(row.usedCount ?? row.used_count ?? 0), claimCount: Number(row.claimCount ?? row.claim_count ?? row.usedCount ?? row.used_count ?? 0),
+    startsAt: row.startsAt ?? row.starts_at ?? null, expiresAt: row.expiresAt ?? row.expires_at ?? null,
+    createdBy: row.createdBy ?? row.created_by ?? null, createdAt: row.createdAt ?? row.created_at, updatedAt: row.updatedAt ?? row.updated_at
+  };
+}
+
+function rawCode(row) {
+  const totalLimit = row.totalLimit ?? row.total_limit ?? null;
+  const perUserLimit = row.perUserLimit ?? row.per_user_limit ?? null;
+  return {
+    id: Number(row.id), name: row.name, codeHash: row.codeHash ?? row.code_hash, codeHint: row.codeHint ?? row.code_hint,
+    type: row.type ?? row.codeType ?? row.code_type, description: row.description || '', enabled: Boolean(row.enabled), targetSteamId: row.targetSteamId ?? row.target_steam_id ?? null,
+    memberLevel: Number(row.memberLevel ?? row.member_level ?? 0), memberMode: row.memberMode ?? row.member_mode ?? 'minimum', totalLimit: totalLimit === null ? null : Number(totalLimit),
+    perUserLimit: perUserLimit === null ? null : Number(perUserLimit), usedCount: Number(row.usedCount ?? row.used_count ?? 0), startsAt: row.startsAt ?? row.starts_at ?? null,
+    expiresAt: row.expiresAt ?? row.expires_at ?? null, createdBy: row.createdBy ?? row.created_by ?? '', createdAt: row.createdAt ?? row.created_at, updatedAt: row.updatedAt ?? row.updated_at
+  };
+}
+
+function orderNumber(now) { return `RDM${now.getTime()}${crypto.randomBytes(5).toString('hex').toUpperCase()}`; }
+
+export class RedeemCodeService {
+  constructor(db, clock = () => new Date()) {
+    if (db && typeof db === 'object' && db.db) { this.db = db.db; this.clock = db.clock || clock; }
+    else { this.db = db; this.clock = clock; }
+  }
+
+  now() { const value = this.clock(); return value instanceof Date ? new Date(value.getTime()) : new Date(value); }
+
+  async listAdmin() {
+    const rows = await this.db.query('SELECT r.id,r.name,r.code_plain AS codePlain,r.code_hint AS codeHint,r.code_type AS type,r.description,r.enabled,r.target_steam_id AS targetSteamId,r.member_level AS memberLevel,r.member_mode AS memberMode,r.total_limit AS totalLimit,r.per_user_limit AS perUserLimit,r.used_count AS usedCount,COUNT(c.id) AS claimCount,r.starts_at AS startsAt,r.expires_at AS expiresAt,r.created_by AS createdBy,r.created_at AS createdAt,r.updated_at AS updatedAt FROM redeem_codes r LEFT JOIN redeem_code_claims c ON c.redeem_code_id=r.id GROUP BY r.id ORDER BY r.id DESC');
+    return rows.map(mapCode);
+  }
+
+  async load(idValue, db = this.db, lock = false) {
+    const rows = await db.query(`SELECT id,name,code_hash AS codeHash,code_hint AS codeHint,code_type AS type,description,enabled,target_steam_id AS targetSteamId,member_level AS memberLevel,member_mode AS memberMode,total_limit AS totalLimit,per_user_limit AS perUserLimit,used_count AS usedCount,starts_at AS startsAt,expires_at AS expiresAt,created_by AS createdBy,created_at AS createdAt,updated_at AS updatedAt FROM redeem_codes WHERE id=?${lock ? ' FOR UPDATE' : ''}`, [id(idValue)]);
+    if (!rows[0]) throw new ServiceError('兑换码不存在', 404, 'NOT_FOUND');
+    const code = rawCode(rows[0]);
+    const actions = await db.query(`SELECT action_index AS actionIndex,action_type AS actionType,item_id AS itemId,quantity,options_json AS optionsJson,coin_amount AS coinAmount,raw_text AS rawText FROM redeem_code_actions WHERE redeem_code_id=? ORDER BY action_index ASC${lock ? ' FOR UPDATE' : ''}`, [code.id]);
+    code.actions = actions.map((action) => ({ actionType: action.actionType, payload: action.actionType === 'shop_coin' ? { amount: Number(action.coinAmount) } : { itemId: action.itemId, quantity: Number(action.quantity), ...parseJson(action.optionsJson) }, displayCode: action.rawText }));
+    return code;
+  }
+
+  async get(idValue) {
+    const code = await this.load(idValue);
+    const result = mapCode(code);
+    result.actions = code.actions.map((action) => ({ actionType: action.actionType, payload: action.payload }));
+    result.actionsText = code.actions.map((action) => action.displayCode).join('\n');
+    result.codes = result.actionsText;
+    return result;
+  }
+
+  async save(input, idValue = null) {
+    if (idValue === null && String(input.code || '').trim().length !== 15) throw new ServiceError('新卡密长度必须为15位');
+    try {
+      return await this.db.transaction(async (tx) => {
+        let existing = null;
+        if (idValue !== null) existing = await this.load(idValue, tx, true);
+        const code = normalizeInput(input, existing);
+        const sameName = await tx.query('SELECT id FROM redeem_codes WHERE name=? AND id<>? LIMIT 1', [code.name, existing?.id || 0]);
+        if (sameName[0]) throw new ServiceError('兑换码名称已存在', 409, 'DUPLICATE_NAME');
+        const sameHash = await tx.query('SELECT id FROM redeem_codes WHERE code_hash=? AND id<>? LIMIT 1', [code.codeHash, existing?.id || 0]);
+        if (sameHash[0]) throw new ServiceError('兑换码已存在', 409, 'DUPLICATE_CODE');
+        let codeId;
+        let replaceActions = true;
+        if (!existing) {
+          const inserted = await tx.query('INSERT INTO redeem_codes (name,code_hash,code_plain,code_hint,code_type,description,enabled,target_steam_id,member_level,member_mode,total_limit,per_user_limit,starts_at,expires_at,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [code.name, code.codeHash, String(input.code).trim(), code.codeHint, code.type, code.description || null, code.enabled, code.targetSteamId, code.memberLevel, code.memberMode, code.totalLimit, code.perUserLimit, code.startsAt, code.expiresAt, code.createdBy || null]);
+          codeId = inserted.insertId;
+        } else {
+          codeId = existing.id;
+          const claims = await tx.query('SELECT COUNT(*) AS count FROM redeem_code_claims WHERE redeem_code_id=?', [codeId]);
+          if (Number(claims[0]?.count || 0) > 0) {
+            const actionsChanged = code.actions.length !== existing.actions.length || code.actions.some((action, index) => action.displayCode !== existing.actions[index]?.displayCode);
+            const restrictedChanged = code.codeHash !== existing.codeHash || code.type !== existing.type || code.targetSteamId !== existing.targetSteamId || code.memberLevel !== existing.memberLevel || code.memberMode !== existing.memberMode || code.totalLimit !== existing.totalLimit || code.perUserLimit !== existing.perUserLimit || !sameDate(code.startsAt, existing.startsAt) || !sameDate(code.expiresAt, existing.expiresAt) || actionsChanged;
+            if (restrictedChanged) throw new ServiceError('兑换码已有领取记录，只允许修改名称、说明和启用状态', 409, 'REDEEM_CODE_IMMUTABLE');
+            await tx.query('UPDATE redeem_codes SET name=?,description=?,enabled=? WHERE id=?', [code.name, code.description || null, code.enabled, codeId]);
+            replaceActions = false;
+          } else {
+            await tx.query('UPDATE redeem_codes SET name=?,code_hash=?,code_hint=?,code_type=?,description=?,enabled=?,target_steam_id=?,member_level=?,member_mode=?,total_limit=?,per_user_limit=?,starts_at=?,expires_at=?,created_by=? WHERE id=?', [code.name, code.codeHash, code.codeHint, code.type, code.description || null, code.enabled, code.targetSteamId, code.memberLevel, code.memberMode, code.totalLimit, code.perUserLimit, code.startsAt, code.expiresAt, code.createdBy || null, codeId]);
+            await tx.query('DELETE FROM redeem_code_actions WHERE redeem_code_id=?', [codeId]);
+          }
+        }
+        if (replaceActions) for (const [index, action] of code.actions.entries()) {
+          const payload = action.payload;
+          const options = Object.fromEntries(Object.entries(payload).filter(([key]) => !['itemId', 'quantity'].includes(key)));
+          await tx.query('INSERT INTO redeem_code_actions (redeem_code_id,action_index,action_type,item_id,quantity,options_json,coin_amount,raw_text) VALUES (?,?,?,?,?,?,?,?)', [codeId, index, action.actionType, payload.itemId || null, payload.quantity || null, action.actionType === 'spawn_item' ? JSON.stringify(options) : null, payload.amount || null, action.displayCode]);
+        }
+        const result = mapCode({ id: codeId, ...code, usedCount: existing?.usedCount || 0, claimCount: existing?.usedCount || 0, createdAt: existing?.createdAt, updatedAt: existing?.updatedAt });
+        result.actions = code.actions.map((action) => ({ actionType: action.actionType, payload: action.payload }));
+        result.actionsText = code.actions.map((action) => action.displayCode).join('\n');
+        result.codes = result.actionsText;
+        return result;
+      });
+    } catch (error) {
+      if (!duplicate(error)) throw error;
+      const message = String(error.sqlMessage || error.message || '');
+      if (/code_hash|uk.*code/i.test(message)) throw new ServiceError('兑换码已存在', 409, 'DUPLICATE_CODE');
+      throw new ServiceError('兑换码名称已存在', 409, 'DUPLICATE_NAME');
+    }
+  }
+
+  async disable(idValue) {
+    const result = await this.db.query('UPDATE redeem_codes SET enabled=0 WHERE id=?', [id(idValue)]);
+    if (!result.affectedRows) throw new ServiceError('兑换码不存在', 404, 'NOT_FOUND');
+  }
+
+  async delete(idValue) {
+    const { deleteRedeemCode } = await import('./deletion-service.js');
+    return this.db.transaction((tx) => deleteRedeemCode(tx, idValue));
+  }
+
+  async listClaims(idValue, options = {}) {
+    const codeId = id(idValue);
+    const page = positive(typeof options === 'number' ? 1 : (options.page ?? 1), '页码', 1000000);
+    const limit = positive(typeof options === 'number' ? options : (options.limit ?? 50), '条数', 200);
+    const exists = await this.db.query('SELECT id FROM redeem_codes WHERE id=?', [codeId]);
+    if (!exists[0]) throw new ServiceError('兑换码不存在', 404, 'NOT_FOUND');
+    const total = Number((await this.db.query('SELECT COUNT(*) AS count FROM redeem_code_claims WHERE redeem_code_id=?', [codeId]))[0]?.count || 0);
+    const offset = (page - 1) * limit;
+    const items = await this.db.query(`SELECT c.id,c.steam_id AS steamId,c.order_id AS orderId,o.order_no AS orderNo,o.status,c.created_at AS createdAt FROM redeem_code_claims c LEFT JOIN orders o ON o.id=c.order_id WHERE c.redeem_code_id=? ORDER BY c.id DESC LIMIT ${limit} OFFSET ${offset}`, [codeId]);
+    return { items, page, limit, total };
+  }
+
+  async findClaim(key, db = this.db) {
+    const rows = await db.query('SELECT c.id AS claimId,c.redeem_code_id AS redeemCodeId,c.steam_id AS steamId,c.order_id AS id,o.order_no AS orderNo,o.status,o.total_amount AS totalAmount,r.name AS redeemCodeName FROM redeem_code_claims c JOIN redeem_codes r ON r.id=c.redeem_code_id LEFT JOIN orders o ON o.id=c.order_id WHERE c.request_key=?', [key]);
+    return rows[0];
+  }
+
+  idempotentClaim(existing, steamId, redeemCodeId) {
+    if (String(existing.steamId) !== String(steamId) || Number(existing.redeemCodeId) !== Number(redeemCodeId)) throw new ServiceError('Idempotency-Key 已被其他领取请求使用', 409, 'IDEMPOTENCY_CONFLICT');
+    return { id: existing.id, claimId: existing.claimId, orderNo: existing.orderNo, status: existing.status, totalAmount: Number(existing.totalAmount || 0), redeemCodeName: existing.redeemCodeName, idempotent: true };
+  }
+
+  async claim(value, steamId, _memberLevel, requestKey) {
+    if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效');
+    const key = String(requestKey || '').trim();
+    if (!key || key.length > 100) throw new ServiceError('Idempotency-Key 长度必须为 1-100');
+    const normalized = normalizeCode(value);
+    const found = await this.db.query('SELECT id FROM redeem_codes WHERE code_hash=?', [normalized.hash]);
+    if (!found[0]) throw new ServiceError('兑换码无效', 404, 'REDEEM_CODE_NOT_FOUND');
+    const codeId = Number(found[0].id);
+    const prior = await this.findClaim(key);
+    if (prior) return this.idempotentClaim(prior, steamId, codeId);
+    try {
+      return await this.db.transaction(async (tx) => {
+        const repeated = await this.findClaim(key, tx);
+        if (repeated) return this.idempotentClaim(repeated, steamId, codeId);
+        const rows = await tx.query('SELECT id,name,code_type AS type,enabled,target_steam_id AS targetSteamId,member_level AS memberLevel,member_mode AS memberMode,total_limit AS totalLimit,per_user_limit AS perUserLimit,used_count AS usedCount,starts_at AS startsAt,expires_at AS expiresAt FROM redeem_codes WHERE code_hash=? FOR UPDATE', [normalized.hash]);
+        if (!rows[0]) throw new ServiceError('兑换码无效', 404, 'REDEEM_CODE_NOT_FOUND');
+        const code = rawCode(rows[0]);
+        if (code.id !== codeId) throw new ServiceError('兑换码状态已变化，请重试', 409, 'REDEEM_CODE_CHANGED');
+        const now = this.now();
+        if (!code.enabled) throw new ServiceError('兑换码已停用', 409, 'REDEEM_CODE_DISABLED');
+        if (code.startsAt && now < new Date(code.startsAt)) throw new ServiceError('兑换码尚未生效', 409, 'REDEEM_CODE_NOT_STARTED');
+        if (code.expiresAt && now >= new Date(code.expiresAt)) throw new ServiceError('兑换码已过期', 409, 'REDEEM_CODE_EXPIRED');
+        if (code.type === 'private' && code.targetSteamId !== String(steamId)) throw new ServiceError('该兑换码仅限指定玩家', 403, 'REDEEM_CODE_PRIVATE');
+        if (code.totalLimit !== null && code.usedCount >= code.totalLimit) throw new ServiceError('兑换码领取次数已用完', 409, 'REDEEM_CODE_EXHAUSTED');
+        const users = await tx.query("SELECT \`商城用户编号\` AS id,CASE WHEN \`会员等级\`>0 AND (\`会员到期时间\` IS NULL OR \`会员到期时间\`>CURRENT_TIMESTAMP(3)) THEN \`会员等级\` ELSE 0 END AS memberLevel FROM \`商城用户\` WHERE \`SteamID\`=? AND \`用户角色\` IN ('user','admin','super_admin') AND \`账户状态\`='active' FOR UPDATE", [String(steamId)]);
+        if (!users[0]) throw new ServiceError('商城用户不存在或已停用', 403, 'SHOP_USER_UNAVAILABLE');
+        const databaseLevel = Number(users[0].memberLevel || 0);
+        const memberStrategy = (await tx.query('SELECT recharge_bonus AS rechargeBonus FROM membership_strategies WHERE level=? AND enabled=1', [databaseLevel]))[0];
+        const rechargeBonus = Number(memberStrategy?.rechargeBonus ?? 100);
+        if (code.type === 'member' && (code.memberMode === 'exact' ? databaseLevel !== code.memberLevel : databaseLevel < code.memberLevel)) throw new ServiceError(code.memberMode === 'exact' ? `需要会员等级恰好为 ${code.memberLevel}` : `需要会员等级达到 ${code.memberLevel}`, 403, 'MEMBER_LEVEL_REQUIRED');
+        const claimed = Number((await tx.query('SELECT COUNT(*) AS count FROM redeem_code_claims WHERE redeem_code_id=? AND steam_id=?', [code.id, String(steamId)]))[0]?.count || 0);
+        if (code.perUserLimit !== null && claimed >= code.perUserLimit) throw new ServiceError('该账号已达到此兑换码的领取次数上限', 409, 'PER_USER_LIMIT_REACHED');
+        const actions = await tx.query('SELECT action_index AS actionIndex,action_type AS actionType,item_id AS itemId,quantity,options_json AS optionsJson,coin_amount AS coinAmount FROM redeem_code_actions WHERE redeem_code_id=? ORDER BY action_index ASC FOR UPDATE', [code.id]);
+        if (!actions.length) throw new ServiceError('兑换码没有可执行动作', 409, 'REDEEM_CODE_EMPTY');
+        await tx.query('INSERT INTO \`商城用户\` (\`SteamID\`,\`商城币余额\`) VALUES (?,0) ON DUPLICATE KEY UPDATE \`SteamID\`=VALUES(\`SteamID\`)', [String(steamId)]);
+        const claim = await tx.query('INSERT INTO redeem_code_claims (redeem_code_id,steam_id,request_key,claim_day) VALUES (?,?,?,?)', [code.id, String(steamId), key, claimDay(now)]);
+        const number = orderNumber(now);
+        const order = await tx.query("INSERT INTO orders (order_no,source,external_order_id,steam_id,redeem_code_id,redeem_claim_id,total_amount,status) VALUES (?,'redeem_code',?,?,?,?,0,'pending')", [number, key, String(steamId), code.id, claim.insertId]);
+        await tx.query('UPDATE redeem_code_claims SET order_id=? WHERE id=?', [order.insertId, claim.insertId]);
+        for (const action of actions) {
+          const coinAmount = action.actionType === 'shop_coin' ? Math.round(Number(action.coinAmount) * rechargeBonus / 100) : action.coinAmount;
+          const quantity = action.actionType === 'shop_coin' ? 1 : Number(action.quantity);
+          const name = action.actionType === 'shop_coin' ? '商城币奖励 ' + coinAmount : '物品 ' + action.itemId;
+          const detail = await tx.query('INSERT INTO order_items (order_id,product_id,sku,name,unit_price,quantity,item_id,grant_amount,currency_type,min_member_level,fulfillment_codes_snapshot) VALUES (?,NULL,?,?,0,?,?,?,?,0,NULL)', [order.insertId, `REDEEM-${code.id}-${action.actionIndex}`, name, quantity, action.itemId, action.actionType === 'spawn_item' ? quantity : null, action.actionType === 'shop_coin' ? 'coin' : 'gift']);
+          const payload = action.actionType === 'spawn_item' ? { itemId: action.itemId, quantity, ...parseJson(action.optionsJson) } : null;
+          await tx.query("INSERT INTO fulfillment_tasks (order_id,order_item_id,code_index,steam_id,task_type,payload_json,coin_amount,item_id,amount,status) VALUES (?,?,?,?,?,?,?,?,?,'pending')", [order.insertId, detail.insertId, action.actionIndex, String(steamId), action.actionType, payload ? JSON.stringify(payload) : null, coinAmount, action.itemId, action.actionType === 'spawn_item' ? quantity : null]);
+        }
+        const updated = await tx.query('UPDATE redeem_codes SET used_count=used_count+1 WHERE id=? AND (total_limit IS NULL OR used_count<total_limit)', [code.id]);
+        if (!updated.affectedRows) throw new ServiceError('兑换码领取次数已用完', 409, 'REDEEM_CODE_EXHAUSTED');
+        return { id: order.insertId, claimId: claim.insertId, orderNo: number, status: 'pending', totalAmount: 0, redeemCodeName: code.name, idempotent: false };
+      });
+    } catch (error) {
+      if (!duplicate(error)) throw error;
+      const existing = await this.findClaim(key);
+      if (existing) return this.idempotentClaim(existing, steamId, codeId);
+      throw error;
+    }
+  }
+}

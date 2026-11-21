@@ -1,0 +1,26 @@
+import { createPublicKey, verify } from 'node:crypto';
+
+export const LICENSE_SIGNING_KEY_ID = 'scum-rcon-license-2026-01';
+export const LICENSE_SIGNING_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAYMEmMkRkz5zAU1u1I+yxGUPShhI6YJHTxfXB/AP51/M=
+-----END PUBLIC KEY-----
+`;
+
+function canonicalValue(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalValue).join(',')}]`;
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalValue(value[key])}`).join(',')}}`;
+  }
+  throw new TypeError('只允许可序列化的 JSON 类型');
+}
+
+export function canonicalJson(value) { return canonicalValue(value); }
+
+export function verifyLicenseSignature(data, signature, publicKey = LICENSE_SIGNING_PUBLIC_KEY) {
+  if (!signature || signature.keyId !== LICENSE_SIGNING_KEY_ID || signature.algorithm !== 'Ed25519' || typeof signature.value !== 'string') return false;
+  try {
+    return verify(null, Buffer.from(canonicalJson(data)), createPublicKey(publicKey), Buffer.from(signature.value, 'base64'));
+  } catch { return false; }
+}

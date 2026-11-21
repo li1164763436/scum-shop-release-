@@ -1,0 +1,207 @@
+const redeemCodeTypes = { normal: '商城币充值卡', member: '会员兑换卡' };
+function localDateTimeValue(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const local = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+function redeemCodeState(item) {
+  const now = Date.now();
+  if (!item.enabled) return ['inactive', '已停用'];
+  if (item.startsAt && new Date(item.startsAt).getTime() > now) return ['waiting', '未生效'];
+  if (item.expiresAt && new Date(item.expiresAt).getTime() <= now) return ['inactive', '已过期'];
+  if (item.totalLimit !== null && item.totalLimit !== undefined && Number(item.usedCount) >= Number(item.totalLimit)) return ['inactive', '已用完'];
+  return ['active', '可兑换'];
+}
+async function loadRedeemCodes() {
+  $('#redeemCodeRows').innerHTML = empty(9, '正在加载兑换码...', true);
+  try {
+    const [redeemCodes, config, exchanges] = await Promise.all([
+      api('/api/redeem-codes'),
+      api('/api/config'),
+      api('/api/account-exchanges')
+    ]);
+    state.redeemCodes = list(redeemCodes, ['items', 'redeemCodes']);
+    state.config = config || state.config;
+    fillExchangeConfigForm();
+    renderAccountExchanges(list(exchanges, ['items']));
+    renderRedeemCodes();
+  } catch (error) {
+    state.redeemCodes = [];
+    $('#redeemCodeRows').innerHTML = empty(9, error.message);
+    if ($('#accountExchangeRows')) $('#accountExchangeRows').innerHTML = empty(10, error.message);
+  }
+}
+function renderAccountExchanges(records) {
+  const body = $('#accountExchangeRows');
+  if (!body) return;
+  const directions = { coin_to_gold: '商城币 → 游戏金条', gold_to_coin: '游戏金条 → 商城币' };
+  const statuses = { pending: '待处理', executing: '执行中', succeeded: '成功', failed: '失败', uncertain: '结果待确认' };
+  body.innerHTML = records.map((record) => `<tr><td>${esc(record.id)}</td><td>${esc(record.characterName || record.username || '玩家')}<br>${esc(record.steamId)}</td><td>${esc(directions[record.direction] || record.direction)}</td><td>${number(record.inputAmount)}</td><td>${number(record.outputAmount)}</td><td>${esc(record.rateSnapshot)}</td><td>${esc(statuses[record.status] || record.status)}</td><td>${esc(record.errorMessage || '--')}</td><td>${date(record.createdAt)}</td><td>${date(record.completedAt)}</td></tr>`).join('') || empty(10, '暂无兑换记录');
+}
+function fillExchangeConfigForm() {
+  const form = $('#exchangeConfigForm');
+  if (!form) return;
+  const exchange = state.config.exchange || {};
+  form.elements.enabled.checked = exchange.enabled !== false;
+  form.elements.coinToGoldRate.value = exchange.coinToGoldRate > 0
+    ? Math.round(1 / exchange.coinToGoldRate)
+    : 1;
+  form.elements.goldToCoinRate.value = exchange.goldToCoinRate ?? 1;
+  form.elements.maxAmount.value = exchange.maxAmount ?? 100000;
+  const growthForm = $('#characterGrowthConfigForm');
+  if (!growthForm) return;
+  const growth = state.config.characterGrowth || {};
+  growthForm.elements.attributePointPrice.value = growth.attributePointPrice ?? 0;
+  growthForm.elements.skillLevelPrice.value = growth.skillLevelPrice ?? 0;
+}
+function renderRedeemCodes() {
+  $('#redeemCodeRows').innerHTML = state.redeemCodes.length ? state.redeemCodes.map((item) => {
+    const [stateClass, stateLabel] = redeemCodeState(item);
+    const totalLimit = item.totalLimit === null || item.totalLimit === undefined ? '不限' : number(item.totalLimit);
+    const period = item.startsAt || item.expiresAt ? `${esc(date(item.startsAt))}<br><span class="muted">至 ${esc(date(item.expiresAt))}</span>` : '长期有效';
+    const suffix = item.codePlain ? `-${item.codePlain}` : '';
+    const displayName = suffix && item.name?.endsWith(suffix) ? item.name.slice(0, -suffix.length) : item.name;
+    return `<tr><td><code>${esc(item.id)}</code></td><td><strong>${esc(displayName || '未命名兑换码')}</strong>${item.description ? `<br><span class="muted">${esc(item.description)}</span>` : ''}</td><td><code class="redeem-code-hint">${esc(item.codePlain || '历史卡密未保存')}</code></td><td>${esc(redeemCodeTypes[item.type] || item.type || '未知')}</td><td><span class="badge ${esc(stateClass)}">${esc(stateLabel)}</span></td><td><strong>${number(item.usedCount)}</strong> / ${esc(totalLimit)}</td><td>${period}</td><td>${esc(date(item.updatedAt || item.createdAt))}</td><td><div class="row-actions"><button class="row-btn danger" data-delete-redeem-code="${esc(item.id)}">删除</button></div></td></tr>`;
+  }).join('') : empty(9, '暂无兑换码');
+}
+function updateRedeemCodeVisibility() {
+  const form = $('#modalForm');
+  const type = form.elements.type?.value;
+  $$('[data-redeem-private]', form).forEach((node) => { node.hidden = type !== 'private'; });
+  $$('[data-redeem-member]', form).forEach((node) => { node.hidden = type !== 'member'; });
+  $$('[data-redeem-coin]', form).forEach((node) => { node.hidden = type !== 'normal'; });
+  const rewardField = $('[data-redeem-coin]', form);
+  if (rewardField) {
+    rewardField.hidden = false;
+    rewardField.firstChild.textContent = type === 'member' ? '会员等级' : '商城币数量';
+    const input = rewardField.querySelector('input');
+    if (input) { input.name = type === 'member' ? 'rewardMemberLevel' : 'coinReward'; input.value = type === 'member' ? (form.elements.memberLevel?.value || 1) : (form.elements.coinReward?.value || ''); }
+    const hint = rewardField.querySelector('.field-hint');
+    if (hint) hint.textContent = type === 'member' ? '请输入会员等级。' : '商城币充值卡领取后发放该数量商城币。';
+  }
+  $$('[data-redeem-member]', form).filter((node) => node !== rewardField).forEach((node) => { node.hidden = type !== 'member'; });
+  $$('[data-redeem-limit]', form).forEach((node) => { node.hidden = !['single', 'limited', 'normal', 'timed', 'member', 'private'].includes(type); });
+  $$('[data-redeem-total]', form).forEach((node) => { node.hidden = type === 'single'; });
+  $$('[data-redeem-timed]', form).forEach((node) => { node.hidden = type !== 'timed'; });
+  const total = form.elements.totalLimit;
+  const perUser = form.elements.perUserLimit;
+  if (type === 'single') { if (total) total.value = '1'; if (perUser) perUser.value = '1'; }
+}
+function redeemCodeModal(item = {}) {
+  const editing = Boolean(item.id);
+  openModal({
+    title: editing ? '编辑CDK' : '新增CDK',
+    description: editing ? `仅显示安全掩码 ${item.codeHint || '无'}；不会读取或提交完整兑换码。` : '兑换码明文仅在创建时提交，保存后无法再次查看。',
+    submitText: '保存CDK',
+    body: `<input type="hidden" name="id" value="${esc(item.id || '')}">
+      <section class="modal-section full"><h3>基础信息</h3><div class="modal-section-grid"><label class="full">名称<input name="name" required maxlength="100" value="${esc(item.name || '')}"></label>${editing ? `<label class="full">CDK提示<input value="${esc(item.codeHint || '无提示')}" readonly><span class="field-hint">完整CDK保存后不可查看，编辑时不会提交 code。</span></label>` : '<label class="full">CDK前缀<input name="codePrefix" required minlength="1" maxlength="11" pattern="[A-Za-z0-9]+" autocomplete="off" spellcheck="false"><span class="field-hint">前缀最多11位，点击按钮生成无连接符的15位CDK。</span></label>'}<label>类型<select name="type"><option value="normal">商城币充值卡</option><option value="member">会员兑换卡</option></select></label><label>启用状态<select name="enabled"><option value="true">启用</option><option value="false">停用</option></select></label></div></section>
+<section class="modal-section full"><h3>领取规则</h3><div class="modal-section-grid"><label data-redeem-private>目标 SteamID<input name="targetSteamId" maxlength="17" pattern="[0-9]{17}" value="${esc(item.targetSteamId || '')}"></label><label data-redeem-member>会员等级<input name="memberLevel" type="number" min="1" step="1" value="${esc(item.memberLevel || 1)}"></label><label data-redeem-member>会员模式<select name="memberMode"><option value="minimum">最低等级</option><option value="exact">精确等级</option></select></label><label data-redeem-limit data-redeem-total>生成数量<input name="totalLimit" type="number" min="1" step="1" value="${esc(item.totalLimit ?? '')}" placeholder="请输入生成数量"></label><label data-redeem-limit>每张卡密最大使用次数<input name="perUserLimit" type="number" min="1" step="1" value="${esc(item.perUserLimit ?? 1)}" placeholder="请输入最大使用次数"></label><label data-redeem-timed>开始时间<input name="startsAt" type="datetime-local" value="${esc(localDateTimeValue(item.startsAt))}"></label><label data-redeem-timed>过期时间<input name="expiresAt" type="datetime-local" value="${esc(localDateTimeValue(item.expiresAt))}"></label><label data-redeem-coin>商城币数量<input name="coinReward" type="number" min="1" max="100000000" step="1" value="${esc(item.coinReward || '')}" placeholder="请输入商城币数量"><span class="field-hint">商城币充值卡领取后发放该数量商城币。</span></label><label class="full">说明<textarea name="description" maxlength="2000">${esc(item.description || '')}</textarea></label></div></section>
+      <section class="modal-section full"><div class="cdk-content-head"><h3>卡密内容</h3>${editing ? '' : '<button type="button" class="btn secondary" id="generateRandomCdk">生成随机CDK</button>'}</div><label>卡密<textarea name="generatedCode" rows="3" readonly placeholder="填写CDK前缀后自动生成卡密">${editing ? esc('****' + (item.codeHint || '')) : ''}</textarea></label><input type="hidden" name="codes" value="${esc(item.actionsText || item.codes || '')}"></section>`,
+    onSubmit: async (form) => {
+      const values = Object.fromEntries(new FormData(form));
+      const optionalNumber = (value) => value === '' ? null : Number(value);
+      const rewardCode = values.type === 'normal' ? `[${Number(values.coinReward || 0)}商城币]` : values.codes;
+      const body = { name: values.name.trim(), type: values.type, description: values.description.trim(), enabled: values.enabled === 'true', targetSteamId: values.targetSteamId?.trim() || '', memberLevel: Number(values.type === 'member' ? values.rewardMemberLevel || 0 : values.memberLevel || 0), memberMode: values.memberMode || 'minimum', totalLimit: optionalNumber(values.totalLimit), perUserLimit: optionalNumber(values.perUserLimit), startsAt: values.startsAt ? new Date(values.startsAt).toISOString() : null, expiresAt: values.expiresAt ? new Date(values.expiresAt).toISOString() : null, codes: rewardCode };
+      if (editing) {
+        await api(`/api/redeem-codes/${encodeURIComponent(item.id)}`, { method: 'PUT', body: JSON.stringify(body) });
+      } else {
+        const generated = values.generatedCode.trim().split(/\r?\n/).filter(Boolean);
+        if (!generated.length) throw new Error('请先生成随机CDK');
+        for (let index = 0; index < generated.length; index++) {
+          await api('/api/redeem-codes', { method: 'POST', body: JSON.stringify({ ...body, code: generated[index], name: generated.length > 1 ? `${body.name.slice(0, 65)}-${generated[index].slice(-32)}` : body.name, totalLimit: optionalNumber(values.perUserLimit), perUserLimit: 1 }) });
+          form.elements.generatedCode.value = generated.slice(index + 1).join('\n');
+        }
+      }
+      toast(editing ? '兑换码已更新' : '兑换码已创建'); closeModal(); await loadRedeemCodes();
+    }
+  });
+  if (!editing) $('#modalBackdrop').classList.add('centered-modal');
+  const form = $('#modalForm');
+  if (!editing) {
+    const generateCode = () => {
+      const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%&*';
+      const suffix = Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => alphabet[byte % alphabet.length]).join('');
+      const prefix = form.elements.codePrefix.value.trim();
+      form.elements.generatedCode.value = /^[A-Za-z0-9]{1,11}$/.test(prefix) ? `${prefix}${suffix.slice(0, 15 - prefix.length)}` : '';
+      if (!/[A-Z]/.test(form.elements.generatedCode.value) || !/[a-z]/.test(form.elements.generatedCode.value) || !/[0-9]/.test(form.elements.generatedCode.value) || !/[!@#$%&*]/.test(form.elements.generatedCode.value)) return generateCode();
+    };
+    $('#generateRandomCdk', form).addEventListener('click', () => {
+      if (!form.elements.codePrefix.reportValidity()) return;
+      const count = Number(form.elements.totalLimit.value);
+      if (!Number.isSafeInteger(count) || count < 1) { toast('请输入有效的生成数量'); return; }
+      if (count > 69 ** (15 - form.elements.codePrefix.value.trim().length)) { toast('前缀过长，无法生成指定数量的不重复卡密'); return; }
+      const generated = new Set();
+      while (generated.size < count) { generateCode(); generated.add(form.elements.generatedCode.value); }
+      form.elements.generatedCode.value = [...generated].join('\n');
+    });
+  }
+  form.elements.type.value = item.type || 'normal';
+  form.elements.type.addEventListener('change', updateRedeemCodeVisibility);
+  form.elements.enabled.value = item.enabled === false ? 'false' : 'true';
+  if (form.elements.memberMode) form.elements.memberMode.value = item.memberMode || 'minimum';
+  updateRedeemCodeVisibility();
+}
+async function editRedeemCode(id) {
+  redeemCodeModal(await api(`/api/redeem-codes/${encodeURIComponent(id)}`));
+}
+async function redeemClaimsModal(id) {
+  const item = state.redeemCodes.find((code) => String(code.id) === String(id));
+  openModal({ title: '兑换码领取记录', description: item ? `${item.name} · ${item.codeHint || '无提示'}` : `兑换码 #${id}`, submitText: '关闭', body: '<section class="full"><div class="empty loading">正在加载领取记录...</div></section>', onSubmit: async () => closeModal() });
+  $('#cancelModal').hidden = true;
+  try {
+    const data = await api(`/api/redeem-codes/${encodeURIComponent(id)}/claims`);
+    const claims = list(data, ['items', 'claims']);
+    $('#modalBody').innerHTML = `<section class="modal-section full"><div class="table-wrap"><table class="claim-table"><thead><tr><th>SteamID</th><th>订单号</th><th>状态</th><th>时间</th></tr></thead><tbody>${claims.length ? claims.map((claim) => `<tr><td><code>${esc(claim.steamId || '--')}</code></td><td><code>${esc(claim.orderNo || claim.orderId || '--')}</code></td><td>${status(claim.status)}</td><td>${esc(date(claim.createdAt))}</td></tr>`).join('') : empty(4, '暂无领取记录')}</tbody></table></div></section>`;
+  } catch (error) { $('#modalBody').innerHTML = `<section class="full"><div class="empty">${esc(error.message)}</div></section>`; }
+}
+
+$('#exchangeConfigForm')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  await withBusy(event.submitter, async () => {
+    const f = event.currentTarget.elements;
+    const coinAmount = Number(f.coinToGoldRate.value);
+    const saved = await saveConfig({
+      exchange: {
+        enabled: f.enabled.checked,
+        coinToGoldRate: 1 / coinAmount,
+        goldToCoinRate: Number(f.goldToCoinRate.value),
+        maxAmount: Number(f.maxAmount.value)
+      }
+    });
+    if (saved) toast('兑换设置已保存，部分配置可能需要重启服务');
+    else toast('兑换设置已保存');
+    await loadRedeemCodes();
+  });
+});
+
+$('#characterGrowthConfigForm')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  await withBusy(event.submitter, async () => {
+    const f = event.currentTarget.elements;
+    await saveConfig({ characterGrowth: { attributePointPrice: Number(f.attributePointPrice.value), skillLevelPrice: Number(f.skillLevelPrice.value) } });
+    toast('购买设置已保存');
+    await loadRedeemCodes();
+  });
+});
+
+$('#reloadRedeemCodes')?.addEventListener('click', (event) => withBusy(event.currentTarget, loadRedeemCodes));
+
+
+
+$('#reloadAccountExchanges')?.addEventListener('click', (event) => withBusy(event.currentTarget, loadRedeemCodes));
+
+async function handleRedeemClick(event) {
+  const deleteRedeemCodeId = event.target.closest('[data-delete-redeem-code]')?.dataset.deleteRedeemCode;
+  if (deleteRedeemCodeId && window.confirm('确认永久删除该兑换码？相关领取、订单、履约和关联数据将全部删除，且无法恢复。')) await withBusy(event.target.closest('button'), async () => {
+    await api(`/api/redeem-codes/${encodeURIComponent(deleteRedeemCodeId)}`, { method: 'DELETE' });
+    toast('兑换码已永久删除'); await loadRedeemCodes();
+  });
+}
+
+function handleRedeemCreateClick(event) {
+  const action = event.target.closest('[data-action]')?.dataset.action;
+  if (action === 'new-redeem-code') redeemCodeModal();
+}
+

@@ -1,0 +1,92 @@
+import { isValidDatabaseName } from './config-store.js';
+
+export async function createDatabase(config, mysqlModule = null) {
+  if (!isValidDatabaseName(config.database)) throw new Error('MySQL 数据库名无效');
+  const mysql = mysqlModule || (await import('mysql2/promise')).default;
+  let bootstrap;
+  try {
+    bootstrap = await mysql.createConnection({
+      host: config.host,
+      port: config.port,
+      user: config.user,
+      password: config.password,
+      charset: 'utf8mb4',
+      timezone: 'Z'
+    });
+    await bootstrap.query(`CREATE DATABASE IF NOT EXISTS \`${config.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  } catch (error) {
+    error.message = `MySQL 建库失败，请检查服务是否启动、账号密码及 CREATE DATABASE 权限：${error.message}`;
+    throw error;
+  } finally {
+    await bootstrap?.end();
+  }
+  const pool = mysql.createPool({
+    host: config.host,
+    port: config.port,
+    user: config.user,
+    password: config.password,
+    database: config.database,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    charset: 'utf8mb4',
+    timezone: 'Z',
+    decimalNumbers: true
+  });
+  return {
+    async rawQuery(sql, params = []) {
+      const connection = await pool.getConnection();
+      try {
+        await connection.query("SET SESSION time_zone = '+00:00'");
+        return (await connection.query(sql, params))[0];
+      } finally {
+        connection.release();
+      }
+    },
+    async query(sql, params = []) {
+      const connection = await pool.getConnection();
+      try {
+        await connection.query("SET SESSION time_zone = '+00:00'");
+        return (await connection.execute(sql, params))[0];
+      } finally {
+        connection.release();
+      }
+    },
+    async withConnection(work) {
+      const connection = await pool.getConnection();
+      try {
+        await connection.query("SET SESSION time_zone = '+00:00'");
+        const session = {
+          query: async (sql, params = []) => (await connection.execute(sql, params))[0],
+          rawQuery: async (sql, params = []) => (await connection.query(sql, params))[0]
+        };
+        return await work(session);
+      } finally {
+        connection.release();
+      }
+    },
+    async transaction(work) {
+      const connection = await pool.getConnection();
+      try {
+        await connection.query("SET SESSION time_zone = '+00:00'");
+        await connection.beginTransaction();
+        const tx = { query: async (sql, params = []) => {
+          if (sql.startsWith('INSERT INTO lottery_draws ')) {
+            const stock = (await connection.execute('UPDATE lottery_prizes SET weight=IF(stock_remaining=1,weight+5000000000000000,weight),stock_remaining=stock_remaining-1 WHERE id=? AND stock_remaining>0', [params[2]]))[0];
+            if (!stock.affectedRows) { const error = new Error('奖品库存不足'); error.code = 'LOTTERY_PRIZE_OUT_OF_STOCK'; throw error; }
+          }
+          return (await connection.execute(sql, params))[0];
+        } };
+        const result = await work(tx);
+        await connection.commit();
+        return result;
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
+    },
+    async close() { await pool.end(); }
+  };
+}

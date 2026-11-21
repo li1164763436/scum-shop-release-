@@ -1,0 +1,167 @@
+import crypto from 'node:crypto';
+import fsPromises from 'node:fs/promises';
+import path from 'node:path';
+import { decodeScumLog, parseScumLogLine } from './scum-log-parser.js';
+import { redact } from '../utils/redactor.js';
+
+function rowsOf(result) { return Array.isArray(result) && Array.isArray(result[0]) ? result[0] : result; }
+function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+function iso(clock) { return new Date(clock()).toISOString(); }
+function safeError(error) {
+  const redacted = redact(String(error?.message || error?.code || '日志采集失败'));
+  return String(redacted).replace(/[A-Za-z]:\\[^\r\n]*/g, '[路径已隐藏]').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 500) || '日志采集失败';
+}
+function safePreview(line) {
+  return String(redact(line)).replace(/[A-Za-z]:\\[^\r\n,;]*/g, '[路径已隐藏]').replace(/\\\\[^\r\n,;]*/g, '[网络路径已隐藏]').replace(/\d{17}/g, '*****************').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 240);
+}
+function fileIdentity(filePath, stat) {
+  return hash(JSON.stringify({ path: path.resolve(filePath).toLowerCase(), birthtimeMs: stat.birthtimeMs, ctimeMs: stat.ctimeMs, firstMtimeMs: stat.mtimeMs, firstSize: stat.size }));
+}
+function encodingUnit(encoding) { return encoding.startsWith('utf16') ? 2 : 1; }
+function lineByteLength(text, encoding) { return Buffer.byteLength(text, encoding === 'utf16be' ? 'utf16le' : encoding); }
+const CURSOR_PROBE_BYTES = 4096;
+const MAX_PENDING_FRAGMENT_BYTES = 16 * 1024 * 1024;
+function cursorProbe(buffer, offset, unit = 1) {
+  const length = Math.min(offset, CURSOR_PROBE_BYTES) - (Math.min(offset, CURSOR_PROBE_BYTES) % unit);
+  return { hash: length ? hash(buffer.subarray(offset - length, offset)) : null, length };
+}
+
+export class ScumLogWorker {
+  constructor({ db, store, logger, fs = fsPromises, clock = () => Date.now(), setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout }) {
+    this.db = db; this.store = store; this.logger = logger; this.fs = fs; this.clock = clock; this.setTimer = setTimer; this.clearTimer = clearTimer;
+    this.timer = null; this.activeTick = null; this.running = false; this.stopped = true; this.enabled = false; this.directory = ''; this.pollIntervalMs = 5000; this.retentionDays = 365;
+    this.lastStartedAt = null; this.lastCompletedAt = null; this.lastSuccessAt = null; this.lastFile = null; this.lastError = null; this.filesSeen = 0; this.eventsStored = 0; this.failuresStored = 0;
+  }
+  status() {
+    return { enabled: this.enabled, running: this.running, polling: Boolean(this.timer), directoryConfigured: Boolean(this.directory), pollIntervalMs: this.pollIntervalMs, lastStartedAt: this.lastStartedAt, lastCompletedAt: this.lastCompletedAt, lastSuccessAt: this.lastSuccessAt, lastFile: this.lastFile, lastError: this.lastError, filesSeen: this.filesSeen, eventsStored: this.eventsStored, failuresStored: this.failuresStored };
+  }
+  async start() { this.stopped = false; return this.reconfigure(); }
+  async reconfigure() {
+    const config = await this.store.read();
+    const value = { enabled: true, directory: '', pollIntervalMs: 5000, retentionDays: 365, ...config.scumLogs };
+    this.enabled = Boolean(value.enabled); this.directory = String(value.directory || ''); this.pollIntervalMs = value.pollIntervalMs; this.retentionDays = value.retentionDays;
+    this.clearSchedule();
+    if (!this.enabled || !this.directory) { this.stopped = true; await this.drain(); return this.status(); }
+    this.stopped = false; void this.tick(); return this.status();
+  }
+  clearSchedule() { if (this.timer) this.clearTimer(this.timer); this.timer = null; }
+  schedule() { if (this.stopped || !this.enabled || this.timer) return; this.timer = this.setTimer(() => { this.timer = null; void this.tick(); }, this.pollIntervalMs); this.timer?.unref?.(); }
+  stop() { this.stopped = true; this.clearSchedule(); }
+  async drain() { await this.activeTick; }
+  async stopAndDrain() { this.stop(); await this.drain(); }
+  async tick() { if (this.running || this.stopped || !this.enabled) return false; this.activeTick = this.performTick(); try { return await this.activeTick; } finally { this.activeTick = null; this.schedule(); } }
+  async performTick() {
+    this.running = true; this.lastStartedAt = iso(this.clock);
+    try {
+      const entries = await this.fs.readdir(this.directory, { withFileTypes: true });
+      const names = entries.filter((entry) => entry.isFile() && /^kill_.*\.log$/i.test(entry.name)).map((entry) => entry.name).sort();
+      this.filesSeen = names.length;
+      for (const basename of names) {
+        if (this.stopped) break;
+        const filePath = path.join(this.directory, basename);
+        this.lastFile = basename;
+        try { await this.processFile(filePath, basename); }
+        catch (error) {
+          const message = safeError(error);
+          await this.db.query("UPDATE scum_log_files SET last_status='error',last_error=? WHERE source_type='kill' AND path_hash=? ORDER BY id DESC LIMIT 1", [message, hash(path.resolve(filePath).toLowerCase())]).catch(() => {});
+          this.logger?.warn?.('SCUM 日志文件处理失败', { component: 'scum-log', file: basename, error: message });
+        }
+      }
+      await this.cleanup();
+      this.lastSuccessAt = iso(this.clock); this.lastError = null; return true;
+    } catch (error) {
+      this.lastError = safeError(error); this.logger?.warn?.('SCUM 日志采集失败', { component: 'scum-log', error: this.lastError }); return false;
+    } finally { this.lastCompletedAt = iso(this.clock); this.running = false; }
+  }
+  async processFile(filePath, basename) {
+    const stat = await this.fs.stat(filePath);
+    const pathHash = hash(path.resolve(filePath).toLowerCase());
+    const existingRows = rowsOf(await this.db.query("SELECT * FROM scum_log_files WHERE source_type='kill' AND path_hash=? ORDER BY id DESC LIMIT 1", [pathHash]));
+    let record = existingRows[0] || null;
+    const replaced = record && Number(record.birthtime_ms) !== Math.round(stat.birthtimeMs);
+    const truncated = record && !replaced && stat.size < Number(record.offset_bytes);
+    if (!record || replaced) {
+      const identity = fileIdentity(filePath, stat);
+      const inserted = await this.db.query("INSERT INTO scum_log_files (source_type,path_hash,basename,identity,birthtime_ms,ctime_ms,offset_bytes,pending_fragment,pending_position,size_bytes,mtime_ms,last_status) VALUES ('kill',?,?,?,?,?,0,'',0,?,?,'new')", [pathHash, basename.slice(0, 255), identity, Math.round(stat.birthtimeMs), Math.round(stat.ctimeMs), stat.size, Math.round(stat.mtimeMs)]);
+      record = { id: inserted.insertId, offset_bytes: 0, pending_fragment: '', pending_position: 0, encoding: null, rotation_count: 0, truncation_count: 0 };
+      if (replaced) await this.db.query('UPDATE scum_log_files SET rotation_count=rotation_count+1,last_status=? WHERE id=?', ['replaced', existingRows[0].id]);
+    } else if (truncated) {
+      const previous = record; const truncationCount = Number(previous.truncation_count || 0) + 1;
+      await this.db.query("UPDATE scum_log_files SET truncation_count=truncation_count+1,last_status='truncated' WHERE id=?", [previous.id]);
+      const identity = hash(`${previous.identity}|truncation|${truncationCount}|${Math.round(stat.mtimeMs)}|${stat.size}`);
+      const inserted = await this.db.query("INSERT INTO scum_log_files (source_type,path_hash,basename,identity,birthtime_ms,ctime_ms,offset_bytes,pending_fragment,pending_position,size_bytes,mtime_ms,last_status) VALUES ('kill',?,?,?,?,?,0,'',0,?,?,'new')", [pathHash, basename.slice(0, 255), identity, Math.round(stat.birthtimeMs), Math.round(stat.ctimeMs), stat.size, Math.round(stat.mtimeMs)]);
+      record = { id: inserted.insertId, offset_bytes: 0, pending_fragment: '', pending_position: 0, encoding: null, rotation_count: Number(previous.rotation_count || 0), truncation_count: truncationCount };
+    }
+    const all = await this.fs.readFile(filePath);
+    let offset = Math.min(Number(record.offset_bytes) || 0, all.length);
+    let encoding = record.encoding;
+    let bomBytes = 0;
+    if (!encoding || offset === 0) { const detected = decodeScumLog(all.subarray(0, Math.min(all.length, 4096))); encoding = detected.encoding; bomBytes = detected.bomBytes; }
+    const unit = encodingUnit(encoding);
+    const oldProbeLength = Number(record.cursor_probe_length) || 0;
+    if (offset > 0 && record.cursor_probe_hash && oldProbeLength > 0 && (offset < oldProbeLength || hash(all.subarray(offset - oldProbeLength, offset)) !== record.cursor_probe_hash)) {
+      const previous = record; const truncationCount = Number(previous.truncation_count || 0) + 1;
+      await this.db.query("UPDATE scum_log_files SET truncation_count=truncation_count+1,last_status='truncated' WHERE id=?", [previous.id]);
+      const identity = hash(`${previous.identity}|rewrite|${truncationCount}|${Math.round(stat.mtimeMs)}|${stat.size}`);
+      const inserted = await this.db.query("INSERT INTO scum_log_files (source_type,path_hash,basename,identity,birthtime_ms,ctime_ms,offset_bytes,pending_fragment,pending_position,size_bytes,mtime_ms,last_status) VALUES ('kill',?,?,?,?,?,0,'',0,?,?,'new')", [pathHash, basename.slice(0, 255), identity, Math.round(stat.birthtimeMs), Math.round(stat.ctimeMs), stat.size, Math.round(stat.mtimeMs)]);
+      record = { id: inserted.insertId, offset_bytes: 0, pending_fragment: '', pending_position: 0, encoding: null, rotation_count: Number(previous.rotation_count || 0), truncation_count: truncationCount };
+      offset = 0;
+      const detected = decodeScumLog(all.subarray(0, Math.min(all.length, 4096))); encoding = detected.encoding; bomBytes = detected.bomBytes;
+    }
+    const readableEnd = all.length - ((all.length - offset) % unit);
+    if (readableEnd <= offset && !record.pending_fragment) {
+      const probe = cursorProbe(all, offset, unit);
+      await this.db.query("UPDATE scum_log_files SET size_bytes=?,mtime_ms=?,encoding=?,cursor_probe_hash=?,cursor_probe_length=?,last_status='idle',last_error=NULL WHERE id=?", [stat.size, Math.round(stat.mtimeMs), encoding, probe.hash, probe.length, record.id]);
+      return;
+    }
+    const appended = all.subarray(offset, readableEnd);
+    let appendedText = encoding === 'utf16be' ? (() => { const copy = Buffer.from(appended); copy.swap16(); return copy.toString('utf16le'); })() : appended.toString(encoding);
+    if (offset === 0) appendedText = appendedText.replace(/^\uFEFF/, '');
+    const pending = String(record.pending_fragment || '');
+    const combined = pending + appendedText;
+    const startPosition = pending ? Number(record.pending_position) : offset + bomBytes;
+    let position = startPosition;
+    let cursor = 0;
+    const complete = [];
+    for (const match of combined.matchAll(/\r?\n/g)) {
+      const raw = combined.slice(cursor, match.index);
+      complete.push({ raw, position });
+      position += lineByteLength(raw + match[0], encoding);
+      cursor = match.index + match[0].length;
+    }
+    const fragment = combined.slice(cursor);
+    const fragmentPosition = position;
+    if (Buffer.byteLength(fragment, 'utf8') > MAX_PENDING_FRAGMENT_BYTES) throw Object.assign(new Error('SCUM 日志半行超过安全上限，拒绝推进游标'), { code: 'SCUM_FRAGMENT_TOO_LARGE' });
+    const events = [];
+    const failures = [];
+    for (const item of complete) {
+      const parsed = parseScumLogLine(item.raw);
+      if (parsed.type === 'events') parsed.events.forEach((event, index) => events.push({ event, position: item.position, ordinal: index, line: item.raw }));
+      else if (parsed.type === 'event') events.push({ event: parsed.event, position: item.position, ordinal: 0, line: item.raw });
+      else if (parsed.type === 'unknown') failures.push({ position: item.position, reason: parsed.reason, line: item.raw });
+    }
+    await this.db.transaction(async (tx) => {
+      for (const item of events) {
+        const eventHash = hash(JSON.stringify({ time: item.event.eventTime.toISOString(), killer: item.event.killerSteamId, victim: item.event.victimSteamId, weapon: item.event.weapon, distance: item.event.distance, type: item.event.eventType }));
+        const sourcePosition = `${item.position}:${item.ordinal}`;
+        const result = await tx.query('INSERT IGNORE INTO scum_kill_events (event_time,killer_steam_id,killer_name,victim_steam_id,victim_name,weapon,distance_meters,event_type,source_file_id,source_position,event_hash,parser_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [item.event.eventTime, item.event.killerSteamId, item.event.killerName, item.event.victimSteamId, item.event.victimName, item.event.weapon, item.event.distance, item.event.eventType, record.id, sourcePosition, eventHash, item.event.parserVersion]);
+        this.eventsStored += Number(result.affectedRows || 0);
+      }
+      for (const item of failures) {
+        const result = await tx.query('INSERT IGNORE INTO scum_log_parse_failures (source_file_id,source_position,line_hash,reason,preview) VALUES (?,?,?,?,?)', [record.id, String(item.position), hash(item.line), String(item.reason).slice(0, 64), safePreview(item.line)]);
+        this.failuresStored += Number(result.affectedRows || 0);
+      }
+      const probe = cursorProbe(all, readableEnd, unit);
+      await tx.query("UPDATE scum_log_files SET offset_bytes=?,pending_fragment=?,pending_position=?,size_bytes=?,mtime_ms=?,encoding=?,cursor_probe_hash=?,cursor_probe_length=?,last_status='ok',last_error=NULL,last_processed_at=CURRENT_TIMESTAMP(3) WHERE id=?", [readableEnd, fragment, fragmentPosition, stat.size, Math.round(stat.mtimeMs), encoding, probe.hash, probe.length, record.id]);
+    });
+  }
+  async cleanup() {
+    const microseconds = this.retentionDays * 86400 * 1000000;
+    await this.db.transaction(async (tx) => {
+      await tx.query("DELETE f FROM scum_log_parse_failures f JOIN scum_log_files l ON l.id=f.source_file_id WHERE l.source_type='kill' AND f.created_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)", [microseconds]);
+      await tx.query('DELETE FROM scum_kill_events WHERE event_time < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)', [microseconds]);
+    });
+  }
+}
+
+export { fileIdentity, safeError, safePreview, rowsOf };

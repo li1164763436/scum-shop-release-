@@ -1,0 +1,45 @@
+<section class="page" id="page-membership">
+          <div class="page-toolbar"><div><span class="section-kicker">MEMBERSHIP CENTER</span><h2>会员策略管理</h2><p>管理等级权益、开通续费、消费升级和玩家消费维护。</p></div><div class="toolbar-actions"><button class="btn secondary" id="reloadMembership" type="button">刷新</button><button class="btn primary" id="newMembership" type="button">添加策略</button></div></div>
+
+          <section class="card membership-strategy-card"><div class="card-head"><div><span class="membership-card-kicker">MEMBERSHIP POLICY</span><h3>会员开通 / 消费升级配置</h3><p>统一管理会员开通、续费、补差升级和消费升级规则。</p></div><span class="membership-policy-badge">制度配置</span></div>
+            <div class="strategy-grid">
+              <div class="strategy-block">
+                <div class="strategy-block-head"><span>01</span><div><strong>基础制度</strong><small>控制会员购买和自动升级入口</small></div></div>
+                <div class="strategy-row"><span>开通制启用</span><label class="switch"><input type="checkbox" id="enableOpenSystem" checked><span class="slider"></span></label></div>
+                <p class="strategy-hint">玩家可按等级价格开通会员，到期时间按周期计算。</p>
+                <div class="strategy-row"><span>消费制启用</span><label class="switch"><input type="checkbox" id="enableUpgrade"><span class="slider"></span></label></div>
+                <p class="strategy-hint">按累计消费匹配会员等级。</p>
+                <div class="strategy-row"><span>同等续费</span><label class="switch"><input type="checkbox" id="enableRenew" checked><span class="slider"></span></label></div>
+                <p class="strategy-hint">同等级会员允许延期。</p>
+                <div class="strategy-actions"><span class="strategy-status">当前制度：开通制</span></div>
+              </div>
+              <div class="strategy-block">
+                <div class="strategy-block-head"><span>02</span><div><strong>续费规则</strong><small>控制同等级续费价格和赠送</small></div></div>
+                <div class="strategy-row"><span>续费价格策略</span><select id="renewPriceStrategy"><option value="original">原价续费</option><option value="discount">折扣续费</option><option value="fixed">固定金额</option></select></div>
+                <div class="strategy-row"><span>续费赠送代币</span><label class="switch"><input type="checkbox" id="enableRenewGift" checked><span class="slider"></span></label></div>
+                <div class="strategy-row"><span>续费折扣</span><input type="number" id="renewDiscount" value="100" min="0" max="100"><span>%</span></div>
+                <div class="strategy-row"><span>续费固定价</span><input type="number" id="renewFixedPrice" value="0" min="0"></div>
+              </div>
+              <div class="strategy-block">
+                <div class="strategy-block-head"><span>03</span><div><strong>升级规则</strong><small>控制补差升级、期限和降级购买</small></div></div>
+                <div class="strategy-row"><span>高级会员升级策略</span><select id="upgradeStrategy"><option value="allow">允许补差升级</option><option value="forbid">禁止升级</option></select></div>
+                <div class="strategy-row"><span>升级到期策略</span><select id="upgradeExpiryStrategy"><option value="extend">延长当前到期</option><option value="reset">重新计算</option></select></div>
+                <div class="strategy-row"><span>升级赠送代币</span><label class="switch"><input type="checkbox" id="enableUpgradeGift"><span class="slider"></span></label></div>
+                <div class="strategy-row"><span>升级时赠送代币金额</span><input type="number" id="upgradeGiftAmount" value="0" min="0"></div>
+                <div class="strategy-row"><span>低等级购买策略</span><select id="lowerLevelPurchase"><option value="forbid">禁止购买低等级</option><option value="allow">允许购买</option></select></div>
+              </div>
+            </div>
+            <div class="strategy-save"><button class="btn primary" id="saveStrategy">保存策略</button></div>
+          </section>
+
+          <section class="card membership-level-card"><div class="card-head"><div><span class="membership-card-kicker">LEVEL BENEFITS</span><h3>会员等级配置</h3><p>配置每个等级的价格、周期、升级门槛和会员权益。</p></div><div class="membership-level-actions"><button class="btn secondary" id="openMembershipLogs" type="button">变更记录</button><button class="btn primary" id="addLevelStrategy">＋ 添加策略</button></div></div>
+            <div class="table-wrap"><table class="membership-level-table"><thead><tr><th>等级</th><th>称号</th><th>开通金额</th><th>周期</th><th>赠送代币</th><th>升级所需消费</th><th>购物折扣</th><th>礼包折扣</th><th>传送折扣</th><th>在线加成</th><th>充值加成</th><th>签到赠送</th><th>传送</th><th>操作</th></tr></thead><tbody id="membershipLevelRows"><tr><td colspan="14" class="empty loading">正在加载等级配置...</td></tr></tbody></table></div>
+          </section>
+
+          <section class="card membership-consumption-card"><div class="card-head"><div><span class="membership-card-kicker">CONSUMPTION UPGRADE</span><h3>消费升级管理</h3><p>按 SteamID 查询玩家累计有效消费、当前等级及下一级消费差额。</p></div></div>
+            <form class="membership-consumption-search" id="membershipConsumptionForm"><label>SteamID<input name="steamId" maxlength="17" pattern="[0-9]{17}" placeholder="输入17位 SteamID" required></label><button class="btn primary" type="submit">查询玩家</button></form>
+            <div class="membership-consumption-result" id="membershipConsumptionResult"><div class="membership-consumption-identity"><span>商城账号</span><strong>--</strong><code>--</code></div><div class="membership-consumption-metrics"><article><span>已消费</span><strong>--</strong><small>商城币</small></article><article><span>当前等级</span><strong>--</strong><small>等待查询</small></article><article><span>下一级差额</span><strong>--</strong><small>商城币</small></article></div><div class="membership-consumption-next"><div><strong>等待查询下一级会员</strong><small>输入 SteamID 后读取升级门槛</small></div><span class="membership-consumption-progress"><i style="width:0%"></i></span><em>0%</em></div></div>
+          </section>
+
+        </section>
+

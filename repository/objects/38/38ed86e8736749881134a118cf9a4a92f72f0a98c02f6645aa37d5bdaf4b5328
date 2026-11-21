@@ -1,0 +1,312 @@
+import crypto from 'node:crypto';
+import { promisify } from 'node:util';
+import { isSteamId64 } from './command-policy.js';
+import { ServiceError } from './commerce-service.js';
+
+const scrypt = promisify(crypto.scrypt);
+const USERNAME_PATTERN = /^[\p{L}\p{N}_.-]{3,32}$/u;
+const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
+const CHALLENGE_MS = 10 * 60 * 1000;
+const ADMIN_ROLES = ['admin', 'super_admin'];
+const SHOP_ROLES = ['user', ...ADMIN_ROLES];
+const ADMIN_PERMISSION_KEYS = ['overview', 'commerce', 'players', 'fulfillment', 'operations', 'system'];
+const DEFAULT_ADMIN_PERMISSIONS = [...ADMIN_PERMISSION_KEYS];
+function adminPermissions(value) {
+  if (Array.isArray(value)) return ADMIN_PERMISSION_KEYS.filter((key) => value.includes(key));
+  if (typeof value === 'string') { try { return adminPermissions(JSON.parse(value)); } catch { return []; } }
+  return [];
+}
+function effectiveAdminPermissions(role, value) { return role === 'super_admin' || (role === 'admin' && (value === null || value === undefined)) ? DEFAULT_ADMIN_PERMISSIONS : adminPermissions(value); }
+function validateAdminPermissions(value) {
+  if (!Array.isArray(value) || value.some((key) => !ADMIN_PERMISSION_KEYS.includes(key)) || new Set(value).size !== value.length) throw new ServiceError('管理员权限范围无效', 400, 'INVALID_ADMIN_PERMISSIONS');
+  return adminPermissions(value);
+}
+const MEMBER_COLUMNS = 'u.`会员等级` AS rawMemberLevel, u.`会员到期时间` AS memberExpiresAt, CASE WHEN u.`会员等级` > 0 AND (u.`会员到期时间` IS NULL OR u.`会员到期时间` > CURRENT_TIMESTAMP(3)) THEN u.`会员等级` ELSE 0 END AS memberLevel';
+
+function requiredRoles(requirement) {
+  if (!requirement) return null;
+  if (typeof requirement === 'string') return [requirement];
+  if (Array.isArray(requirement)) return requirement;
+  return requirement.roles || null;
+}
+
+function normalizeUsername(value) {
+  const username = String(value || '').trim().normalize('NFKC');
+  if (!USERNAME_PATTERN.test(username)) throw new ServiceError('用户名须为 3-32 位字母、数字、下划线、点或短横线');
+  return { username, normalized: username.toLocaleLowerCase('en-US') };
+}
+
+function validatePassword(value) {
+  const password = String(value || '');
+  if (password.length < 8 || password.length > 28) throw new ServiceError('密码长度须为 8-28 位');
+  return password;
+}
+
+function validateRegistrationPassword(value) {
+  const password = String(value || '');
+  if (password.length < 8 || password.length > 28 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
+    throw new ServiceError('密码须为 8-28 位，并包含大写字母、小写字母和数字');
+  }
+  return password;
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function safeEqualHex(left, right) {
+  if (!/^[a-f0-9]+$/i.test(String(left)) || String(left).length !== String(right).length) return false;
+  return crypto.timingSafeEqual(Buffer.from(String(left), 'hex'), Buffer.from(String(right), 'hex'));
+}
+
+async function hashValidatedPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const derived = await scrypt(password, salt, 64);
+  return { hash: Buffer.from(derived).toString('hex'), salt };
+}
+
+export async function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  return hashValidatedPassword(validatePassword(password), salt);
+}
+
+export async function verifyPassword(password, salt, expectedHash) {
+  try {
+    const { hash } = await hashPassword(password, salt);
+    return safeEqualHex(hash, expectedHash);
+  } catch {
+    return false;
+  }
+}
+
+export class AuthService {
+  constructor(db, { clock = () => Date.now(), challengeSecret = crypto.randomBytes(32) } = {}) {
+    this.db = db;
+    this.clock = clock;
+    this.challengeSecret = challengeSecret;
+  }
+
+  challengeHash(steamId, code, purpose = 'register') {
+    const payload = purpose === 'register' ? `${steamId}:${code}` : `${purpose}:${steamId}:${code}`;
+    return crypto.createHmac('sha256', this.challengeSecret).update(payload).digest('hex');
+  }
+
+  async createChallenge(steamId, purpose = 'register') {
+    if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效');
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    const expires = new Date(this.clock() + CHALLENGE_MS);
+    await this.db.transaction(async (tx) => {
+      await tx.query('UPDATE steam_bind_challenges SET invalidated_at = CURRENT_TIMESTAMP(3) WHERE steam_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL', [String(steamId)]);
+      await tx.query('INSERT INTO steam_bind_challenges (steam_id, code_hash, expires_at, max_attempts) VALUES (?, ?, ?, 5)', [String(steamId), this.challengeHash(steamId, code, purpose), expires]);
+    });
+    return code;
+  }
+
+  async consumeChallenge(tx, steamId, code, purpose = 'register') {
+    const supplied = String(code || '').trim();
+    if (!/^\d{6}$/.test(supplied)) throw new ServiceError('验证码无效', 400, 'INVALID_VERIFICATION_CODE');
+    const rows = await tx.query('SELECT id, code_hash AS codeHash, attempts, max_attempts AS maxAttempts, expires_at AS expiresAt FROM steam_bind_challenges WHERE steam_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL ORDER BY id DESC LIMIT 1 FOR UPDATE', [String(steamId)]);
+    const challenge = rows[0];
+    if (!challenge || new Date(challenge.expiresAt).getTime() <= this.clock() || Number(challenge.attempts) >= Number(challenge.maxAttempts)) {
+      throw new ServiceError('验证码无效或已过期', 400, 'INVALID_VERIFICATION_CODE');
+    }
+    const valid = safeEqualHex(this.challengeHash(steamId, supplied, purpose), challenge.codeHash);
+    if (!valid) {
+      await tx.query('UPDATE steam_bind_challenges SET attempts = attempts + 1, invalidated_at = IF(attempts >= max_attempts, CURRENT_TIMESTAMP(3), invalidated_at) WHERE id = ?', [challenge.id]);
+      return false;
+    }
+    await tx.query('UPDATE steam_bind_challenges SET consumed_at = CURRENT_TIMESTAMP(3) WHERE id = ?', [challenge.id]);
+    return true;
+  }
+
+  async createSession(userId, metadata = {}, tx = this.db) {
+    const token = crypto.randomBytes(32).toString('base64url');
+    const expiresAt = new Date(this.clock() + SESSION_MS);
+    await tx.query('INSERT INTO shop_sessions (user_id, token_hash, expires_at, ip_address, user_agent) VALUES (?, ?, ?, ?, ?)', [userId, sha256(token), expiresAt, String(metadata.ip || '').slice(0, 64) || null, String(metadata.userAgent || '').slice(0, 255) || null]);
+    return { token, expiresAt };
+  }
+
+  async register({ username, password, steamId, verificationCode }, metadata = {}) {
+    const names = normalizeUsername(username);
+    const safePassword = validateRegistrationPassword(password);
+    if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效');
+    const credentials = await hashValidatedPassword(safePassword);
+    try {
+      const result = await this.db.transaction(async (tx) => {
+        const validChallenge = await this.consumeChallenge(tx, String(steamId), verificationCode);
+        if (!validChallenge) return null;
+        const existing = await tx.query('SELECT `商城用户编号` AS id, `登录账号` AS username FROM `商城用户` WHERE `SteamID` = ? FOR UPDATE', [String(steamId)]);
+        let userId;
+        if (existing[0]) {
+          if (existing[0].username) throw Object.assign(new Error('SteamID 已被注册'), { code: 'ER_DUP_ENTRY' });
+          await tx.query("UPDATE `商城用户` SET `登录账号` = ?, `登录账号规范值` = ?, `密码哈希` = ?, `密码盐` = ?, `商城账户创建时间`=COALESCE(`商城账户创建时间`,CURRENT_TIMESTAMP(3)) WHERE `商城用户编号` = ?", [names.username, names.normalized, credentials.hash, credentials.salt, existing[0].id]);
+          userId = existing[0].id;
+        } else {
+          const inserted = await tx.query("INSERT INTO `商城用户` (`登录账号`, `登录账号规范值`, `密码哈希`, `密码盐`, `SteamID`, `用户角色`, `账户状态`, `商城币余额`,`商城账户创建时间`) VALUES (?, ?, ?, ?, ?, 'user', 'active', 0,CURRENT_TIMESTAMP(3))", [names.username, names.normalized, credentials.hash, credentials.salt, String(steamId)]);
+          userId = inserted.insertId;
+        }
+        const session = await this.createSession(userId, metadata, tx);
+        return { user: { id: userId, username: names.username, steamId: String(steamId), role: 'user', status: 'active' }, session };
+      });
+      if (!result) throw new ServiceError('验证码无效或已过期', 400, 'INVALID_VERIFICATION_CODE');
+      return result;
+    } catch (error) {
+      if (error?.code === 'ER_DUP_ENTRY') throw new ServiceError('用户名或 SteamID 已被注册', 409, 'ALREADY_REGISTERED');
+      throw error;
+    }
+  }
+
+  async resetPassword({ username, steamId, verificationCode, password }) {
+    const names = normalizeUsername(username);
+    if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效');
+    const credentials = await hashValidatedPassword(validateRegistrationPassword(password));
+    const updated = await this.db.transaction(async (tx) => {
+      const users = await tx.query("SELECT `商城用户编号` AS id FROM `商城用户` WHERE `登录账号规范值`=? AND `SteamID`=? AND `账户状态`='active' FOR UPDATE", [names.normalized, String(steamId)]);
+      if (!users[0]) throw new ServiceError('账户信息不匹配', 400, 'INVALID_CREDENTIALS');
+      if (!await this.consumeChallenge(tx, String(steamId), verificationCode, 'password-reset')) return false;
+      await this.updatePassword(tx, users[0].id, credentials);
+      return true;
+    });
+    if (!updated) throw new ServiceError('验证码无效或已过期', 400, 'INVALID_VERIFICATION_CODE');
+  }
+
+  async changePassword(userId, { currentPassword, password }) {
+    const credentials = await hashValidatedPassword(validateRegistrationPassword(password));
+    await this.db.transaction(async (tx) => {
+      const users = await tx.query("SELECT `商城用户编号` AS id,`密码哈希` AS passwordHash,`密码盐` AS passwordSalt FROM `商城用户` WHERE `商城用户编号`=? AND `账户状态`='active' FOR UPDATE", [userId]);
+      const user = users[0];
+      if (!user || !await verifyPassword(currentPassword, user.passwordSalt, user.passwordHash)) throw new ServiceError('原密码错误', 400, 'INVALID_CREDENTIALS');
+      await this.updatePassword(tx, user.id, credentials);
+    });
+  }
+
+  async updatePassword(tx, userId, credentials) {
+    await tx.query('UPDATE `商城用户` SET `密码哈希`=?,`密码盐`=? WHERE `商城用户编号`=?', [credentials.hash, credentials.salt, userId]);
+    await tx.query('UPDATE shop_sessions SET revoked_at=CURRENT_TIMESTAMP(3) WHERE user_id=? AND revoked_at IS NULL', [userId]);
+  }
+
+  async login({ username, password }, metadata = {}, requirement = null) {
+    const names = normalizeUsername(username);
+    validatePassword(password);
+    const rows = await this.db.query(`SELECT u.\`商城用户编号\` AS id, u.\`登录账号\` AS username, u.\`密码哈希\` AS passwordHash, u.\`密码盐\` AS passwordSalt, u.\`SteamID\` AS steamId, u.\`用户角色\` AS role, u.\`管理员权限\` AS adminPermissions, u.\`账户状态\` AS status, u.\`商城币余额\` AS balance, ${MEMBER_COLUMNS} FROM \`商城用户\` u WHERE u.\`登录账号规范值\` = ? LIMIT 1`, [names.normalized]);
+    const user = rows[0];
+    if (!user || !(await verifyPassword(password, user.passwordSalt, user.passwordHash))) throw new ServiceError('用户名或密码错误', 401, 'INVALID_CREDENTIALS');
+    if (user.status !== 'active') throw new ServiceError('账户已停用', 403, 'ACCOUNT_DISABLED');
+    const roles = requiredRoles(requirement);
+    if (roles && !roles.includes(user.role)) throw new ServiceError('用户名或密码错误', 401, 'INVALID_CREDENTIALS');
+    if (requirement?.requiredUserId && Number(user.id) !== Number(requirement.requiredUserId)) throw new ServiceError('当前账号不是本机许可证固定绑定的超级管理员', 403, 'LICENSE_ADMIN_MISMATCH');
+    if (requirement?.requireSteamId && !isSteamId64(user.steamId)) throw new ServiceError('用户名或密码错误', 401, 'INVALID_CREDENTIALS');
+    const session = await this.db.transaction(async (tx) => {
+      await tx.query('UPDATE `商城用户` SET `最后登录时间` = CURRENT_TIMESTAMP(3) WHERE `商城用户编号` = ?', [user.id]);
+      return this.createSession(user.id, metadata, tx);
+    });
+    return { user: { id: user.id, username: user.username, steamId: user.steamId, role: user.role, status: user.status, balance: Number(user.balance) || 0, memberLevel: Number(user.memberLevel) || 0, rawMemberLevel: Number(user.rawMemberLevel) || 0, memberExpiresAt: user.memberExpiresAt || null, adminPermissions: effectiveAdminPermissions(user.role, user.adminPermissions) }, session };
+  }
+
+  async authenticate(token, requiredRole = null) {
+    if (!token) return null;
+    const rows = await this.db.query(`SELECT u.\`商城用户编号\` AS id, u.\`登录账号\` AS username, u.\`SteamID\` AS steamId, u.\`用户角色\` AS role, u.\`管理员权限\` AS adminPermissions, u.\`账户状态\` AS status, EXISTS(SELECT 1 FROM \`授权账号绑定\` b WHERE b.\`商城用户编号\`=u.\`商城用户编号\` AND b.\`绑定状态\`='active') AS licenseBound, u.\`商城币余额\` AS balance, ${MEMBER_COLUMNS} FROM shop_sessions s JOIN \`商城用户\` u ON u.\`商城用户编号\` = s.user_id WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP(3) AND s.revoked_at IS NULL AND u.\`账户状态\` = 'active' LIMIT 1`, [sha256(token)]);
+    const user = rows[0] || null;
+    const roles = requiredRoles(requiredRole);
+    if (!user || (roles && !roles.includes(user.role))) return null;
+    if (requiredRole?.requiredUserId && Number(user.id) !== Number(requiredRole.requiredUserId)) return null;
+    if (Number(user.licenseBound) > 0 && user.role !== 'super_admin') return null;
+    return { ...user, adminPermissions: effectiveAdminPermissions(user.role, user.adminPermissions) };
+  }
+
+  async touchShopVisit(userId) {
+    await this.db.query('UPDATE `商城用户` SET `最后登录时间` = CURRENT_TIMESTAMP(3) WHERE `商城用户编号` = ?', [userId]);
+  }
+
+  async logout(token) {
+    if (token) await this.db.query('UPDATE shop_sessions SET revoked_at = CURRENT_TIMESTAMP(3) WHERE token_hash = ?', [sha256(token)]);
+  }
+
+  async promoteUser(id, input, actor) {
+    if (actor?.role !== 'super_admin') throw new ServiceError('仅超级管理员可以提升后台管理员', 403, 'SUPER_ADMIN_REQUIRED');
+    if (!/^\d+$/.test(String(id)) || Number(id) < 1) throw new ServiceError('用户 ID 无效', 400, 'INVALID_INPUT');
+    const keys = Object.keys(input || {});
+    if (keys.length !== 2 || !keys.includes('confirmSteamId') || !keys.includes('reason')) throw new ServiceError('仅允许 confirmSteamId 和 reason 字段', 400, 'INVALID_INPUT');
+    const confirmSteamId = String(input.confirmSteamId || '').trim();
+    const reason = String(input.reason || '').trim();
+    if (!isSteamId64(confirmSteamId)) throw new ServiceError('确认 SteamID 格式无效', 400, 'INVALID_INPUT');
+    if (!reason || reason.length > 500) throw new ServiceError('提升原因须为 1-500 个字符', 400, 'INVALID_INPUT');
+    return this.db.transaction(async (tx) => {
+      const rows = await tx.query('SELECT `商城用户编号` AS id, `登录账号` AS username, `SteamID` AS steamId, `用户角色` AS role, `账户状态` AS status FROM `商城用户` WHERE `商城用户编号` = ? LIMIT 1 FOR UPDATE', [Number(id)]);
+      const target = rows[0];
+      if (!target) throw new ServiceError('目标用户不存在', 404, 'NOT_FOUND');
+      if (!isSteamId64(target.steamId)) throw new ServiceError('只能提升已绑定 SteamID 的注册玩家', 409, 'NOT_REGISTERED_PLAYER');
+      if (target.steamId !== confirmSteamId) throw new ServiceError('确认 SteamID 与目标玩家不一致', 400, 'CONFIRMATION_MISMATCH');
+      if (target.role === 'admin') return { id: target.id, username: target.username, steamId: target.steamId, role: 'admin', status: target.status, alreadyAdmin: true };
+      if (target.role !== 'user') throw new ServiceError('仅普通商城玩家可提升为管理员', 409, 'INVALID_ROLE');
+      await tx.query("UPDATE `商城用户` SET `用户角色` = 'admin' WHERE `商城用户编号` = ?", [target.id]);
+      await tx.query('UPDATE shop_sessions SET revoked_at = CURRENT_TIMESTAMP(3) WHERE user_id = ? AND revoked_at IS NULL', [target.id]);
+      const actorLabel = String(actor?.username || actor?.id || 'admin').slice(0, 100);
+      await tx.query("INSERT INTO admin_role_audits (actor_user_id, actor_type, actor_label, actor_username_snapshot, target_user_id, target_username_snapshot, target_steam_id, old_role, new_role, reason) VALUES (?, 'shop_user', ?, ?, ?, ?, ?, 'user', 'admin', ?)", [actor?.id ?? null, actorLabel, actorLabel, target.id, target.username, target.steamId, reason]);
+      return { id: target.id, username: target.username, steamId: target.steamId, role: 'admin', status: target.status, alreadyAdmin: false };
+    });
+  }
+
+  async promoteUserBySteamId(input, actor) {
+    if (actor?.role !== 'super_admin') throw new ServiceError('仅超级管理员可以授权后台管理员', 403, 'SUPER_ADMIN_REQUIRED');
+    const keys = Object.keys(input || {});
+    if (keys.length !== 2 || !keys.includes('steamId') || !keys.includes('permissions')) throw new ServiceError('仅允许 steamId 和 permissions 字段', 400, 'INVALID_INPUT');
+    const steamId = String(input.steamId || '').trim();
+    const permissions = validateAdminPermissions(input.permissions);
+    if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效', 400, 'INVALID_INPUT');
+    const rows = await this.db.query('SELECT `商城用户编号` AS id FROM `商城用户` WHERE `SteamID` = ? LIMIT 1', [steamId]);
+    if (!rows[0]) throw new ServiceError('该 SteamID 尚未注册商城账号', 404, 'SHOP_USER_NOT_FOUND');
+    const result = await this.promoteUser(rows[0].id, { confirmSteamId: steamId, reason: '通过后台授权管理授予权限' }, actor);
+    await this.db.query('UPDATE `商城用户` SET `管理员权限`=?,`管理员授权时间`=COALESCE(`管理员授权时间`,CURRENT_TIMESTAMP(3)) WHERE `商城用户编号`=?', [JSON.stringify(permissions), rows[0].id]);
+    return { ...result, permissions };
+  }
+
+  async listAdminUsers(actor) {
+    if (actor?.role !== 'super_admin') throw new ServiceError('仅超级管理员可以查看授权管理员', 403, 'SUPER_ADMIN_REQUIRED');
+    const rows = await this.db.query("SELECT `商城用户编号` AS id,`登录账号` AS username,`SteamID` AS steamId,`用户角色` AS role,`管理员权限` AS permissions,`管理员授权时间` AS authorizedAt FROM `商城用户` WHERE `用户角色`='admin' ORDER BY `管理员授权时间` DESC,`商城用户编号` DESC");
+    return rows.map((row) => ({ ...row, permissions: effectiveAdminPermissions('admin', row.permissions) }));
+  }
+
+  async updateAdminPermissions(id, input, actor) {
+    if (actor?.role !== 'super_admin') throw new ServiceError('仅超级管理员可以编辑管理员权限', 403, 'SUPER_ADMIN_REQUIRED');
+    const keys = Object.keys(input || {});
+    if (keys.length !== 1 || !keys.includes('permissions')) throw new ServiceError('仅允许 permissions 字段', 400, 'INVALID_INPUT');
+    const permissions = validateAdminPermissions(input.permissions);
+    const result = await this.db.query("UPDATE `商城用户` SET `管理员权限`=? WHERE `商城用户编号`=? AND `用户角色`='admin'", [JSON.stringify(permissions), Number(id)]);
+    if (!result.affectedRows) throw new ServiceError('后台管理员不存在', 404, 'NOT_FOUND');
+    await this.db.query('UPDATE shop_sessions SET revoked_at=CURRENT_TIMESTAMP(3) WHERE user_id=? AND revoked_at IS NULL', [Number(id)]);
+    return { id: Number(id), permissions };
+  }
+
+  async demoteUser(id, input, actor) {
+    if (actor?.role !== 'super_admin') throw new ServiceError('仅超级管理员可以取消后台管理员', 403, 'SUPER_ADMIN_REQUIRED');
+    if (!/^\d+$/.test(String(id)) || Number(id) < 1) throw new ServiceError('用户 ID 无效', 400, 'INVALID_INPUT');
+    const keys = Object.keys(input || {});
+    if (keys.length !== 2 || !keys.includes('confirmSteamId') || !keys.includes('reason')) throw new ServiceError('仅允许 confirmSteamId 和 reason 字段', 400, 'INVALID_INPUT');
+    const confirmSteamId = String(input.confirmSteamId || '').trim();
+    const reason = String(input.reason || '').trim();
+    if (!isSteamId64(confirmSteamId)) throw new ServiceError('确认 SteamID 格式无效', 400, 'INVALID_INPUT');
+    if (reason.length < 2 || reason.length > 500) throw new ServiceError('取消原因长度必须为 2-500 个字符', 400, 'INVALID_INPUT');
+    return this.db.transaction(async (tx) => {
+      const rows = await tx.query('SELECT `商城用户编号` AS id, `登录账号` AS username, `SteamID` AS steamId, `用户角色` AS role, `账户状态` AS status FROM `商城用户` WHERE `商城用户编号` = ? FOR UPDATE', [Number(id)]);
+      const target = rows[0];
+      if (!target) throw new ServiceError('目标用户不存在', 404, 'NOT_FOUND');
+      if (target.steamId !== confirmSteamId) throw new ServiceError('确认 SteamID 与目标玩家不一致', 400, 'CONFIRMATION_MISMATCH');
+      if (target.role === 'user') return { id: target.id, username: target.username, steamId: target.steamId, role: 'user', status: target.status, alreadyUser: true };
+      if (target.role !== 'admin') throw new ServiceError('超级管理员不能在此取消授权', 409, 'INVALID_ROLE');
+      await tx.query("UPDATE `商城用户` SET `用户角色` = 'user',`管理员权限`=NULL,`管理员授权时间`=NULL WHERE `商城用户编号` = ?", [target.id]);
+      await tx.query('UPDATE shop_sessions SET revoked_at = CURRENT_TIMESTAMP(3) WHERE user_id = ? AND revoked_at IS NULL', [target.id]);
+      const actorLabel = String(actor?.username || actor?.id || 'admin').slice(0, 100);
+      await tx.query("INSERT INTO admin_role_audits (actor_user_id, actor_type, actor_label, actor_username_snapshot, target_user_id, target_username_snapshot, target_steam_id, old_role, new_role, reason) VALUES (?, 'shop_user', ?, ?, ?, ?, ?, 'admin', 'user', ?)", [actor?.id ?? null, actorLabel, actorLabel, target.id, target.username, target.steamId, reason]);
+      return { id: target.id, username: target.username, steamId: target.steamId, role: 'user', status: target.status, alreadyUser: false };
+    });
+  }
+
+  async bootstrapAdmin() {
+    throw new ServiceError('管理员自动初始化已禁用；请先注册并绑定 SteamID，再通过服务器命令行任命超级管理员', 410, 'ADMIN_BOOTSTRAP_DISABLED');
+  }
+}
+
+export const authInternals = { normalizeUsername, validatePassword, validateRegistrationPassword, sha256, SESSION_MS, ADMIN_ROLES, SHOP_ROLES, ADMIN_PERMISSION_KEYS, requiredRoles };
+
+
+
+

@@ -1,0 +1,126 @@
+import { parseVehicleLocation } from './scum-locked-vehicle-reader.js';
+
+const SOURCE_TYPE = 'scum_locked_vehicle';
+
+function normalizeCode(value) {
+  return String(value || '').trim().toLowerCase().replace(/^#spawnvehicle\s+/i, '').replace(/^vehicle:/i, '');
+}
+
+function safeText(value, max) {
+  const text = String(value || '').trim();
+  return text ? text.slice(0, max) : null;
+}
+
+function asDate(value) {
+  if (!value) return null;
+  const numeric = Number(value);
+  const date = new Date(Number.isFinite(numeric) && numeric > 0 && numeric < 10_000_000_000 ? numeric * 1000 : value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function validateSnapshot(snapshot) {
+  if (snapshot?.complete !== true || !Array.isArray(snapshot?.lockedVehicles)) throw Object.assign(new Error('SCUM上锁载具快照不完整'), { code: 'SCUM_VEHICLE_SNAPSHOT_INCOMPLETE' });
+  const seen = new Set();
+  for (const vehicle of snapshot.lockedVehicles) {
+    const id = Number(vehicle?.entityId);
+    if (!Number.isSafeInteger(id) || id < 1 || seen.has(id) || !/^\d{17}$/.test(String(vehicle?.ownerSteamId || ''))) throw Object.assign(new Error('SCUM上锁载具快照无效'), { code: 'SCUM_VEHICLE_SNAPSHOT_INVALID' });
+    for (const key of ['worldX', 'worldY', 'worldZ']) if (!Number.isFinite(Number(vehicle?.[key]))) throw Object.assign(new Error('SCUM上锁载具坐标无效'), { code: 'SCUM_VEHICLE_SNAPSHOT_INVALID' });
+    seen.add(id);
+  }
+  return snapshot.lockedVehicles;
+}
+
+export class VehicleSyncService {
+  constructor({ db, reader, clients, logger } = {}) {
+    this.db = db;
+    this.reader = reader;
+    this.clients = clients;
+    this.logger = logger;
+  }
+
+  async products() {
+    const rows = await this.db.query("SELECT id,name,item_id AS itemId,fulfillment_codes AS fulfillmentCodes FROM products WHERE parent_category='载具交通' AND category_name='载具' AND enabled=1");
+    const byCode = new Map();
+    for (const row of rows) {
+      const codes = [row.itemId, ...String(row.fulfillmentCodes || '').split(',')].map(normalizeCode).filter(Boolean);
+      for (const code of codes) if (!byCode.has(code)) byCode.set(code, { name: String(row.name || '').trim(), code });
+    }
+    return byCode;
+  }
+
+  async ownerNames(vehicles) {
+    const ids = [...new Set(vehicles.map((vehicle) => String(vehicle.ownerSteamId)))];
+    if (!ids.length) return new Map();
+    const rows = await this.db.query(`SELECT \`SteamID\` AS steamId,COALESCE(NULLIF(\`游戏名称\`,''),NULLIF(\`登录账号\`,''),\`SteamID\`) AS displayName FROM \`商城用户\` WHERE \`SteamID\` IN (${ids.map(() => '?').join(',')})`, ids);
+    return new Map(rows.map((row) => [String(row.steamId), safeText(row.displayName, 100)]));
+  }
+
+  async enrichLocations(vehicles) {
+    if (!vehicles.length || !this.clients) return vehicles;
+    let ggcon;
+    try { ggcon = (await this.clients()).ggcon; } catch { return vehicles; }
+    const output = new Array(vehicles.length);
+    let cursor = 0;
+    const run = async () => {
+      while (cursor < vehicles.length) {
+        const index = cursor++;
+        const vehicle = vehicles[index];
+        try {
+          const response = await ggcon.executeCommand(`QueryVehicleLocation ${vehicle.entityId}`, { priority: 'normal' });
+          output[index] = { ...vehicle, ...parseVehicleLocation(response, vehicle.entityId) };
+        } catch (error) {
+          this.logger?.debug?.('载具RCON位置增强失败，使用SCUM.db坐标', { component: 'vehicle-sync', entityId: vehicle.entityId, errorCode: error?.code || error?.name || 'RCON_LOCATION_FAILED' });
+          output[index] = { ...vehicle, locationSource: 'scum_saved_database' };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, vehicles.length) }, run));
+    return output;
+  }
+
+  async synchronize() {
+    const { config } = await this.clients();
+    const snapshot = await this.reader.read(config?.ggcon?.serverDirectory);
+    const authoritative = validateSnapshot(snapshot);
+    const [productMap, ownerNames] = await Promise.all([this.products(), this.ownerNames(authoritative)]);
+    const vehicles = await this.enrichLocations(authoritative);
+    const synchronizedAt = new Date();
+    const presentIds = vehicles.map((vehicle) => Number(vehicle.entityId));
+    let inserted = 0;
+    let updated = 0;
+    let lost = 0;
+
+    await this.db.transaction(async (tx) => {
+      for (const vehicle of vehicles) {
+        const entityId = Number(vehicle.entityId);
+        const currentRows = await tx.query('SELECT `载具档案编号` AS id,`档案状态` AS status,`来源同步状态` AS sourceSyncState,`来源失联前状态` AS statusBeforeSourceLost FROM `载具档案` WHERE `来源类型`=? AND `来源载具编号`=? FOR UPDATE', [SOURCE_TYPE, entityId]);
+        const current = currentRows[0] || null;
+        const sourceCandidates = [vehicle.assetId, vehicle.vehicleAlias, vehicle.entityClass].map(normalizeCode).filter(Boolean);
+        const product = sourceCandidates.map((code) => productMap.get(code)).find(Boolean) || null;
+        const modelName = safeText(product?.name || vehicle.vehicleAlias || vehicle.entityClass || vehicle.assetId || `SCUM载具 ${entityId}`, 120);
+        const vehicleType = safeText(product?.name || vehicle.vehicleAlias || vehicle.entityClass || 'SCUM载具', 80);
+        const ownerSteamId = String(vehicle.ownerSteamId);
+        const ownerName = ownerNames.get(ownerSteamId) || null;
+        const worldX = Number(vehicle.worldX), worldY = Number(vehicle.worldY), worldZ = Number(vehicle.worldZ);
+        const lastSeenAt = asDate(vehicle.lastAccessTime) || synchronizedAt;
+        if (current) {
+          const restoredStatus = current.sourceSyncState === 'missing' && current.status === 'lost' ? (current.statusBeforeSourceLost || 'active') : current.status;
+          await tx.query('UPDATE `载具档案` SET `车主SteamID`=?,`车主名称`=?,`载具类型`=?,`型号名称`=?,`档案状态`=?,`世界X坐标`=?,`世界Y坐标`=?,`世界Z坐标`=?,`最后观测时间`=?,`来源资产标识`=?,`来源载具别名`=?,`来源实体类名`=?,`来源锁槽数量`=?,`位置来源`=?,`来源同步时间`=?,`来源同步状态`=\'present\',`来源缺失时间`=NULL,`来源失联前状态`=NULL WHERE `载具档案编号`=?', [ownerSteamId,ownerName,vehicleType,modelName,restoredStatus,worldX,worldY,worldZ,lastSeenAt,safeText(vehicle.assetId,255),safeText(vehicle.vehicleAlias,120),safeText(vehicle.entityClass,120),Number(vehicle.lockSlotCount || 0),safeText(vehicle.locationSource || vehicle.source || 'scum_saved_database',32),synchronizedAt,current.id]);
+          updated += 1;
+        } else {
+          await tx.query('INSERT INTO `载具档案` (`载具档案编码`,`车主SteamID`,`车主名称`,`载具类型`,`型号名称`,`档案状态`,`世界X坐标`,`世界Y坐标`,`世界Z坐标`,`最后观测时间`,`来源类型`,`来源载具编号`,`来源资产标识`,`来源载具别名`,`来源实体类名`,`来源锁槽数量`,`位置来源`,`来源同步时间`,`来源同步状态`) VALUES (?,?,?,?,?,\'active\',?,?,?,?,?,?,?,?,?,?,?,?,\'present\')', [`scum:${entityId}`,ownerSteamId,ownerName,vehicleType,modelName,worldX,worldY,worldZ,lastSeenAt,SOURCE_TYPE,entityId,safeText(vehicle.assetId,255),safeText(vehicle.vehicleAlias,120),safeText(vehicle.entityClass,120),Number(vehicle.lockSlotCount || 0),safeText(vehicle.locationSource || vehicle.source || 'scum_saved_database',32),synchronizedAt]);
+          inserted += 1;
+        }
+      }
+
+      const missingWhere = presentIds.length ? ` AND \`来源载具编号\` NOT IN (${presentIds.map(() => '?').join(',')})` : '';
+      const newlyMissing = await tx.query(`SELECT COUNT(*) AS count FROM \`载具档案\` WHERE \`来源类型\`=? AND \`来源同步状态\`<>'missing'${missingWhere}`, [SOURCE_TYPE,...presentIds]);
+      lost = Number(newlyMissing[0]?.count || 0);
+      await tx.query(`UPDATE \`载具档案\` SET \`来源失联前状态\`=CASE WHEN \`来源同步状态\`<>'missing' THEN \`档案状态\` ELSE \`来源失联前状态\` END,\`档案状态\`='lost',\`来源同步状态\`='missing',\`来源缺失时间\`=COALESCE(\`来源缺失时间\`,?),\`来源同步时间\`=? WHERE \`来源类型\`=?${missingWhere}`, [synchronizedAt,synchronizedAt,SOURCE_TYPE,...presentIds]);
+    });
+
+    return { inserted, updated, lost, total: vehicles.length, source: snapshot.source || 'read_only_saved_database', skipped: snapshot.skipped || {}, synchronizedAt: synchronizedAt.toISOString() };
+  }
+}
+
+export { SOURCE_TYPE, validateSnapshot };

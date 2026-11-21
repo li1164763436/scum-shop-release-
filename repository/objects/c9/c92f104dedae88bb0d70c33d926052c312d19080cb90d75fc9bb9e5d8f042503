@@ -1,0 +1,258 @@
+
+#rewardTypeField[hidden], #rewardCoinField[hidden], #rewardGiftField[hidden], #rewardProductField[hidden] { display: none; }
+
+
+.modal-body [data-reward-field][hidden] { display: none; }
+
+
+.stage5-prize-row [data-reward-field][hidden] { display: none; }
+
+
+.reward-rule-card { margin-bottom: 10px; }
+
+
+.reward-rule-table { min-width: 1050px; }
+
+
+.reward-claim-table { min-width: 980px; }
+
+
+.reward-rule-card .card-head { border-left: 3px solid #244f3d; background: #fffef9; }
+
+
+.reward-claim-card .card-head { border-left: 3px solid #c68525; background: #fffef9; }
+
+
+#page-rewards .btn.primary { background: #244f3d; border-color: #17382c; }
+
+
+#page-rewards .btn.primary:hover { background: #17382c; }
+
+
+#page-rewards .section-kicker, #page-rewards .row-btn { color: #8b5d19; }
+
+.reward-rule-table th:last-child, .reward-rule-table td:last-child { width: 160px; text-align: center; vertical-align: middle; }
+
+.reward-rule-actions { width: 100%; display: flex; flex-wrap: nowrap; align-items: center; justify-content: center; gap: 8px; }
+
+.reward-rule-action { min-width: 62px; min-height: 34px; padding: 6px 13px; border-radius: 8px; font-size: 11px; font-weight: 600; text-align: center; }
+
+.reward-rule-action.edit { color: #315f8f !important; background: #edf5ff; border-color: #bfd3ea; }
+
+.reward-rule-action.edit:hover { color: #fff !important; background: #4676b8; border-color: #4676b8; }
+
+.reward-rule-action.delete { color: #b43e4b !important; background: #fff0f2; border-color: #efc1c7; }
+
+.reward-rule-action.delete:hover { color: #fff !important; background: #d94d5c; border-color: #d94d5c; }
+
+.modal-backdrop:has(select[name="ruleType"]) .modal { width: min(1040px, 96vw); max-height: calc(100vh - 40px); overflow: hidden; border-radius: 16px; }
+
+.modal-backdrop:has(select[name="ruleType"]) .modal-head { padding: 20px 26px; }
+
+.modal-backdrop:has(select[name="ruleType"]) .modal-actions { padding: 15px 26px; }
+
+#modalBody:has(select[name="ruleType"]) { padding: 26px; grid-template-columns: minmax(0, 1fr); gap: 22px; overflow-y: auto; background: #f3f6fa; }
+
+#modalBody:has(select[name="ruleType"]) .reward-modal-section { width: 100%; min-width: 0; min-height: 154px; padding: 24px; background: #fff; border: 1px solid #dce4ef; border-left: 0; border-radius: 13px; box-shadow: 0 7px 20px rgba(39, 55, 82, .06); }
+
+#modalBody:has(select[name="ruleType"]) .reward-condition-section { grid-column: 1 / -1; border-top: 3px solid #315f4d; }
+
+#modalBody:has(select[name="ruleType"]) .reward-condition-section .modal-section-grid { grid-template-columns: repeat(2, minmax(260px, 1fr)); }
+
+.reward-condition-section .reward-modal-section-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 20px; }
+
+.reward-condition-section .reward-modal-section-head h3,
+.reward-condition-section .reward-modal-section-head p { grid-column: 1; }
+
+.reward-enabled-switch { grid-column: 2; grid-row: 1 / 3; display: flex !important; align-items: center; gap: 9px; color: #647188 !important; font-size: 11px !important; cursor: pointer; }
+
+.reward-enabled-switch input { position: absolute; opacity: 0; pointer-events: none; }
+
+.reward-enabled-switch span { position: relative; width: 46px; height: 26px; flex: 0 0 46px; background: #ccd4df; border-radius: 14px; transition: background .18s ease; }
+
+.reward-enabled-switch span::after { content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; background: #fff; border-radius: 50%; box-shadow: 0 2px 6px rgba(38, 52, 74, .22); transition: transform .18s ease; }
+
+.reward-enabled-switch input:checked + span { background: #315f4d; }
+
+.reward-enabled-switch input:checked + span::after { transform: translateX(20px); }
+
+.reward-enabled-switch b { min-width: 42px; color: #647188; font-size: 11px; font-weight: 600; }
+
+#modalBody:has(select[name="ruleType"]) .reward-content-section { grid-column: 1 / -1; border-top: 3px solid #c58a31; }
+
+#modalBody:has(select[name="ruleType"]) .reward-status-section { border-top: 3px solid #4676b8; }
+
+.reward-modal-section-head { margin-bottom: 20px; }
+
+.reward-modal-section-head h3 { margin: 0; color: #26344a; font-size: 14px; }
+
+.reward-modal-section-head p { margin: 4px 0 0; color: #8490a3; font-size: 11px; }
+
+#modalBody:has(select[name="ruleType"]) .modal-section-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+
+#modalBody:has(select[name="ruleType"]) .reward-content-section .modal-section-grid { grid-template-columns: repeat(2, minmax(260px, 1fr)); }
+
+#modalBody:has(select[name="ruleType"]) .combined-reward-content .modal-section-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+#modalBody:has(select[name="ruleType"]) .combined-reward-content #rewardProductField { grid-column: 1 / -1; min-width: 0; }
+
+#modalBody:has(select[name="ruleType"]) #rewardProductField { grid-column: 1 / -1; min-width: 0; }
+
+#modalBody:has(select[name="ruleType"]) .combined-reward-content .reward-product-selection { width: 100%; min-width: 0; }
+
+#modalBody:has(select[name="ruleType"]) input,
+#modalBody:has(select[name="ruleType"]) select { width: 100%; min-width: 0; height: 46px; padding-left: 12px; padding-right: 12px; border-radius: 9px; }
+
+#modalBody:has(select[name="ruleType"]) label { min-width: 0; gap: 8px; font-size: 12px; }
+
+#modalBody:has(select[name="ruleType"]) .reward-condition-section label,
+#modalBody:has(select[name="ruleType"]) .reward-content-section label { width: min(100%, 360px); justify-self: start; }
+
+#modalBody:has(select[name="ruleType"]) #rewardProductField { width: 100%; max-width: none; }
+
+#modalBody:has(select[name="ruleType"]) .reward-enabled-switch { width: auto; }
+
+#modalBody:has(select[name="ruleType"]) input:disabled { color: #7d899b; background: #eef2f7; }
+
+.reward-product-field { display: grid; gap: 10px; }
+
+#rewardProductField { width: 100%; min-width: 0; }
+
+#rewardProductSelection { width: 100%; min-width: 0; }
+
+.reward-product-field-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+.reward-product-field-head h4 { margin: 0; color: #34445d; font-size: 12px; }
+
+.reward-product-selection { min-height: 88px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+
+.reward-product-empty { min-height: 76px; display: grid; place-items: center; color: #8a95a7; background: #f7f9fc; border: 1px dashed #cdd7e5; border-radius: 9px; }
+
+.reward-selected-product { min-width: 0; padding: 10px; display: flex; flex-direction: column; align-items: stretch; gap: 8px; background: #f7f9fc; border: 1px solid #d8e1ed; border-radius: 10px; }
+
+.reward-selected-product-media { position: relative; width: 100%; height: 76px; display: block; overflow: hidden; border-radius: 8px; }
+
+.reward-selected-product .reward-selected-product-media img, .reward-selected-product .reward-selected-product-media .reward-product-placeholder { width: 100%; height: 100%; max-width: none; display: block; object-fit: cover; border-radius: 8px; }
+
+.reward-selected-product .reward-selected-product-media b { position: absolute; top: 4px; right: 4px; z-index: 3; min-width: 22px; height: 22px; padding: 0 6px; display: grid; place-items: center; color: #fff; background: #d94d5c; border: 1px solid #fff; border-radius: 12px; box-shadow: 0 2px 6px rgba(41, 51, 71, .28); font-size: 10px; line-height: 1; }
+
+.reward-selected-product > strong { overflow: hidden; color: #26344a; font-size: 11px; text-align: center; white-space: nowrap; text-overflow: ellipsis; }
+
+.reward-selected-product img, .reward-product-picker-item img, .reward-product-placeholder { width: 54px; height: 54px; flex: 0 0 54px; object-fit: cover; border-radius: 8px; background: #e8edf4; }
+
+.reward-product-placeholder { display: grid; place-items: center; color: #78869a; font-size: 11px; }
+
+.reward-selected-product strong, .reward-selected-product small, .reward-product-picker-item strong, .reward-product-picker-item small { display: block; }
+
+.reward-selected-product strong, .reward-product-picker-item strong { color: #26344a; }
+
+.reward-selected-product small, .reward-product-picker-item small { margin-top: 4px; color: #8a95a7; font-size: 11px; }
+
+.reward-product-picker-backdrop { position: fixed; inset: 0; z-index: 110; padding: 24px; display: grid; place-items: center; background: rgba(24, 34, 52, .48); backdrop-filter: blur(3px); }
+
+.reward-product-picker { width: min(1180px, 96vw); height: min(860px, calc(100vh - 48px)); display: flex; flex-direction: column; overflow: hidden; background: #fff; border: 1px solid #d5deea; border-radius: 14px; box-shadow: 0 24px 70px rgba(24, 34, 52, .28); }
+
+.reward-product-picker-head { padding: 20px 24px; display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid #dce4ef; }
+
+.reward-product-picker-head h3, .reward-product-picker-head p { margin: 0; }
+
+.reward-product-picker-head h3 { color: #26344a; font-size: 16px; }
+
+.reward-product-picker-head p { margin-top: 4px; color: #8490a3; font-size: 11px; }
+
+.reward-product-picker-main { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 320px; flex: 1; }
+
+.reward-product-picker-browser { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+
+.reward-product-picker-search { position: sticky; top: 0; z-index: 2; padding: 16px 20px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; background: #fff; border-bottom: 1px solid #dce4ef; }
+
+.reward-product-picker-search input { width: 100%; height: 40px; border-radius: 8px; }
+
+.reward-product-picker-list { min-height: 0; padding: 20px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 14px; flex: 1; overflow-y: auto; background: #f3f6fa; }
+
+.reward-product-picker-item { position: relative; min-width: 0; min-height: 104px; padding: 12px; display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 10px; color: inherit; background: #fff; border: 1px solid #dce4ef; border-radius: 11px; text-align: center; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+
+.reward-product-picker-item img, .reward-product-picker-item .reward-product-placeholder { width: 64px; height: 52px; flex: 0 0 52px; align-self: center; }
+
+.reward-product-picker-item strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; }
+
+.reward-product-picker-item small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 9px; }
+
+.reward-product-picker-item:hover { transform: translateY(-1px); border-color: #8aa8d0; box-shadow: 0 5px 14px rgba(47, 75, 115, .1); }
+
+.reward-product-picker-item.active { border-color: #4676b8; box-shadow: 0 0 0 2px rgba(70, 118, 184, .12); }
+
+.reward-product-picker-item.active::after { content: '✓'; position: absolute; top: 5px; right: 5px; width: 20px; height: 20px; display: grid; place-items: center; color: #fff; background: #4676b8; border-radius: 50%; font-size: 11px; font-weight: 700; }
+
+.reward-product-picker-empty { grid-column: 1 / -1; }
+
+.reward-product-picker-pager { padding: 11px 16px; display: flex; align-items: center; justify-content: center; gap: 14px; border-top: 1px solid #dce4ef; background: #fff; }
+
+.reward-product-picker-pager span { min-width: 190px; color: #6f7d91; font-size: 11px; text-align: center; }
+
+.reward-product-selected-panel { min-height: 0; padding: 0; display: flex; flex-direction: column; gap: 0; background: #f8fafc; border-left: 1px solid #dce4ef; }
+
+.reward-selected-head { padding: 20px; display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; background: #fff; border-bottom: 1px solid #dce4ef; }
+
+.reward-selected-head b { min-width: 28px; height: 28px; display: grid; place-items: center; color: #fff; background: #4676b8; border-radius: 14px; font-size: 11px; }
+
+.reward-product-selected-panel h4, .reward-product-selected-panel p { margin: 0; }
+
+.reward-product-selected-panel h4 { color: #26344a; font-size: 14px; }
+
+.reward-product-selected-panel p { margin-top: 4px; color: #8a95a7; font-size: 10px; }
+
+.reward-product-selected-panel [data-reward-product-selected] { flex: 1; }
+.reward-product-selected-panel [data-reward-product-selected] { min-height: 0; padding: 16px; display: grid; align-content: start; gap: 12px; flex: 1; overflow-y: auto; }
+
+.reward-product-selected-card { min-height: 72px; padding: 12px; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; grid-template-rows: auto auto; align-items: center; gap: 9px 11px; background: #fff; border: 1px solid #d8e1ed; border-radius: 11px; }
+
+.reward-product-selected-card img, .reward-product-selected-card .reward-product-placeholder { width: 42px; height: 42px; grid-row: 1 / 3; object-fit: cover; border-radius: 7px; }
+
+.reward-product-selected-card strong { grid-column: 2 / 4; overflow: hidden; color: #26344a; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
+
+.reward-product-selected-card small { color: #7c899b; font-size: 10px; }
+
+.reward-product-selected-card label { display: grid; grid-template-columns: auto 62px; align-items: center; gap: 5px; color: #536078; font-size: 10px; }
+
+.reward-product-selected-card input { width: 62px; height: 30px; border-radius: 7px; }
+
+.reward-product-selected-card .btn { min-height: 30px; padding: 4px 9px; font-size: 10px; }
+
+.reward-selected-pager { padding: 13px 14px; display: flex; align-items: center; justify-content: center; gap: 10px; background: #fff; border-top: 1px solid #dce4ef; }
+
+.reward-selected-pager .btn { min-height: 30px; padding: 4px 8px; font-size: 10px; }
+
+.reward-selected-pager span { min-width: 92px; color: #778499; font-size: 9px; text-align: center; }
+
+.reward-selected-actions { padding: 14px 16px 16px; background: #fff; }
+
+.reward-selected-actions .btn { width: 100%; }
+
+@media (max-width: 720px) {
+  #modalBody:has(select[name="ruleType"]) { grid-template-columns: minmax(0, 1fr); padding: 14px; }
+  #modalBody:has(select[name="ruleType"]) .reward-condition-section { grid-column: auto; }
+  #modalBody:has(select[name="ruleType"]) .modal-section-grid { grid-template-columns: minmax(0, 1fr); }
+  #modalBody:has(select[name="ruleType"]) .reward-condition-section .modal-section-grid { grid-template-columns: minmax(0, 1fr); }
+  #modalBody:has(select[name="ruleType"]) .reward-content-section .modal-section-grid,
+  #modalBody:has(select[name="ruleType"]) .combined-reward-content .modal-section-grid { grid-template-columns: minmax(0, 1fr); }
+  .reward-product-picker-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .reward-product-picker-main { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
+  .reward-product-selected-panel { border-top: 1px solid #dce4ef; border-left: 0; }
+  .reward-product-selection { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (min-width: 721px) and (max-width: 900px) {
+  #modalBody:has(select[name="ruleType"]) .combined-reward-content .modal-section-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #modalBody:has(select[name="ruleType"]) .combined-reward-content #rewardProductField { grid-column: 1 / -1; }
+}
+
+.reward-rule-table { min-width: 760px; }
+.modal-backdrop:has(.reward-simple-form) .modal { width: min(720px, 96vw); border-radius: 8px; }
+#modalBody:has(.reward-simple-form) { padding: 20px; background: #f5f7fa; }
+#modalBody .reward-simple-form { padding: 20px; border: 1px solid #dce4ef; border-radius: 8px; background: #fff; }
+#modalBody .reward-simple-form .modal-section-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+#modalBody .reward-simple-product { grid-column: 1 / -1; padding: 16px; border: 1px solid #dce4ef; border-radius: 8px; }
+@media (max-width: 720px) {
+  #modalBody .reward-simple-form .modal-section-grid { grid-template-columns: minmax(0, 1fr); }
+}

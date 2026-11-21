@@ -1,0 +1,106 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+const EXECUTABLE_RELATIVE_PATH = path.join('Binaries', 'Win64', 'SCUMServer.exe');
+const APP_ID = '3792580';
+
+async function isFile(filePath) {
+  try { return (await fs.stat(filePath)).isFile(); } catch { return false; }
+}
+
+function rootFromExecutable(executable) {
+  const normalized = path.resolve(String(executable || '').trim().replace(/^"|"$/g, ''));
+  const suffix = EXECUTABLE_RELATIVE_PATH.toLowerCase();
+  return normalized.toLowerCase().endsWith(suffix) ? normalized.slice(0, -EXECUTABLE_RELATIVE_PATH.length).replace(/[\\/]$/, '') : '';
+}
+
+async function executableInRoot(root) {
+  for (const scumRoot of [path.resolve(root), path.resolve(root, 'SCUM')]) {
+    const candidate = path.join(scumRoot, EXECUTABLE_RELATIVE_PATH);
+    if (await isFile(candidate)) return { serverDirectory: scumRoot, executable: candidate };
+  }
+  return null;
+}
+
+function quotedValues(text, key) {
+  const pattern = new RegExp(`"${key}"\\s+"([^"]+)"`, 'gi');
+  return [...String(text || '').matchAll(pattern)].map((match) => match[1].replace(/\\\\/g, '\\'));
+}
+
+async function steamRoots() {
+  const roots = new Set();
+  const programFiles = [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean);
+  for (const base of programFiles) roots.add(path.join(base, 'Steam'));
+  if (process.platform === 'win32') {
+    for (const registry of [
+      ['HKCU\\Software\\Valve\\Steam', '/v', 'SteamPath'],
+      ['HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam', '/v', 'InstallPath']
+    ]) {
+      try {
+        const { stdout } = await execFileAsync('reg.exe', ['query', registry[0], ...registry.slice(1)], { windowsHide: true, timeout: 3000 });
+        const match = /REG_SZ\s+(.+)$/mi.exec(stdout);
+        if (match) roots.add(match[1].trim());
+      } catch { /* Steam may not be installed. */ }
+    }
+  }
+  return [...roots];
+}
+
+async function steamLibraryCandidates() {
+  const candidates = [];
+  for (const steamRoot of await steamRoots()) {
+    const libraries = new Set([steamRoot]);
+    try {
+      const text = await fs.readFile(path.join(steamRoot, 'steamapps', 'libraryfolders.vdf'), 'utf8');
+      for (const value of quotedValues(text, 'path')) libraries.add(value);
+    } catch { /* A missing Steam library manifest is expected. */ }
+    for (const library of libraries) {
+      const steamApps = path.join(library, 'steamapps');
+      try {
+        const manifest = await fs.readFile(path.join(steamApps, `appmanifest_${APP_ID}.acf`), 'utf8');
+        const installDir = quotedValues(manifest, 'installdir')[0];
+        if (installDir) candidates.push(path.join(steamApps, 'common', installDir));
+      } catch { /* The dedicated server may live outside Steam. */ }
+      candidates.push(path.join(steamApps, 'common', 'SCUM Dedicated Server'));
+      candidates.push(path.join(steamApps, 'common', 'SCUM'));
+    }
+  }
+  return candidates;
+}
+
+async function runningServerCandidate() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const script = "$p=Get-CimInstance Win32_Process -Filter \"Name='SCUMServer.exe'\" | Select-Object -First 1 -ExpandProperty ExecutablePath; if($p){[Console]::Out.Write($p)}";
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 5000 });
+    const root = rootFromExecutable(stdout);
+    return root ? executableInRoot(root) : null;
+  } catch { return null; }
+}
+
+export async function discoverScumServer({ configuredDirectory = '', configuredOnly = false, driveLetters } = {}) {
+  if (configuredDirectory) {
+    const configured = await executableInRoot(configuredDirectory);
+    if (configured) return { ...configured, source: 'configured' };
+    if (configuredOnly) throw new Error('所选目录中未找到 Binaries\\Win64\\SCUMServer.exe');
+  } else if (configuredOnly) throw new Error('请选择 SCUM 服务器根目录');
+  const running = await runningServerCandidate();
+  if (running) return { ...running, source: 'running-process' };
+
+  const candidates = [];
+  candidates.push(...await steamLibraryCandidates());
+  const drives = driveLetters || (process.platform === 'win32' ? 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => `${letter}:\\`) : []);
+  for (const drive of drives) {
+    candidates.push(path.join(drive, 'SCUM'));
+    candidates.push(path.join(drive, 'steamcmd', 'steamapps', 'common', 'SCUM Dedicated Server'));
+    candidates.push(path.join(drive, 'Steam', 'steamapps', 'common', 'SCUM Dedicated Server'));
+  }
+  for (const candidate of [...new Set(candidates.map((value) => path.resolve(value)))]) {
+    const found = await executableInRoot(candidate);
+    if (found) return { ...found, source: candidate === path.resolve(configuredDirectory || '.') ? 'configured' : 'filesystem' };
+  }
+  throw new Error('未找到 SCUM 服务器启动器 SCUMServer.exe，请确认服务器已安装或手工选择 SCUM 服务器根目录');
+}

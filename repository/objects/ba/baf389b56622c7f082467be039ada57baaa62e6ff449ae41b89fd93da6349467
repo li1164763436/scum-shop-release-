@@ -1,0 +1,15 @@
+import path from 'node:path';
+import mysql from 'mysql2/promise';
+import { ConfigStore } from '../src/services/config-store.js';
+
+const root = path.resolve(import.meta.dirname, '..');
+const config = (await new ConfigStore(path.join(root, 'data', 'config.json')).read()).mysql;
+const db = await mysql.createConnection({ ...config, charset:'utf8mb4' });
+try {
+  const [count] = await db.query('SELECT COUNT(*) AS total FROM `玩家传送同意请求`');
+  const [status] = await db.query('SELECT `请求状态` AS status,COUNT(*) AS total FROM `玩家传送同意请求` GROUP BY `请求状态`');
+  const [references] = await db.query('SELECT COUNT(*) AS total FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND REFERENCED_TABLE_NAME=?', ['玩家传送同意请求']);
+  console.log(JSON.stringify({ rows:Number(count[0].total), byStatus:status.map((item) => ({ status:item.status, total:Number(item.total) })), referencingForeignKeys:Number(references[0].total) }));
+} finally {
+  await db.end();
+}

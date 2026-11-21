@@ -1,0 +1,63 @@
+import { buildMessageCommand } from './command-policy.js';
+import { replaceNotificationParameters, resolveNotificationParameters } from './notification-parameters.js';
+import { formatGameMessage } from './game-message.js';
+
+export function renderDeliveryMessage(template, values, adaptLegacyAction = true) {
+  let message = String(template);
+  if (adaptLegacyAction && ['回收成功','取出成功','一键取出完成'].includes(values.action) && !message.includes('{action}')) {
+    message = message.replace(/(?:已全部|已)?发货(?:完成|成功)?/g, '{action}');
+    if (!message.includes('{action}')) message += ' {action}';
+  }
+  return message.replace(/\{(username|orderName|action|quantity|orderNo)\}/g, (placeholder, key) => key === 'orderNo' ? '' : String(values[key] ?? '').replace(/["#;\r\n]/g, ' ').trim());
+}
+
+function templateFor(fulfillment, notificationType) {
+  const keys = {
+    purchase: 'purchaseMessage',
+    gift: 'giftMessage',
+    recycle: 'recycleMessage',
+    withdraw: 'withdrawMessage',
+    bulkWithdraw: 'bulkWithdrawMessage'
+  };
+  const specialized = fulfillment?.[keys[notificationType]];
+  return { template: specialized || fulfillment?.successMessage, adaptLegacyAction: !specialized };
+}
+
+export async function sendDeliveryNotification({ db, config, ggcon, steamId, orderId, orderName, action, quantity }) {
+  if (!config?.fulfillment?.notifyOnSuccess) return;
+  const accounts = await db.query('SELECT \`登录账号\` AS username,\`游戏名称\` AS characterName FROM \`商城用户\` WHERE \`SteamID\`=?', [steamId]);
+  let notificationType = action === '回收成功' ? 'recycle' : action === '取出成功' ? 'withdraw' : action === '一键取出完成' ? 'bulkWithdraw' : 'purchase';
+  if (orderId) {
+    const orders = await db.query('SELECT source,gift_id AS giftId,external_order_id AS externalOrderId FROM orders WHERE id=? LIMIT 1', [orderId]);
+    if (orders[0]?.giftId || orders[0]?.source === 'gift') {
+      notificationType = 'gift';
+      const gifts = await db.query('SELECT name FROM gift_packages WHERE id=? LIMIT 1', [orders[0].giftId]);
+      orderName = gifts[0]?.name || '礼包';
+    } else if (orders[0]?.source === 'starter_gift') {
+      notificationType = 'gift';
+      const giftId = String(orders[0].externalOrderId || '').split(':')[0];
+      if (giftId === 'default' || !String(orders[0].externalOrderId || '').includes(':')) orderName = '新手礼包';
+      else {
+        const gifts = await db.query('SELECT name FROM gift_packages WHERE id=? LIMIT 1', [giftId]);
+        orderName = gifts[0]?.name || '礼包';
+      }
+    } else {
+      const items = await db.query('SELECT name,quantity FROM order_items WHERE order_id=? ORDER BY id', [orderId]);
+      orderName = items.map((item) => `${item.name} × ${item.quantity}`).join('、');
+      quantity = items.reduce((total, item) => total + Number(item.quantity), 0);
+    }
+  }
+  const selected = templateFor(config.fulfillment, notificationType);
+  const actionByType = { purchase: '购买成功，已发货完成。', gift: '礼包购买成功，已发放完成。', recycle: '回收成功。', withdraw: '取出成功。', bulkWithdraw: '一键取出完成。' };
+  const templateFields = ['purchaseMessage','giftMessage','recycleMessage','withdrawMessage','bulkWithdrawMessage'];
+  const configuredTemplates = templateFields.map((field) => config.fulfillment?.[field]).filter(Boolean);
+  const unified = configuredTemplates.length === templateFields.length && new Set(configuredTemplates).size === 1;
+  const renderedAction = selected.adaptLegacyAction ? action : actionByType[notificationType];
+  const notificationTemplate = unified && !selected.template.includes('{action}') ? `${selected.template.trim().replace(/[。.!！?？]+$/u, '')}${renderedAction}` : selected.template;
+  const legacyMessage = renderDeliveryMessage(notificationTemplate, { username: accounts[0]?.characterName || accounts[0]?.username || '玩家', orderName: orderName || '物品', action: renderedAction, quantity }, selected.adaptLegacyAction);
+  const parameters = await resolveNotificationParameters({ db, steamId, text: legacyMessage });
+  const notification = formatGameMessage(config, replaceNotificationParameters(legacyMessage, parameters));
+  const limit = config.commandPolicy.allowedMessageLength;
+  const command = buildMessageCommand({ global: true, message: notification.slice(0, limit) }, config.commandPolicy);
+  await ggcon.command(command, { retry: false, priority: 'high' });
+}

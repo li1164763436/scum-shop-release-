@@ -1,0 +1,91 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import mysql from 'mysql2/promise';
+import { CommerceService } from '../src/services/commerce-service.js';
+import { saveUploadedImage } from '../src/services/image-storage.js';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const folders = { '单手武器': 'scum8-one-handed', '双手武器': 'scum8-two-handed', '刺刀': 'scum8-bayonets', '发射器': 'scum8-launchers', '导轨': 'scum8-rails', '弓': 'scum8-bows', '弹匣': 'scum8-magazines', '弹药': 'scum8-ammunition', '手枪': 'scum8-handguns', '手榴弹': 'scum8-grenades', '机械瞄具': 'scum8-sights', '步枪': 'scum8-rifles', '消音器': 'scum8-suppressors', '瞄准镜': 'scum8-scopes' };
+const category = process.argv.slice(2).find((argument) => !argument.startsWith('--')) || '单手武器';
+if (!folders[category]) throw new Error('不支持的导入分类');
+const folder = folders[category];
+const inputDirectory = path.join(root, 'data', 'imports', folder);
+const execute = process.argv.includes('--execute');
+const config = JSON.parse((await fs.readFile(path.join(root, 'data', 'config.json'), 'utf8')).replace(/^\uFEFF/, '')).mysql;
+const source = JSON.parse(await fs.readFile(path.join(inputDirectory, 'items.json'), 'utf8'));
+if (!Array.isArray(source.items) || source.items.length !== source.count) throw new Error('导入清单数量不匹配');
+if (new Set(source.items.map((item) => item.itemId)).size !== source.count) throw new Error('清单包含重复代码');
+const images = new Map();
+for (const item of source.items) {
+  if (item.category !== category || !/^[A-Za-z0-9_][A-Za-z0-9_-]{0,79}$/.test(item.itemId)) throw new Error('清单分类或代码无效');
+  if (!/^images\/\d+\.(png|jpg|webp|gif)$/.test(item.imagePath)) throw new Error('图片路径无效');
+  const body = await fs.readFile(path.join(inputDirectory, item.imagePath));
+  if (!body.length) throw new Error('图片为空');
+  images.set(item.itemId, body);
+}
+const connection = await mysql.createConnection({ ...config, charset: 'utf8mb4', timezone: 'Z', decimalNumbers: true });
+const copied = [];
+let locked = false;
+let committed = false;
+try {
+  const [lock] = await connection.query('SELECT GET_LOCK(?, 10) AS acquired', ['shop-import-one-handed']);
+  if (Number(lock[0].acquired) !== 1) throw new Error('已有同类导入正在执行');
+  locked = true;
+  const [existing] = await connection.query('SELECT id,item_id FROM products');
+  const known = new Set(existing.map((item) => item.item_id.toLowerCase()));
+  const pending = source.items.filter((item) => !known.has(item.itemId.toLowerCase()));
+  const skipped = source.items.filter((item) => known.has(item.itemId.toLowerCase())).map((item) => item.itemId);
+  if (!execute) {
+    console.log(JSON.stringify({ database: config.database, total: source.count, pending: pending.length, skipped, mode: 'preview' }, null, 2));
+  } else if (!pending.length) {
+    console.log(JSON.stringify({ imported: 0, skipped, message: '全部代码已存在，未修改数据库和图片' }, null, 2));
+  } else {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backup = path.join(root, 'backups', `before-${folder}-${stamp}.sql`);
+    await fs.mkdir(path.dirname(backup), { recursive: true });
+    const candidates = [path.join(root, 'runtime', 'mysql', 'bin', 'mysqldump.exe'), path.resolve(root, '..', 'PackagedApp', 'installer', 'staging', 'runtime', 'mysql', 'bin', 'mysqldump.exe')];
+    let dump;
+    for (const candidate of candidates) { try { await fs.access(candidate); dump = candidate; break; } catch {} }
+    if (!dump) throw new Error('未找到数据库备份工具');
+    await new Promise((resolve, reject) => {
+      const child = spawn(dump, [`--host=${config.host}`, `--port=${config.port}`, `--user=${config.user}`, '--single-transaction', '--routines', '--events', '--triggers', '--no-tablespaces', '--set-gtid-purged=OFF', '--default-character-set=utf8mb4', `--result-file=${backup}`, config.database], { windowsHide: true, env: { ...process.env, MYSQL_PWD: config.password }, stdio: ['ignore', 'ignore', 'pipe'] });
+      let detail = '';
+      child.stderr.on('data', (chunk) => { detail += chunk.toString(); });
+      child.on('error', reject);
+      child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`数据库备份失败：${detail}`)));
+    });
+    if (!(await fs.stat(backup)).size) throw new Error('数据库备份为空');
+    await connection.beginTransaction();
+    const commerce = new CommerceService({ query: async (sql, params = []) => (await connection.execute(sql, params))[0] });
+    const imported = [];
+    for (const item of pending) {
+      const [duplicate] = await connection.execute('SELECT id FROM products WHERE item_id=? LIMIT 1', [item.itemId]);
+      if (duplicate.length) { skipped.push(item.itemId); continue; }
+      const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }[path.extname(item.imagePath)];
+      const imagePath = await saveUploadedImage(root, mime, images.get(item.itemId), 'products', [item.parentCategory, item.category]);
+      copied.push(path.join(root, 'public', imagePath));
+      const product = await commerce.saveProduct({ name: item.name, itemId: item.itemId, fulfillmentCodes: item.itemId, parentCategory: item.parentCategory, category: item.category, imagePath, price: 0, currencyType: 'coin', enabled: false });
+      imported.push({ id: product.id, itemId: product.itemId, name: product.name, imagePath: product.imagePath });
+    }
+    for (const item of imported) {
+      const [rows] = await connection.execute('SELECT item_id,image_path,price,enabled FROM products WHERE id=?', [item.id]);
+      if (rows[0]?.item_id !== item.itemId || rows[0].image_path !== item.imagePath || Number(rows[0].price) !== 0 || Number(rows[0].enabled) !== 0) throw new Error('导入后数据校验失败');
+    }
+    await connection.commit();
+    committed = true;
+    const report = { database: config.database, backup, source: source.source, attribution: source.attribution, imported: imported.length, skipped, products: imported };
+    await fs.writeFile(path.join(inputDirectory, `import-result-${stamp}.json`), JSON.stringify(report, null, 2));
+    console.log(JSON.stringify({ database: config.database, backup, imported: imported.length, skipped: skipped.length, verified: true }, null, 2));
+  }
+} catch (error) {
+  if (!committed) {
+    await connection.rollback();
+    for (const file of copied) await fs.unlink(file).catch(() => {});
+  }
+  throw error;
+} finally {
+  if (locked) await connection.query('SELECT RELEASE_LOCK(?)', ['shop-import-one-handed']);
+  await connection.end();
+}

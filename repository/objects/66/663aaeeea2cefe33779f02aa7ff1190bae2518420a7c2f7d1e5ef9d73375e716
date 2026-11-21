@@ -1,0 +1,58 @@
+(() => {
+  const kind = document.body?.dataset.errorKind;
+  const back = document.querySelector('[data-error-back]');
+  if (back) back.addEventListener('click', () => {
+    if (history.length > 1) history.back();
+    else location.assign('/');
+  });
+  if (kind !== 'service-unavailable') return;
+
+  const retry = document.querySelector('[data-error-retry]');
+  const connection = document.querySelector('[data-connection-status]');
+  const business = document.querySelector('[data-business-state]');
+  const message = document.querySelector('[data-probe-message]');
+  const badge = document.querySelector('[data-error-badge]');
+  const footer = document.querySelector('[data-footer-state]');
+  let checking = false;
+  let recovered = false;
+
+  const setText = (element, value) => { if (element) element.textContent = value; };
+  async function probe(manual = false) {
+    if (checking || recovered) return;
+    checking = true;
+    if (retry) retry.disabled = true;
+    setText(connection, '正在检测商城服务');
+    setText(message, manual ? '正在重新连接，请稍候' : '系统正在自动检测恢复状态');
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 4500);
+    try {
+      const response = await fetch(`/api/health?error-probe=${Date.now()}`, { cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
+      const body = await response.json().catch(() => null);
+      const unavailable = body?.data?.business === 'unavailable';
+      if (!response.ok || body?.success !== true || unavailable) throw new Error('unavailable');
+      recovered = true;
+      setText(connection, '商城连接已恢复');
+      setText(business, '已经恢复');
+      setText(message, '连接已恢复，正在返回商城');
+      setText(badge, '连接已恢复');
+      setText(footer, '商城服务正常');
+      document.querySelector('.error-system-state')?.classList.remove('warning');
+      business?.classList.remove('state-warning');
+      business?.classList.add('state-online');
+      window.setTimeout(() => location.replace('/'), 900);
+    } catch {
+      setText(connection, '商城服务暂时离线');
+      setText(business, '等待恢复');
+      setText(message, '尚未恢复，系统会继续自动检测');
+    } finally {
+      window.clearTimeout(timeout);
+      checking = false;
+      if (retry && !recovered) retry.disabled = false;
+    }
+  }
+
+  retry?.addEventListener('click', () => probe(true));
+  window.addEventListener('online', () => probe(true));
+  probe();
+  window.setInterval(() => probe(), 5000);
+})();

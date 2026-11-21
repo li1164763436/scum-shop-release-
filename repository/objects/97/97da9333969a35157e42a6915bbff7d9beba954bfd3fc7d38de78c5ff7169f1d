@@ -1,0 +1,376 @@
+import crypto from 'node:crypto';
+import { isSteamId64 } from './command-policy.js';
+import { GiftCodeError, parseGiftCodes } from './gift-code-policy.js';
+import { ServiceError, normalizeFulfillmentCodes, parseProductCode } from './commerce-service.js';
+
+const TYPES = new Set(['normal', 'private', 'title', 'squad', 'monthly', 'weekly', 'quarterly']);
+const PERIOD_TYPES = new Set(['monthly', 'weekly', 'quarterly']);
+const MODES = new Set(['minimum', 'exact']);
+const RESET_CYCLES = new Set(['none', 'daily', 'weekly', 'monthly', 'quarterly']);
+function optionalDate(value, name) { if (!value) return null; const date = new Date(value); if (Number.isNaN(date.getTime())) throw new ServiceError(`${name}格式无效`); return date; }
+
+function positive(value, name, max = 99999) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1 || number > max) throw new ServiceError(`${name}必须是 1-${max} 的整数`);
+  return number;
+}
+function nonNegative(value, name) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) throw new ServiceError(`${name}必须是非负整数`);
+  return number;
+}
+function id(value, name = '礼包 ID') { return positive(value, name, Number.MAX_SAFE_INTEGER); }
+function duplicate(error) { return error?.code === 'ER_DUP_ENTRY' || error?.errno === 1062; }
+function orderNo() { return `GFT${Date.now()}${crypto.randomBytes(5).toString('hex').toUpperCase()}`; }
+function parseJson(value) { if (!value) return {}; if (typeof value === 'object') return value; try { return JSON.parse(value); } catch { return {}; } }
+
+export function giftWindows(now = new Date()) {
+  const shanghai = new Date(now.getTime() + 8 * 3600000);
+  const year = shanghai.getUTCFullYear();
+  const month = shanghai.getUTCMonth();
+  const day = shanghai.getUTCDate();
+  const localMidnightUtc = Date.UTC(year, month, day) - 8 * 3600000;
+  const weekday = shanghai.getUTCDay() || 7;
+  const weekStart = localMidnightUtc - (weekday - 1) * 86400000;
+  const monthStart = Date.UTC(year, month, 1) - 8 * 3600000;
+  const quarterMonth = Math.floor(month / 3) * 3;
+  const quarterStart = Date.UTC(year, quarterMonth, 1) - 8 * 3600000;
+  const nextMonth = Date.UTC(year, month + 1, 1) - 8 * 3600000;
+  const nextQuarter = Date.UTC(year, quarterMonth + 3, 1) - 8 * 3600000;
+  const isoAnchor = new Date(weekStart + 3 * 86400000 + 8 * 3600000);
+  const isoYear = isoAnchor.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(isoYear, 0, 4));
+  const yearWeekday = yearStart.getUTCDay() || 7;
+  const firstWeek = yearStart.getTime() - (yearWeekday - 1) * 86400000;
+  const week = Math.floor((weekStart + 8 * 3600000 - firstWeek) / (7 * 86400000)) + 1;
+  const dateKey = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  return {
+    day: { start: new Date(localMidnightUtc), end: new Date(localMidnightUtc + 86400000), key: dateKey },
+    weekly: { start: new Date(weekStart), end: new Date(weekStart + 7 * 86400000), key: `${isoYear}-W${String(week).padStart(2, '0')}` },
+    monthly: { start: new Date(monthStart), end: new Date(nextMonth), key: `${year}-${String(month + 1).padStart(2, '0')}` },
+    quarterly: { start: new Date(quarterStart), end: new Date(nextQuarter), key: `${year}-Q${Math.floor(month / 3) + 1}` }
+  };
+}
+
+function normalizedGift(input) {
+  const name = String(input?.name || '').trim();
+  if (!name || name.length > 100) throw new ServiceError('礼包名称长度必须为 1-100');
+  const type = String(input?.type || input?.giftType || 'normal');
+  if (!TYPES.has(type) && !/^[a-z][a-z0-9_]{0,15}$/.test(type)) throw new ServiceError('礼包类型无效');
+  const description = String(input?.description || '').trim();
+  if (description.length > 2000) throw new ServiceError('礼包说明不能超过 2000 字符');
+  const imagePath = String(input?.imagePath || '').trim();
+  if (imagePath && !/^\/uploads\/gifts\/[\p{L}\p{N}_ ()&-]{1,100}\/[\p{L}\p{N}_-]{1,120}\.(?:jpg|png|webp|gif)$/u.test(imagePath)) throw new ServiceError('礼包图片路径无效');
+  const expiresAt = optionalDate(input?.expiresAt, '礼包到期时间');
+  const nextResetAt = optionalDate(input?.nextResetAt, '下次重置时间');
+  const resetCycle = input?.resetCycle === '' || input?.resetCycle === null || input?.resetCycle === undefined ? 'none' : String(positive(input.resetCycle, '重置周期', 3650));
+  const targetSteamId = String(input?.targetSteamId || '').trim();
+  const requiredTitle = String(input?.requiredTitle || '').trim();
+  if (type === 'private' && !isSteamId64(targetSteamId)) throw new ServiceError('私人礼包必须填写有效目标 SteamID');
+  if (type === 'title' && (!requiredTitle || requiredTitle.length > 100)) throw new ServiceError('称号礼包必须填写指定称号');
+  const memberMode = String(input?.memberMode || 'minimum');
+  if (!MODES.has(memberMode)) throw new ServiceError('会员模式无效');
+  const memberLevel = nonNegative(input?.memberLevel ?? 0, '会员等级');
+  const products = (Array.isArray(input?.products) ? input.products : (Array.isArray(input?.productIds) ? input.productIds.map((productId) => ({ productId, quantity: 1 })) : [])).map((entry) => ({ productId: id(entry?.productId ?? entry), quantity: positive(entry?.quantity ?? 1, 'quantity', 1000) })).filter((entry, index, list) => list.findIndex((item) => item.productId === entry.productId) === index);
+  const productIds = products.map((entry) => entry.productId);
+  if (productIds.length > 50) throw new ServiceError('礼包商品不能超过 50 个');
+  let actions;
+  try {
+    const codes = String(input?.codes ?? input?.actionsText ?? input?.actions ?? '').trim();
+    actions = codes ? parseGiftCodes(codes) : [];
+  } catch (error) {
+    if (error instanceof GiftCodeError) throw new ServiceError(error.message, 400, 'INVALID_GIFT_CODE');
+    throw error;
+  }
+  if (!actions.length && !productIds.length) throw new ServiceError('礼包内容不能为空');
+  return { name, type, description, imagePath: imagePath || null, expiresAt, nextResetAt, resetCycle, enabled: input?.enabled !== false, targetSteamId: type === 'private' ? targetSteamId : null, requiredTitle: type === 'title' ? requiredTitle : null, memberLevel, memberMode, totalLimit: positive(input?.totalLimit, '总次数'), dailyLimit: positive(input?.dailyLimit, '每日次数'), periodLimit: positive(input?.periodLimit ?? 1, '周期次数'), price: nonNegative(input?.price ?? 0, '价格'), actions, products, productIds };
+}
+
+function mapGift(row) {
+  return { id: Number(row.id), name: row.name, type: row.type || row.giftType || row.gift_type, description: row.description || '', imagePath: row.imagePath || row.image_path || null, expiresAt: row.expiresAt || row.expires_at || null, nextResetAt: row.nextResetAt || row.next_reset_at || null, resetCycle: row.resetCycle || row.reset_cycle || 'none', enabled: Boolean(row.enabled), targetSteamId: row.targetSteamId || row.target_steam_id || null, requiredTitle: row.requiredTitle || row.required_title || null, memberLevel: Number(row.memberLevel ?? row.member_level ?? 0), memberMode: row.memberMode || row.member_mode || 'minimum', totalLimit: Number(row.totalLimit ?? row.total_limit), dailyLimit: Number(row.dailyLimit ?? row.daily_limit), periodLimit: Number(row.periodLimit ?? row.period_limit), price: Number(row.price || 0), createdAt: row.createdAt || row.created_at, updatedAt: row.updatedAt || row.updated_at };
+}
+function giftItems(actions) {
+  const items = new Map();
+  for (const action of actions) {
+    const coin = action.actionType === 'shop_coin';
+    const key = coin ? 'shop_coin' : [action.productId || '', action.itemId || ''].join(':');
+    const quantity = Number(coin ? action.coinAmount : action.quantity) || 0;
+    const current = items.get(key);
+    if (current) current.quantity += quantity;
+    else items.set(key, { type: coin ? 'coin' : 'item', name: coin ? '商城币' : action.productName || action.itemId || '物品', imagePath: action.imagePath || null, quantity });
+  }
+  return [...items.values()];
+}
+function actionSummary(action) { return action.actionType === 'shop_coin' ? `商城币 × ${Number(action.coinAmount)}` : `物品 × ${Number(action.quantity)}`; }
+
+export class GiftService {
+  constructor(db, clock = () => new Date()) { this.db = db; this.clock = clock; }
+
+  async listTypes() {
+    return (await this.db.query('SELECT type_code AS code, display_name AS name FROM gift_types ORDER BY sort_order,type_code')).map((item) => ({ ...item, system: false }));
+  }
+  async addType(input) {
+    const name = String(input?.name || '').trim();
+    if (!name || name.length > 20) throw new ServiceError('类型名称长度必须为1-20个字符');
+    const code = 'g' + Date.now().toString(36);
+    await this.db.query('INSERT INTO gift_types (type_code,display_name,sort_order) SELECT ?,?,COALESCE(MAX(sort_order),0)+1 FROM gift_types', [code, name]);
+    return { code, name };
+  }
+  async updateType(codeValue, input) {
+    const code = String(codeValue || '');
+    const name = String(input?.name || '').trim();
+    if (!name || name.length > 20) throw new ServiceError('类型名称长度必须为1-20个字符');
+    const result = await this.db.query('UPDATE gift_types SET display_name=? WHERE type_code=?', [name, code]);
+    if (!result.affectedRows) throw new ServiceError('礼包类型不存在', 404);
+    return { code, name, system: false };
+  }
+  async deleteType(codeValue) {
+    const code = String(codeValue || '');
+    const used = await this.db.query('SELECT COUNT(*) AS total FROM gift_packages WHERE gift_type=?', [code]);
+    if (Number(used[0]?.total || 0) > 0) throw new ServiceError('该礼包类型正在使用，不能删除');
+    const result = await this.db.query('DELETE FROM gift_types WHERE type_code=?', [code]);
+    if (!result.affectedRows) throw new ServiceError('礼包类型不存在', 404);
+  }
+  async moveType(codeValue, direction) {
+    const code = String(codeValue || '');
+    const rows = await this.db.query('SELECT type_code AS code, sort_order AS sortOrder FROM gift_types ORDER BY sort_order,type_code');
+    const index = rows.findIndex((item) => item.code === code);
+    const target = direction === 'up' ? index - 1 : index + 1;
+    if (index < 0 || target < 0 || target >= rows.length) return;
+    await this.db.transaction(async (tx) => {
+      await tx.query('UPDATE gift_types SET sort_order=? WHERE type_code=?', [rows[target].sortOrder, rows[index].code]);
+      await tx.query('UPDATE gift_types SET sort_order=? WHERE type_code=?', [rows[index].sortOrder, rows[target].code]);
+    });
+  }
+
+  async listAdmin() {
+    await this.db.query('UPDATE gift_packages SET enabled = 0 WHERE enabled = 1 AND expires_at IS NOT NULL AND expires_at <= ?', [this.clock()]);
+    const gifts = (await this.db.query('SELECT id, name, gift_type AS type, description, image_path AS imagePath, expires_at AS expiresAt, next_reset_at AS nextResetAt, reset_cycle AS resetCycle, enabled, target_steam_id AS targetSteamId, required_title AS requiredTitle, member_level AS memberLevel, member_mode AS memberMode, total_limit AS totalLimit, daily_limit AS dailyLimit, period_limit AS periodLimit, price, created_at AS createdAt, updated_at AS updatedAt FROM gift_packages ORDER BY id ASC')).map(mapGift);
+    if (!gifts.length) return gifts;
+    const placeholders = gifts.map(() => '?').join(',');
+    const actions = await this.db.query('SELECT gift_id AS giftId, product_id AS productId, options_json AS optionsJson, raw_text AS rawText FROM gift_actions WHERE gift_id IN (' + placeholders + ') ORDER BY gift_id, action_index', gifts.map((gift) => gift.id));
+    for (const gift of gifts) {
+      const giftActions = actions.filter((action) => Number(action.giftId) === gift.id);
+      gift.codes = giftActions.filter((action) => !action.productId).map((action) => action.rawText).filter(Boolean).join('\n');
+      const productMap = new Map();
+      for (const action of giftActions.filter((item) => item.productId)) {
+        const productId = Number(action.productId);
+        const quantity = Number(parseJson(action.optionsJson).giftProductQuantity) || 1;
+        if (!productMap.has(productId)) productMap.set(productId, quantity);
+      }
+      gift.products = [...productMap.entries()].map(([productId, quantity]) => ({ productId, quantity }));
+      gift.productIds = gift.products.map((item) => item.productId);
+    }
+    return gifts;
+  }
+  async get(idValue, publicView = false) {
+    const giftId = id(idValue);
+    const rows = await this.db.query('SELECT id, name, gift_type AS type, description, image_path AS imagePath, expires_at AS expiresAt, next_reset_at AS nextResetAt, reset_cycle AS resetCycle, enabled, target_steam_id AS targetSteamId, required_title AS requiredTitle, member_level AS memberLevel, member_mode AS memberMode, total_limit AS totalLimit, daily_limit AS dailyLimit, period_limit AS periodLimit, price, created_at AS createdAt, updated_at AS updatedAt FROM gift_packages WHERE id = ?', [giftId]);
+    if (!rows[0]) throw new ServiceError('礼包不存在', 404, 'NOT_FOUND');
+    const actions = await this.db.query('SELECT id, action_index AS actionIndex, action_type AS actionType, product_id AS productId, item_id AS itemId, quantity, options_json AS optionsJson, coin_amount AS coinAmount, raw_text AS rawText FROM gift_actions WHERE gift_id = ? ORDER BY action_index ASC', [giftId]);
+    const gift = mapGift(rows[0]);
+    if (gift.expiresAt && new Date(gift.expiresAt) <= this.clock()) gift.enabled = false;
+    gift.actions = actions.map((action) => publicView ? ({ summary: actionSummary(action) }) : ({ ...action, options: parseJson(action.optionsJson) }));
+    if (!publicView) {
+      gift.codes = actions.filter((action) => !action.productId).map((action) => action.rawText).join('\n');
+      const productMap = new Map();
+      for (const action of actions.filter((item) => item.productId)) { const productId = Number(action.productId); const options = parseJson(action.optionsJson); if (!productMap.has(productId)) productMap.set(productId, Number(options.giftProductQuantity) || 1); }
+      gift.products = [...productMap.entries()].map(([productId, quantity]) => ({ productId, quantity }));
+      gift.productIds = gift.products.map((item) => item.productId);
+    }
+    return gift;
+  }
+  async save(input, idValue = null) {
+    const gift = normalizedGift(input);
+    if (gift.expiresAt && gift.expiresAt <= this.clock()) gift.enabled = false;
+    try {
+      return await this.db.transaction(async (tx) => {
+        let giftId;
+        if (idValue === null) {
+          const result = await tx.query('INSERT INTO gift_packages (name, gift_type, description, image_path, expires_at, next_reset_at, reset_cycle, enabled, target_steam_id, required_title, member_level, member_mode, total_limit, daily_limit, period_limit, price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [gift.name, gift.type, gift.description || null, gift.imagePath, gift.expiresAt, gift.nextResetAt, gift.resetCycle, gift.enabled, gift.targetSteamId, gift.requiredTitle, gift.memberLevel, gift.memberMode, gift.totalLimit, gift.dailyLimit, gift.periodLimit, gift.price]);
+          giftId = result.insertId;
+        } else {
+          giftId = id(idValue);
+          const result = await tx.query('UPDATE gift_packages SET name=?, gift_type=?, description=?, image_path=?, expires_at=?, next_reset_at=?, reset_cycle=?, enabled=?, target_steam_id=?, required_title=?, member_level=?, member_mode=?, total_limit=?, daily_limit=?, period_limit=?, price=? WHERE id=?', [gift.name, gift.type, gift.description || null, gift.imagePath, gift.expiresAt, gift.nextResetAt, gift.resetCycle, gift.enabled, gift.targetSteamId, gift.requiredTitle, gift.memberLevel, gift.memberMode, gift.totalLimit, gift.dailyLimit, gift.periodLimit, gift.price, giftId]);
+          if (!result.affectedRows) throw new ServiceError('礼包不存在', 404, 'NOT_FOUND');
+          await tx.query('DELETE FROM gift_actions WHERE gift_id = ?', [giftId]);
+        }
+        for (const [index, action] of gift.actions.entries()) {
+          const payload = action.payload;
+          const options = Object.fromEntries(Object.entries(payload).filter(([key]) => !['itemId', 'quantity'].includes(key)));
+          await tx.query('INSERT INTO gift_actions (gift_id, action_index, action_type, product_id, item_id, quantity, options_json, coin_amount, raw_text) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)', [giftId, index, action.actionType, payload.itemId || null, payload.quantity || null, action.actionType === 'spawn_item' ? JSON.stringify(options) : null, payload.amount || null, action.displayCode]);
+        }
+        let actionIndex = gift.actions.length;
+        if (gift.productIds.length) {
+          const placeholders = gift.productIds.map(() => '?').join(',');
+          const products = await tx.query(`SELECT id,item_id AS itemId,fulfillment_codes AS fulfillmentCodes FROM products WHERE id IN (${placeholders})`, gift.productIds);
+          if (products.length !== gift.productIds.length) throw new ServiceError('所选商品不存在', 404, 'PRODUCT_NOT_FOUND');
+          const byId = new Map(products.map((product) => [Number(product.id), product]));
+          for (const productId of gift.productIds) {
+            const product = byId.get(productId);
+            const selectedQuantity = gift.products.find((item) => item.productId === productId)?.quantity || 1;
+            for (const code of normalizeFulfillmentCodes(product.fulfillmentCodes || product.itemId)) {
+              const payload = parseProductCode(code, { allowVehicle: true });
+              payload.quantity = Number(payload.quantity || 1) * selectedQuantity;
+              const options = { giftProductQuantity: selectedQuantity, ...Object.fromEntries(Object.entries(payload).filter(([key]) => !['itemId', 'quantity'].includes(key))) };
+              await tx.query('INSERT INTO gift_actions (gift_id, action_index, action_type, product_id, item_id, quantity, options_json, coin_amount, raw_text) VALUES (?, ?, \'spawn_item\', ?, ?, ?, ?, NULL, ?)', [giftId, actionIndex, productId, payload.itemId, payload.quantity, JSON.stringify(options), code]);
+              actionIndex += 1;
+            }
+          }
+        }
+        return { id: Number(giftId), ...gift, actions: gift.actions.map((action) => ({ summary: action.actionType === 'shop_coin' ? `商城币 × ${action.payload.amount}` : `物品 × ${action.payload.quantity}` })) };
+      });
+    } catch (error) { if (duplicate(error)) throw new ServiceError('礼包名称已存在', 409, 'DUPLICATE_NAME'); throw error; }
+  }
+  async setEnabled(idValue, enabled) {
+    const giftId = id(idValue);
+    const active = Boolean(enabled);
+    const result = active
+      ? await this.db.query('UPDATE gift_packages SET enabled = 1 WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)', [giftId, this.clock()])
+      : await this.db.query('UPDATE gift_packages SET enabled = 0 WHERE id = ?', [giftId]);
+    if (!result.affectedRows) throw new ServiceError(active ? '礼包不存在或已到期，不能启用' : '礼包不存在', active ? 409 : 404, active ? 'GIFT_EXPIRED' : 'NOT_FOUND');
+  }
+  async disable(idValue) {
+    return this.setEnabled(idValue, false);
+  }
+
+  async delete(idValue) {
+    const { deleteGift } = await import('./deletion-service.js');
+    return this.db.transaction((tx) => deleteGift(tx, idValue));
+  }
+  async setTitle(steamId, title, expiresAt) {
+    if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效');
+    const name = String(title || '').trim(); if (!name || name.length > 100) throw new ServiceError('称号格式无效');
+    const expiry = expiresAt ? new Date(expiresAt) : null; if (expiry && Number.isNaN(expiry.getTime())) throw new ServiceError('称号过期时间无效');
+    await this.db.query('INSERT INTO player_titles (steam_id,title_name,expires_at) VALUES (?,?,?) ON DUPLICATE KEY UPDATE expires_at=VALUES(expires_at)', [String(steamId), name, expiry]);
+  }
+  async deleteTitle(steamId, title) { if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效'); await this.db.query('DELETE FROM player_titles WHERE steam_id=? AND title_name=?', [String(steamId), String(title)]); }
+  async setSquad(steamId, input) { if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效'); const squadId=String(input?.squadId||'').trim(), squadName=String(input?.squadName||'').trim(); if(!squadId||squadId.length>100||!squadName||squadName.length>100) throw new ServiceError('小队编号和名称必填且不能超过 100 字符'); await this.db.query('INSERT INTO `商城用户` (`SteamID`,`小队编号`,`小队名称`,`小队更新时间`) VALUES (?,?,?,CURRENT_TIMESTAMP(3)) ON DUPLICATE KEY UPDATE `小队编号`=VALUES(`小队编号`),`小队名称`=VALUES(`小队名称`),`小队更新时间`=CURRENT_TIMESTAMP(3)', [String(steamId),squadId,squadName]); }
+  async deleteSquad(steamId) { if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效'); await this.db.query('UPDATE `商城用户` SET `小队编号`=NULL,`小队名称`=NULL,`小队更新时间`=NULL WHERE `SteamID`=?', [String(steamId)]); }
+
+  async context(db, steamId, memberLevel, giftId = null) {
+    const windows = giftWindows(this.clock());
+    const titles = await db.query('SELECT title_name AS titleName FROM player_titles WHERE steam_id=? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP(3))', [String(steamId)]);
+    const squads = await db.query('SELECT `小队编号` AS squadId FROM `商城用户` WHERE `SteamID`=? AND `小队编号` <> ? LIMIT 1', [String(steamId), '']);
+    const counts = giftId
+      ? await db.query('SELECT COUNT(*) AS total, SUM(created_at >= ? AND created_at < ?) AS today FROM gift_claims WHERE gift_id=? AND steam_id=?', [windows.day.start, windows.day.end, giftId, String(steamId)])
+      : [];
+    return { memberLevel: Number(memberLevel)||0, titles: new Set(titles.map((row)=>row.titleName)), hasSquad:Boolean(squads[0]), counts:counts[0]||{total:0,today:0}, windows, now: this.clock() };
+  }
+  eligibility(gift, ctx, periodCount = 0) {
+    if (!gift.enabled) return '礼包当前未开放';
+    if (gift.expiresAt && new Date(gift.expiresAt) <= (ctx.now || this.clock())) return '礼包已到期';
+    if (gift.type === 'private' && gift.targetSteamId !== ctx.steamId) return '该礼包仅限指定玩家';
+    if (gift.type === 'title' && !ctx.titles.has(gift.requiredTitle)) return '未拥有有效指定称号';
+    if (gift.type === 'squad' && !ctx.hasSquad) return '当前未加入小队';
+    if (gift.memberMode === 'exact' ? ctx.memberLevel !== gift.memberLevel : ctx.memberLevel < gift.memberLevel) return gift.memberMode === 'exact' ? `需要会员等级恰好为 ${gift.memberLevel}` : `需要会员等级达到 ${gift.memberLevel}`;
+    if (Number(ctx.counts.total) >= gift.totalLimit) return '已达到历史领取上限';
+    if (Number(ctx.counts.today) >= gift.dailyLimit) return '已达到今日领取上限';
+    if (PERIOD_TYPES.has(gift.type) && Number(periodCount) >= gift.periodLimit) return '已达到本周期领取上限';
+    return null;
+  }
+  async listVisible(steamId, memberLevel, activityId = null) {
+    if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效');
+    const now = this.clock();
+    const rows = activityId === null
+      ? await this.db.query('SELECT id,name,gift_type AS type,description,image_path AS imagePath,expires_at AS expiresAt,enabled,target_steam_id AS targetSteamId,required_title AS requiredTitle,member_level AS memberLevel,member_mode AS memberMode,total_limit AS totalLimit,daily_limit AS dailyLimit,period_limit AS periodLimit,price FROM gift_packages g WHERE enabled=1 AND (g.expires_at IS NULL OR g.expires_at>?) AND NOT EXISTS (SELECT 1 FROM activity_gifts ag JOIN activities a ON a.id=ag.activity_id WHERE ag.gift_id=g.id AND a.enabled=1 AND a.starts_at<=? AND a.ends_at>?) ORDER BY id ASC', [now, now, now])
+      : await this.db.query('SELECT g.id,g.name,g.gift_type AS type,g.description,g.image_path AS imagePath,g.expires_at AS expiresAt,g.enabled,g.target_steam_id AS targetSteamId,g.required_title AS requiredTitle,g.member_level AS memberLevel,g.member_mode AS memberMode,g.total_limit AS totalLimit,g.daily_limit AS dailyLimit,g.period_limit AS periodLimit,g.price FROM activity_gifts ag JOIN activities a ON a.id=ag.activity_id JOIN gift_packages g ON g.id=ag.gift_id WHERE ag.activity_id=? AND a.enabled=1 AND a.starts_at<=? AND a.ends_at>? AND g.enabled=1 AND (g.expires_at IS NULL OR g.expires_at>?) ORDER BY g.id ASC', [id(activityId, '活动 ID'), now, now, now]);
+    const base = await this.context(this.db, steamId, memberLevel);
+    const memberStrategy = (await this.db.query('SELECT gift_discount AS giftDiscount FROM membership_strategies WHERE level=? AND enabled=1', [Number(base.memberLevel || 0)]))[0];
+    const giftDiscount = Number(memberStrategy?.giftDiscount ?? 100);
+    const result=[];
+    for(const row of rows){ const gift=mapGift(row); const visible = (gift.type !== 'private' || gift.targetSteamId===String(steamId)) && (gift.type !== 'title' || base.titles.has(gift.requiredTitle)) && (gift.type !== 'squad' || base.hasSquad); if(!visible) continue; const counts=(await this.db.query('SELECT COUNT(*) AS total, SUM(created_at >= ? AND created_at < ?) AS today FROM gift_claims WHERE gift_id=? AND steam_id=?',[base.windows.day.start,base.windows.day.end,gift.id,String(steamId)]))[0]||{}; let period=null; if(PERIOD_TYPES.has(gift.type)){const w=base.windows[gift.type]; period=Number((await this.db.query('SELECT COUNT(*) AS count FROM gift_claims WHERE gift_id=? AND steam_id=? AND created_at >= ? AND created_at < ?',[gift.id,String(steamId),w.start,w.end]))[0]?.count||0);} const ctx={...base,steamId:String(steamId),counts}; const reason=this.eligibility(gift,ctx,period||0); const actions=await this.db.query('SELECT a.action_type AS actionType,a.product_id AS productId,a.item_id AS itemId,a.quantity,a.coin_amount AS coinAmount,COALESCE(p.name,p2.name) AS productName,COALESCE(p.image_path,p2.image_path) AS imagePath FROM gift_actions a LEFT JOIN products p ON p.id=a.product_id LEFT JOIN products p2 ON p2.id=(SELECT MIN(px.id) FROM products px WHERE px.item_id=a.item_id) WHERE a.gift_id=? ORDER BY a.action_index ASC',[gift.id]); result.push({...gift,claimedTotal:Number(counts.total||0),claimedToday:Number(counts.today||0),claimedPeriod:period,remainingTotal:Math.max(0,gift.totalLimit-Number(counts.total||0)),remainingToday:Math.max(0,gift.dailyLimit-Number(counts.today||0)),remainingPeriod:period===null?null:Math.max(0,gift.periodLimit-period),claimable:!reason,claimReason:reason,items:giftItems(actions),actions:actions.map((a)=>({summary:actionSummary(a)}))}); }
+    return result.map((gift) => ({ ...gift, price: Math.round(Number(gift.price || 0) * giftDiscount / 100) }));
+  }
+  async listActivityVisible(activityId, steamId, memberLevel) { return this.listVisible(steamId, memberLevel, activityId); }
+  async findClaim(key, db = this.db) {
+    const rows = await db.query('SELECT c.id AS claimId,c.gift_id AS giftId,c.steam_id AS steamId,c.order_id AS id,o.order_no AS orderNo,o.status,o.total_amount AS totalAmount,agc.activity_id AS activityId FROM gift_claims c LEFT JOIN orders o ON o.id=c.order_id LEFT JOIN activity_gift_claims agc ON agc.gift_claim_id=c.id WHERE c.request_key=?', [key]);
+    return rows[0];
+  }
+  idempotentClaim(existing, steamId, giftId, activityId = null) {
+    const existingActivityId = existing.activityId === null || existing.activityId === undefined ? null : Number(existing.activityId);
+    if (String(existing.steamId) !== String(steamId) || Number(existing.giftId) !== Number(giftId) || existingActivityId !== activityId) throw new ServiceError('Idempotency-Key 已被其他领取请求使用', 409, 'IDEMPOTENCY_CONFLICT');
+    const { activityId: hiddenActivityId, ...result } = existing;
+    return { ...result, idempotent: true };
+  }
+  async claim(idValue, steamId, memberLevel, requestKey, options = {}) {
+    const giftId = id(idValue);
+    const activityId = options.activityId === undefined || options.activityId === null ? null : id(options.activityId, '活动 ID');
+    if (!isSteamId64(steamId)) throw new ServiceError('SteamID 格式无效');
+    const key = String(requestKey || '').trim();
+    if (!key || key.length > 100) throw new ServiceError('Idempotency-Key 长度必须为 1-100');
+    const prior = await this.findClaim(key);
+    if (prior) return this.idempotentClaim(prior, steamId, giftId, activityId);
+    try {
+      return await this.db.transaction(async (tx) => {
+        const repeated = await this.findClaim(key, tx);
+        if (repeated) return this.idempotentClaim(repeated, steamId, giftId, activityId);
+        let activity = null;
+        if (activityId !== null) {
+          const activities = await tx.query('SELECT id,name,description,starts_at AS startsAt,ends_at AS endsAt,enabled FROM activities WHERE id=? FOR UPDATE', [activityId]);
+          activity = activities[0];
+        }
+        const rows = await tx.query('SELECT id,name,gift_type AS type,description,expires_at AS expiresAt,enabled,target_steam_id AS targetSteamId,required_title AS requiredTitle,member_level AS memberLevel,member_mode AS memberMode,total_limit AS totalLimit,daily_limit AS dailyLimit,period_limit AS periodLimit,price FROM gift_packages WHERE id=? FOR UPDATE', [giftId]);
+        if (!rows[0]) throw new ServiceError('礼包不存在', 404, 'NOT_FOUND');
+        const gift = mapGift(rows[0]);
+        if (activityId !== null) {
+          const relation = await tx.query('SELECT activity_id AS activityId FROM activity_gifts WHERE activity_id=? AND gift_id=?', [activityId, giftId]);
+          const now = this.clock();
+          if (!activity || !relation[0] || !activity.enabled || new Date(activity.startsAt) > now || new Date(activity.endsAt) <= now) throw new ServiceError('活动无效或未关联该礼包', 409, 'ACTIVITY_GIFT_INVALID');
+        } else {
+          const active = await tx.query('SELECT ag.activity_id AS activityId FROM activity_gifts ag JOIN activities a ON a.id=ag.activity_id WHERE ag.gift_id=? AND a.enabled=1 AND a.starts_at<=? AND a.ends_at>? ORDER BY ag.activity_id LIMIT 1', [giftId, this.clock(), this.clock()]);
+          if (active[0]) throw new ServiceError('该礼包必须通过活动入口领取', 409, 'ACTIVITY_ENTRY_REQUIRED');
+        }
+        await tx.query('INSERT INTO \`商城用户\` (\`SteamID\`,\`商城币余额\`) VALUES (?,0) ON DUPLICATE KEY UPDATE \`SteamID\`=VALUES(\`SteamID\`)', [String(steamId)]);
+        const users = await tx.query("SELECT \`商城用户编号\` AS id,CASE WHEN \`会员等级\`>0 AND (\`会员到期时间\` IS NULL OR \`会员到期时间\`>CURRENT_TIMESTAMP(3)) THEN \`会员等级\` ELSE 0 END AS memberLevel FROM \`商城用户\` WHERE \`SteamID\`=? AND \`用户角色\` IN ('user','admin','super_admin') AND \`账户状态\`='active' FOR UPDATE", [String(steamId)]);
+        if (!users[0]) throw new ServiceError('商城用户不存在或已停用', 403, 'SHOP_USER_UNAVAILABLE');
+        const memberStrategy = (await tx.query('SELECT gift_discount AS giftDiscount FROM membership_strategies WHERE level=? AND enabled=1', [Number(users[0].memberLevel || 0)]))[0];
+        const discountedPrice = Math.round(gift.price * Number(memberStrategy?.giftDiscount ?? 100) / 100);
+        const ctx = await this.context(tx, steamId, users[0].memberLevel, giftId);
+        ctx.steamId = String(steamId);
+        let periodCount = 0, periodKey = null;
+        if (PERIOD_TYPES.has(gift.type)) {
+          const w = ctx.windows[gift.type];
+          periodKey = w.key;
+          periodCount = Number((await tx.query('SELECT COUNT(*) AS count FROM gift_claims WHERE gift_id=? AND steam_id=? AND created_at >= ? AND created_at < ?', [giftId, String(steamId), w.start, w.end]))[0]?.count || 0);
+        }
+        const reason = this.eligibility(gift, ctx, periodCount);
+        if (reason) throw new ServiceError(reason, 409, 'GIFT_NOT_CLAIMABLE');
+        const account = await tx.query('SELECT \`商城币余额\` AS balance FROM \`商城用户\` WHERE \`SteamID\`=? FOR UPDATE', [String(steamId)]);
+        const balance = Number(account[0].balance);
+        if (balance < discountedPrice) throw new ServiceError('商城币余额不足', 409, 'INSUFFICIENT_BALANCE');
+        const actions = await tx.query('SELECT action_index AS actionIndex,action_type AS actionType,product_id AS productId,item_id AS itemId,quantity,options_json AS optionsJson,coin_amount AS coinAmount FROM gift_actions WHERE gift_id=? ORDER BY action_index ASC FOR UPDATE', [giftId]);
+        if (!actions.length) throw new ServiceError('礼包没有可执行动作', 409, 'GIFT_EMPTY');
+        const claim = await tx.query('INSERT INTO gift_claims (gift_id,steam_id,request_key,claim_period_key,claim_day,price_paid) VALUES (?,?,?,?,?,?)', [giftId, String(steamId), key, periodKey, ctx.windows.day.key, discountedPrice]);
+        const number = orderNo();
+        const order = await tx.query("INSERT INTO orders (order_no,source,external_order_id,steam_id,gift_id,gift_claim_id,total_amount,status) VALUES (?,'gift',?,?,?, ?,?,'pending')", [number, key, String(steamId), giftId, claim.insertId, discountedPrice]);
+        await tx.query('UPDATE gift_claims SET order_id=? WHERE id=?', [order.insertId, claim.insertId]);
+        if (activity) await tx.query('INSERT INTO activity_gift_claims (activity_id,gift_id,gift_claim_id,steam_id,activity_snapshot_json,gift_snapshot_json) VALUES (?,?,?,?,?,?)', [activityId, giftId, claim.insertId, String(steamId), JSON.stringify({ id: Number(activity.id), name: activity.name, description: activity.description || '', startsAt: activity.startsAt, endsAt: activity.endsAt }), JSON.stringify({ ...gift, actions: actions.map((action) => ({ actionIndex: Number(action.actionIndex), actionType: action.actionType, productId: action.productId || null, itemId: action.itemId || null, quantity: action.quantity === null ? null : Number(action.quantity), coinAmount: action.coinAmount === null ? null : Number(action.coinAmount), options: parseJson(action.optionsJson) })) })]);
+        for (const action of actions) {
+          const itemName = action.actionType === 'shop_coin' ? `商城币奖励 ${action.coinAmount}` : `物品 ${action.itemId}`;
+          const detail = await tx.query('INSERT INTO order_items (order_id,product_id,sku,name,unit_price,quantity,item_id,grant_amount,currency_type,min_member_level,fulfillment_codes_snapshot) VALUES (?,?,?,?,0,?,?,?,?,0,NULL)', [order.insertId, action.productId, `GIFT-${giftId}-${action.actionIndex}`, itemName, Number(action.quantity || 1), action.itemId, action.quantity, action.actionType === 'shop_coin' ? 'coin' : 'gift']);
+          const actionOptions = parseJson(action.optionsJson); delete actionOptions.giftProductQuantity;
+          const payload = action.actionType === 'spawn_item' ? { itemId: action.itemId, quantity: Number(action.quantity), ...actionOptions } : null;
+          await tx.query("INSERT INTO fulfillment_tasks (order_id,order_item_id,code_index,steam_id,task_type,payload_json,coin_amount,item_id,amount,status) VALUES (?,?,?,?,?,?,?,?,?,'pending')", [order.insertId, detail.insertId, action.actionIndex, String(steamId), action.actionType, payload ? JSON.stringify(payload) : null, action.coinAmount, action.itemId, action.quantity]);
+        }
+        const after = balance - discountedPrice;
+        if (discountedPrice > 0) {
+          await tx.query('UPDATE \`商城用户\` SET \`商城币余额\`=? WHERE \`SteamID\`=?', [after, String(steamId)]);
+          await tx.query("INSERT INTO coin_ledger (steam_id,amount,balance_after,type,reference_type,reference_id,note) VALUES (?,?,?,'gift_purchase','gift_claim',?,?)", [String(steamId), -discountedPrice, after, String(claim.insertId), '礼包 #' + giftId + ' ' + gift.name]);
+        }
+        return { id: order.insertId, claimId: claim.insertId, orderNo: number, status: 'pending', totalAmount: discountedPrice, balanceAfter: after, idempotent: false };
+      });
+    } catch (error) {
+      if (!duplicate(error)) throw error;
+      const existing = await this.findClaim(key);
+      if (existing) return this.idempotentClaim(existing, steamId, giftId, activityId);
+      throw error;
+    }
+  }
+}
+
+export async function importLegacyGifts(db, gifts, logger) {
+  const count=await db.query('SELECT COUNT(*) AS count FROM gift_packages'); if(Number(count[0]?.count)>0)return{imported:0,skipped:0}; let imported=0,skipped=0;
+  for(const source of Array.isArray(gifts)?gifts:[]){try{const items=Array.isArray(source.items)?source.items:[]; if(!items.length){skipped++;continue;} const products=await db.query(`SELECT id,sku,name,grant_amount,fulfillment_codes,item_id FROM products WHERE sku IN (${items.map(()=>'?').join(',')})`,items.map((item)=>String(item.sku))); if(products.length!==new Set(items.map((item)=>String(item.sku))).size){skipped++;logger?.warn('跳过旧礼包导入：商品不存在',{giftName:source.name});continue;} const bySku=new Map(products.map((p)=>[p.sku,p])); const actions=[]; for(const item of items){const product=bySku.get(String(item.sku)); const quantity=positive(item.quantity,'旧礼包数量',1000)*positive(product.grant_amount,'商品发放数量',100000); const codes=String(product.fulfillment_codes||product.item_id).split(',').map((v)=>v.trim()).filter(Boolean); for(const code of codes)actions.push({productId:product.id,raw:`#spawnitem ${code} ${quantity}`,itemId:code,quantity});} await db.transaction(async(tx)=>{const gift=await tx.query('INSERT INTO gift_packages (name,gift_type,description,enabled,member_level,member_mode,total_limit,daily_limit,period_limit,price) VALUES (?,\'normal\',?, ?,0,\'minimum\',1,1,1,0)',[String(source.name||'新手礼包').slice(0,100),String(source.category||'旧配置导入'),source.enabled!==false]); for(const [index,a] of actions.entries())await tx.query('INSERT INTO gift_actions (gift_id,action_index,action_type,product_id,item_id,quantity,options_json,raw_text) VALUES (?, ?,\'spawn_item\',?,?,?,NULL,?)',[gift.insertId,index,a.productId,a.itemId,a.quantity,a.raw]);}); imported++;}catch(error){skipped++;logger?.warn('旧礼包导入失败，已跳过',{component:'gift',giftName:source?.name,error:error.message});}}
+  logger?.info('旧 starterGifts 一次性导入完成',{imported,skipped}); return{imported,skipped};
+}

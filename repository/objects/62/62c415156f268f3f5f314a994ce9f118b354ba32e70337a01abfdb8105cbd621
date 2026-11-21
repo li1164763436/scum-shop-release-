@@ -1,0 +1,82 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import mysql from 'mysql2/promise';
+import { CommerceService } from '../src/services/commerce-service.js';
+import { saveUploadedImage } from '../src/services/image-storage.js';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const inputRoot = path.join(root, 'data', 'imports', 'scum8-all');
+const config = JSON.parse((await fs.readFile(path.join(root, 'data', 'config.json'), 'utf8')).replace(/^\uFEFF/, '')).mysql;
+const folders = (await fs.readdir(inputRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+const records = [];
+const skipped = [];
+for (const mainFolder of folders) {
+  const mainCategory = mainFolder.name.replace(/^\d+[-、.\s]*/, '').trim();
+  const mainPath = path.join(inputRoot, mainFolder.name);
+  const subFolders = (await fs.readdir(mainPath, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+  for (const subFolder of subFolders) {
+    const category = subFolder.name.replace(/^\d+[-、.\s]*/, '').trim();
+    const itemFile = path.join(mainPath, subFolder.name, 'items.json');
+    try { await fs.access(itemFile); } catch { continue; }
+    const data = JSON.parse(await fs.readFile(itemFile, 'utf8'));
+    for (const item of data.items || []) records.push({ ...item, mainCategory, category, directory: path.dirname(itemFile) });
+  }
+}
+const validId = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,79}$/;
+const imageMime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
+const connection = await mysql.createConnection({ ...config, charset: 'utf8mb4', timezone: 'Z', decimalNumbers: true });
+const copied = [];
+let locked = false;
+let committed = false;
+try {
+  const [lock] = await connection.query('SELECT GET_LOCK(?, 10) AS acquired', ['shop-import-scum8-all']);
+  if (Number(lock[0].acquired) !== 1) throw new Error('已有全量导入正在执行');
+  locked = true;
+  const [existing] = await connection.query('SELECT item_id FROM products');
+  const known = new Set(existing.map((item) => String(item.item_id).toLowerCase()));
+  const pending = [];
+  for (const item of records) {
+    const rawCode = String(item.itemId || '').trim();
+    const itemId = rawCode.split(/\s+/)[0];
+    if (!item.name || !item.imagePath || !itemId || !validId.test(itemId)) { skipped.push({ code: rawCode, reason: '代码或图片无效' }); continue; }
+    if (known.has(itemId.toLowerCase())) { skipped.push({ code: rawCode, reason: '数据库已存在' }); continue; }
+    const imageFile = path.join(item.directory, item.imagePath);
+    const extension = path.extname(imageFile).toLowerCase();
+    if (!imageMime[extension]) { skipped.push({ code: rawCode, reason: '图片格式不支持' }); continue; }
+    try { await fs.access(imageFile); } catch { skipped.push({ code: rawCode, reason: '图片不存在' }); continue; }
+    pending.push({ ...item, itemId, rawCode, imageFile, mime: imageMime[extension] });
+    known.add(itemId.toLowerCase());
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backup = path.join(root, 'backups', `before-scum8-all-${stamp}.sql`);
+  await fs.mkdir(path.dirname(backup), { recursive: true });
+  const dump = path.join(root, '..', 'PackagedApp', 'installer', 'staging', 'runtime', 'mysql', 'bin', 'mysqldump.exe');
+  await new Promise((resolve, reject) => {
+    const child = spawn(dump, [`--host=${config.host}`, `--port=${config.port}`, `--user=${config.user}`, '--single-transaction', '--routines', '--events', '--triggers', '--no-tablespaces', '--set-gtid-purged=OFF', '--default-character-set=utf8mb4', `--result-file=${backup}`, config.database], { windowsHide: true, env: { ...process.env, MYSQL_PWD: config.password }, stdio: ['ignore', 'ignore', 'pipe'] });
+    let detail = ''; child.stderr.on('data', (chunk) => { detail += chunk.toString(); }); child.on('error', reject); child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`数据库备份失败：${detail}`)));
+  });
+  if (!(await fs.stat(backup)).size) throw new Error('数据库备份为空');
+  await connection.beginTransaction();
+  const commerce = new CommerceService({ query: async (sql, params = []) => (await connection.execute(sql, params))[0] });
+  const imported = [];
+  for (const item of pending) {
+    const image = await fs.readFile(item.imageFile);
+    const imagePath = await saveUploadedImage(root, item.mime, image, 'products', [item.mainCategory, item.category]);
+    copied.push(path.join(root, 'public', imagePath));
+    const product = await commerce.saveProduct({ name: item.name, itemId: item.rawCode, fulfillmentCodes: item.rawCode, parentCategory: item.mainCategory, category: item.category, imagePath, price: 0, currencyType: 'coin', enabled: false });
+    imported.push({ id: product.id, itemId: product.itemId, name: product.name, parentCategory: item.mainCategory, category: item.category, imagePath });
+  }
+  await connection.commit(); committed = true;
+  const report = { source: 'https://scumcode.scum8.cn', attribution: '数据来源：scumcode.scum8.cn', database: config.database, totalRecords: records.length, imported: imported.length, skipped: skipped.length, backup, products: imported, skippedItems: skipped };
+  const reportPath = path.join(inputRoot, `import-result-${stamp}.json`);
+  await fs.writeFile(reportPath, JSON.stringify(report, null, 2));
+  console.log(JSON.stringify({ database: config.database, totalRecords: records.length, imported: imported.length, skipped: skipped.length, backup, report: reportPath }, null, 2));
+} catch (error) {
+  if (!committed) { await connection.rollback(); for (const file of copied) await fs.unlink(file).catch(() => {}); }
+  throw error;
+} finally {
+  if (locked) await connection.query('SELECT RELEASE_LOCK(?)', ['shop-import-scum8-all']);
+  await connection.end();
+}

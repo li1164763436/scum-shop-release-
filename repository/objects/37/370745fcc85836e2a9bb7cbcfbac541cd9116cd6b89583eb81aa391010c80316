@@ -1,0 +1,45 @@
+<section class="page teleport-management-page" id="page-teleport-management">
+  <div class="page-toolbar teleport-management-toolbar">
+    <div><span class="section-kicker">TELEPORT MANAGEMENT</span><h2>传送管理</h2><p>配置角色与载具传送计费、可用目标及管理员固定位置。</p></div>
+    <button class="btn secondary" id="refreshTeleportManagement" type="button">刷新数据</button>
+  </div>
+  <section class="card teleport-safety-card">
+    <div class="card-head teleport-section-head"><div><span class="teleport-section-index">安全边界</span><h3>强制安全规则</h3><p>以下规则由服务端强制执行，不受页面开关影响。</p></div><span class="teleport-safety-state">始终生效</span></div>
+    <div class="teleport-rule-grid">
+      <article><span>01</span><div><strong>服务端授权</strong><p>商城只提交不透明目标引用，执行时重新校验位置仍存在且启用。</p></div></article>
+      <article><span>02</span><div><strong>角色落点</strong><p>动态目标使用稳定安全偏移；管理员固定位置使用明确配置的 XYZ。</p></div></article>
+      <article><span>03</span><div><strong>严格验证</strong><p>插件回读实际落点；验证异常时停止重试并转人工复核。</p></div></article>
+      <article><span>04</span><div><strong>载具传送</strong><p>载具仅使用插件支持的原生目标；固定位置坐标始终由服务端解析。</p></div></article>
+    </div>
+  </section>
+  <section class="card teleport-settings-card">
+    <div class="card-head"><div><h3>传送功能与计费</h3><p>角色与载具分别管理开关、价格和使用次数。</p></div></div>
+    <form id="teleportSettingsForm" class="teleport-settings-form">
+      <div class="teleport-pricing-grid">
+        <section class="teleport-pricing-panel" aria-labelledby="characterPricingTitle">
+          <div class="teleport-setting-heading"><strong id="characterPricingTitle">角色传送计费</strong><small>会员次数与折扣在此基础上叠加</small></div>
+          <label class="teleport-switch-row teleport-category-switch"><span><strong>角色传送开关</strong><small>统一控制小队成员、载具、领地旗和固定位置目标。</small></span><input name="characterEnabled" type="checkbox"></label>
+          <fieldset class="teleport-pricing-mode"><legend>扣款方式</legend><label><input name="characterPricingMode" type="radio" value="fixed" required><span>固定价格</span></label><label><input name="characterPricingMode" type="radio" value="distance" required><span>距离计价</span></label></fieldset>
+          <div class="teleport-number-grid"><label>每次固定价格<input name="characterFixedPrice" type="number" min="0" max="1000000000" required></label><label>每公里价格<input name="characterPerKilometerPrice" type="number" min="0" max="1000000000" required></label><label>每日基础次数<input name="characterDailyLimit" type="number" min="0" max="1000" required></label></div>
+        </section>
+        <section class="teleport-pricing-panel" aria-labelledby="vehiclePricingTitle">
+          <div class="teleport-setting-heading"><strong id="vehiclePricingTitle">载具传送计费</strong><small>间隔按每个玩家独立计算</small></div>
+          <label class="teleport-switch-row teleport-category-switch"><span><strong>载具传送开关</strong><small>统一控制载具到授权领地旗、玩家位置和固定位置。</small></span><input name="vehicleEnabled" type="checkbox"></label>
+           <label class="teleport-switch-row"><span><strong>载具到固定位置</strong><small>仅在原生插件支持坐标载具传送时对商城开放。</small></span><input name="vehicleToFixedLocationEnabled" type="checkbox"></label>
+          <fieldset class="teleport-pricing-mode"><legend>扣款方式</legend><label><input name="vehiclePricingMode" type="radio" value="fixed" required><span>固定价格</span></label><label><input name="vehiclePricingMode" type="radio" value="distance" required><span>距离计价</span></label></fieldset>
+          <div class="teleport-number-grid"><label>每次固定价格<input name="vehicleFixedPrice" type="number" min="0" max="1000000000" required></label><label>每公里价格<input name="vehiclePerKilometerPrice" type="number" min="0" max="1000000000" required></label><label>每日基础次数<input name="vehicleDailyLimit" type="number" min="0" max="1000" required></label><label>载具传送间隔（秒）<input name="vehicleIntervalSeconds" type="number" min="0" max="86400" required></label></div>
+        </section>
+      </div>
+      <div class="teleport-form-actions"><span id="teleportSettingsUpdatedAt">尚未读取</span><button class="btn primary" type="submit">保存全部设置</button></div>
+    </form>
+  </section>
+  <section class="card teleport-fixed-card">
+    <div class="card-head teleport-section-head"><div><span class="teleport-section-index">地图目标</span><h3>角色与载具固定位置</h3><p>列表仅展示已保存内容；启用后由服务端按角色和载具模式分别授权。</p></div><div class="teleport-head-actions"><span id="teleportFixedLocationCount">0 个位置</span><button class="btn primary" id="openTeleportFixedLocation" type="button">新增位置</button></div></div>
+    <div class="teleport-table-intro"><span>启用的位置会显示在商城地图中</span><small>XYZ 坐标仅在服务端保存和解析</small></div>
+    <div class="table-wrap teleport-fixed-table"><table><thead><tr><th>位置名称</th><th>XYZ 坐标</th><th>可见范围</th><th>状态</th><th>排序</th><th>操作</th></tr></thead><tbody id="teleportFixedLocationRows"><tr><td colspan="6" class="empty loading">正在加载固定位置...</td></tr></tbody></table></div>
+  </section>
+  <section class="card teleport-operations-card">
+    <div class="card-head"><div><h3>最近传送记录</h3><p>优先检查“人工复核”状态，确认后再进行线下处理。</p></div><span id="teleportOperationCount">0 条</span></div>
+    <div class="table-wrap"><table><thead><tr><th>状态</th><th>玩家</th><th>目标</th><th>收费</th><th>错误</th><th>时间</th></tr></thead><tbody id="teleportOperationRows"><tr><td colspan="6" class="empty loading">正在加载传送记录...</td></tr></tbody></table></div>
+  </section>
+</section>

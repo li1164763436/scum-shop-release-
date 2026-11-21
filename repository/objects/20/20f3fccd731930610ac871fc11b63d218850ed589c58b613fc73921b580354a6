@@ -1,0 +1,85 @@
+function rowsOf(result) {
+  return Array.isArray(result) && Array.isArray(result[0]) ? result[0] : result;
+}
+
+function sample(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    sampledAt: row.sampledAt,
+    status: row.status,
+    rconOk: row.rconOk === null || row.rconOk === undefined ? null : Boolean(row.rconOk),
+    playerQueryOk: Boolean(row.playerQueryOk),
+    onlineCount: row.onlineCount === null || row.onlineCount === undefined ? null : Number(row.onlineCount),
+    rconLatencyMs: row.rconLatencyMs === null || row.rconLatencyMs === undefined ? null : Number(row.rconLatencyMs),
+    errorCode: row.errorCode || null,
+    errorMessage: row.errorMessage || null
+  };
+}
+
+export class MonitorService {
+  constructor({ db, store, clock = () => Date.now() }) {
+    this.db = db;
+    this.store = store;
+    this.clock = clock;
+  }
+
+  async interval() {
+    return (await this.store.read()).monitoring?.pollIntervalMs || 15000;
+  }
+
+  isStale(sampledAt, interval) {
+    if (!sampledAt) return true;
+    return this.clock() - new Date(sampledAt).getTime() > interval * 2;
+  }
+
+  async overview(workerStatus) {
+    const interval = await this.interval();
+    const fields = 'id, sampled_at AS sampledAt, status, rcon_ok AS rconOk, player_query_ok AS playerQueryOk, online_count AS onlineCount, rcon_latency_ms AS rconLatencyMs, process_uptime_sec AS processUptimeSec, process_rss_bytes AS processRssBytes, process_heap_used_bytes AS processHeapUsedBytes, process_cpu_percent AS processCpuPercent, worker_running AS workerRunning, error_code AS errorCode, error_message AS errorMessage';
+    const latestRows = rowsOf(await this.db.query(`SELECT ${fields} FROM server_monitor_samples ORDER BY sampled_at DESC,id DESC LIMIT 1`));
+    const successRows = rowsOf(await this.db.query(`SELECT ${fields} FROM server_monitor_samples WHERE status='ok' AND player_query_ok=1 ORDER BY sampled_at DESC,id DESC LIMIT 1`));
+    const latest = latestRows[0];
+    const successful = successRows[0];
+    const current = sample(latest);
+    const latestSuccessful = sample(successful);
+    const queryFailed = Boolean(latest && !current.playerQueryOk);
+    const stale = this.isStale(successful?.sampledAt, interval) || queryFailed;
+    return {
+      lastSampledAt: current?.sampledAt || null,
+      lastSuccessAt: latestSuccessful?.sampledAt || null,
+      status: current?.status || null,
+      queryFailed,
+      stale,
+      connected: Boolean(current?.playerQueryOk) && !this.isStale(current?.sampledAt, interval),
+      onlineCount: current?.playerQueryOk && !this.isStale(current?.sampledAt, interval) ? current.onlineCount : 0,
+      rconOk: current?.rconOk ?? null,
+      rconLatencyMs: current?.playerQueryOk ? current.rconLatencyMs : null,
+      latest: current ? { status: current.status, sampledAt: current.sampledAt, rconOk: current.rconOk, playerQueryOk: current.playerQueryOk, errorCode: current.errorCode, errorMessage: current.errorMessage } : null,
+      process: latest ? {
+        uptimeSec: Number(latest.processUptimeSec),
+        rssBytes: Number(latest.processRssBytes),
+        heapUsedBytes: Number(latest.processHeapUsedBytes),
+        cpuPercent: Number(latest.processCpuPercent || 0)
+      } : null,
+      fulfillmentWorkerRunning: latest ? Boolean(latest.workerRunning) : null,
+      collector: typeof workerStatus === 'function' ? workerStatus() : workerStatus
+    };
+  }
+
+  async players() {
+    const interval = await this.interval();
+    const latest = rowsOf(await this.db.query("SELECT id, sampled_at AS sampledAt, status, player_query_ok AS playerQueryOk FROM server_monitor_samples ORDER BY sampled_at DESC,id DESC LIMIT 1"));
+    const current = latest[0];
+    if (!current || !Boolean(current.playerQueryOk) || this.isStale(current.sampledAt, interval)) return { sampledAt: current?.sampledAt || null, connected: false, stale: true, items: [] };
+    const samples = rowsOf(await this.db.query("SELECT id, sampled_at AS sampledAt FROM server_monitor_samples WHERE status='ok' AND player_query_ok=1 ORDER BY sampled_at DESC,id DESC LIMIT 1"));
+    if (!samples[0]) return { sampledAt: null, connected: false, stale: true, items: [] };
+    const rows = rowsOf(await this.db.query("SELECT steam_id AS steamId, character_name AS characterName, steam_name AS steamName, is_admin AS isAdmin, observed_at AS observedAt FROM online_player_snapshots WHERE sample_id=? ORDER BY is_admin DESC,COALESCE(character_name,''),steam_id", [samples[0].id]));
+    return { sampledAt: samples[0].sampledAt, connected: true, stale: false, items: rows.map((row) => ({ ...row, isAdmin: Boolean(row.isAdmin) })) };
+  }
+
+  async events(limit = 50) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
+    const rows = rowsOf(await this.db.query(`SELECT id, steam_id AS steamId, event_type AS eventType, character_name AS characterName, steam_name AS steamName, is_admin AS isAdmin, observed_at AS observedAt, sample_id AS sampleId FROM player_presence_events ORDER BY observed_at DESC,id DESC LIMIT ${safeLimit}`));
+    return rows.map((row) => ({ ...row, isAdmin: Boolean(row.isAdmin) }));
+  }
+}

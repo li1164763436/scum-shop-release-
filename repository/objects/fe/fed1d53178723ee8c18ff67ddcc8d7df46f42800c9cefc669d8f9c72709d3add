@@ -1,0 +1,181 @@
+
+.account-summary-grid { margin-bottom: 10px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+
+
+.account-summary-grid article { min-height: 88px; padding: 14px 16px; display: flex; flex-direction: column; justify-content: center; background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+
+
+.account-summary-grid span, .account-summary-grid small { color: #8792a5; font-size: 12px; }
+
+
+.account-summary-grid strong { margin: 4px 0 2px; color: #202a3c; font-size: 25px; }
+
+
+.account-directory { overflow: hidden; }
+
+
+.account-filter-bar { padding: 12px 14px; display: flex; align-items: center; gap: 8px; background: #fafbfd; border-bottom: 1px solid var(--line); font-size: 14px; }
+
+
+.account-filter-bar input, .account-filter-bar button { font-size: 14px; }
+
+
+.account-filter-bar .result-count { margin-left: auto; }
+.account-filter-bar #openAccountLicenseManagement { margin-left: auto; }
+.account-filter-bar #openAccountLicenseManagement + .result-count { margin-left: 0; }
+
+
+.account-table { min-width: 1050px; font-size: 14px; }
+
+
+.account-table th { font-size: 13px; }
+
+
+.account-table td { padding-top: 13px; padding-bottom: 13px; vertical-align: middle; }
+
+
+.account-table code, .account-table small, .account-table .badge { font-size: 12px; }
+
+
+.account-action { min-height: 33px; padding: 6px 12px; font-size: 14px; }
+
+
+.account-menu { position: fixed; z-index: 80; width: 190px; max-height: calc(100vh - 24px); padding: 6px; overflow-y: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 14px 35px rgba(31, 44, 67, .2); }
+
+
+.account-menu[hidden] { display: none; }
+
+
+.account-menu button { width: 100%; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 5px; color: #46536a; background: transparent; text-align: left; cursor: pointer; }
+
+
+.account-menu button:hover { color: #245fcf; background: #eef4ff; }
+
+
+.account-menu button.danger { color: var(--red); }
+
+
+.account-menu button.danger:hover { background: var(--red-soft); }
+
+
+.account-menu span { height: 1px; margin: 5px 3px; display: block; background: var(--line); }
+
+
+.account-profile { display: grid; gap: 16px; }
+
+
+.account-profile-title { min-height: 58px; padding: 12px 15px; display: flex; align-items: center; justify-content: space-between; gap: 12px; background: linear-gradient(135deg, #f4f8ff, #edf3fc); border: 1px solid #dbe6f5; border-radius: 10px; }
+
+
+.account-profile-title span { color: #253044; font-size: 15px; font-weight: 700; }
+
+
+.account-profile-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+
+
+.account-profile-grid article { min-height: 68px; padding: 11px 12px; display: grid; align-content: center; gap: 4px; background: #f7f9fc; border: 1px solid #e1e7f0; border-radius: 8px; }
+
+
+.account-profile-grid span { color: #7d899c; font-size: 11px; }
+
+
+.account-profile-grid strong { overflow: hidden; color: #354056; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+
+
+.account-profile-grid strong.online { color: #12956f; }
+
+
+.account-profile-grid strong.offline { color: #8b95a5; }
+
+
+.account-profile dl { margin: 0; padding: 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; background: #f7f9fc; border: 1px solid #e1e7f0; border-radius: 10px; }
+
+
+.account-profile dl div { min-height: 55px; padding: 10px 12px; display: grid; grid-template-columns: 86px minmax(0, 1fr); align-items: center; gap: 9px; background: #fff; border: 1px solid #e4e9f1; border-radius: 7px; }
+
+
+.account-profile dt { color: #738096; font-size: 12px; }
+
+
+.account-profile dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #253044; font-weight: 600; }
+.account-profile .account-game-identity { grid-column: 1 / -1; min-height: 68px; align-items: center; background: #f7fbff; border-color: #d8e5f5; }
+.account-game-identity dt { line-height: 1.75; }
+.account-game-identity dd { min-width: 0; display: grid; gap: 3px; }
+.account-game-identity dd strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-game-identity dd code { color: #69758a; font-size: 12px; }
+.account-consumption { display: grid; gap: 12px; }
+.account-consumption-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.account-consumption-summary article { min-height: 70px; padding: 12px 14px; display: grid; align-content: center; gap: 4px; background: #f4f8ff; border: 1px solid #dbe6f5; border-radius: 8px; }
+.account-consumption-summary span { color: #738096; font-size: 12px; }
+.account-consumption-summary strong { color: #253044; font-size: 16px; }
+.account-consumption-table { max-height: 55vh; border: 1px solid #e1e7f0; border-radius: 8px; }
+.centered-modal:has(.account-consumption) .modal { width: min(1120px, 96vw); }
+.centered-modal:has(.account-consumption) .modal-body { padding: 18px; background: #f7f9fc; }
+.centered-modal:has(.account-consumption) #closeModal { display: none; }
+.account-consumption-title-tools { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; }
+.account-consumption-title-tools span { color: #a85159; font-size: 12px; font-weight: 700; }
+.account-consumption-title-tools strong { min-width: 28px; padding: 4px 8px; color: #b63c48; background: #ffedf0; border: 1px solid #f1c6cb; border-radius: 999px; font-size: 12px; text-align: center; }
+.account-consumption-table table { min-width: 940px; table-layout: fixed; }
+.account-consumption-table th { position: sticky; top: 0; z-index: 1; background: #f7f9fc; }
+.account-consumption-table th, .account-consumption-table td { padding: 11px 10px; vertical-align: middle; }
+.account-consumption-table th:nth-child(1) { width: 58px; }
+.account-consumption-table th:nth-child(2) { width: 90px; }
+.account-consumption-table th:nth-child(3) { width: 260px; }
+.account-consumption-table th:nth-child(4) { width: 115px; }
+.account-consumption-table th:nth-child(5) { width: 100px; }
+.account-consumption-table th:nth-child(6) { width: 90px; }
+.account-consumption-table th:nth-child(7) { width: 165px; }
+.account-consumption-index { color: #8792a5; text-align: center; }
+.account-order-copy { max-width: 68px; padding: 4px 7px; overflow: hidden; color: #2f6fed; background: #edf4ff; border: 1px solid #cadcf8; border-radius: 5px; font: 600 12px Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.account-order-copy:hover { color: #fff; background: #2f6fed; border-color: #2f6fed; }
+.account-consumption-items { overflow: hidden; color: #425068; text-overflow: ellipsis; white-space: nowrap; }
+.account-order-status.completed { color: #13795b !important; background: #e7f7f1 !important; border-color: #b9e4d4 !important; }
+.account-order-status.abnormal { color: #b33d49 !important; background: #ffebee !important; border-color: #efc0c6 !important; }
+.account-admin-authorize { display: grid; gap: 13px; }
+.account-admin-authorize-note { padding: 12px 14px; color: #49617f; background: #eef5ff; border: 1px solid #cfdef3; border-radius: 7px; }
+.account-admin-notice { padding: 10px 12px; color: #8b5c10; background: #fff7e6; border: 1px solid #ecd59e; border-radius: 7px; }
+.centered-modal:has(.account-admin-authorize) .modal { width: min(920px, 96vw); }
+.account-admin-permissions { margin: 0; padding: 12px; display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 9px; border: 1px solid #dbe4f0; border-radius: 8px; }
+.account-admin-permissions legend { padding: 0 6px; color: #56647a; font-weight: 700; }
+.account-admin-permission { padding: 9px 10px; display: flex !important; align-items: center; gap: 7px !important; background: #f5f8fc; border: 1px solid #e0e7f1; border-radius: 6px; }
+.account-admin-permission input { width: auto; }
+.account-admin-list { max-height: 42vh; overflow: auto; border: 1px solid #e1e7ef; border-radius: 8px; }
+.account-admin-list table { min-width: 760px; }
+.account-admin-list th { position: sticky; top: 0; z-index: 1; background: #f7f9fc; }
+@media (max-width: 680px) { .account-admin-permissions { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media (max-width: 760px) {
+  .account-profile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .account-profile dl { grid-template-columns: 1fr; }
+  .account-consumption-summary { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  .account-profile dl div { grid-template-columns: 78px minmax(0, 1fr); }
+}
+
+
+.account-reminders { display: grid; gap: 9px; }
+
+
+.account-reminders label { display: grid; gap: 5px; color: #536078; }
+
+
+.account-reminders span { padding: 9px 11px; color: #7d899c; background: #eef4fc; border-radius: 6px; }
+
+
+.account-badges { max-width: 180px; display: flex; flex-wrap: wrap; gap: 5px; }
+.game-role-badge { display: inline-flex !important; align-items: center; gap: 5px; }
+.game-role-badge::before { width: 7px; height: 7px; display: block; border-radius: 50%; background: #8792a3; content: ''; }
+.game-role-badge.admin { color: #7a4d00 !important; background: #fff4d7 !important; border-color: #edcf82 !important; }
+.game-role-badge.admin::before { border-radius: 2px; background: #d79516; transform: rotate(45deg); }
+.game-role-badge.player { color: #596576 !important; background: #f0f2f5 !important; }
+.game-role-badge.player::before { background: #8b96a7; }
+
+
+.account-identity { min-width: 150px; display: grid; gap: 2px; }
+
+
+.account-identity strong { color: #253044; }
+
+
+.account-identity span { color: #168ac5; font-weight: 700; }
+

@@ -1,0 +1,6 @@
+<section class="page" id="page-rewards">
+          <div class="page-toolbar"><div><span class="section-kicker">CHECK-IN &amp; LOYALTY</span><h2>签到管理</h2><p>管理签到与可信累计在线奖励。</p></div><div class="toolbar-actions"><button class="btn secondary" id="reloadRewards" type="button">↻ 刷新</button></div></div>
+          <section class="card reward-rule-card"><div class="card-head"><div><h3>奖励规则</h3><p>签到按天设置，可信累计在线按分钟设置。</p></div><button class="btn primary" data-action="new-reward-rule" type="button">＋ 新建规则</button></div><div class="table-wrap"><table class="reward-rule-table"><thead><tr><th>奖励条件</th><th>达成门槛</th><th>奖励内容</th><th>状态</th><th>操作</th></tr></thead><tbody id="rewardRuleRows"><tr><td colspan="5" class="empty loading">正在加载奖励规则...</td></tr></tbody></table></div></section>
+        </section>
+
+        

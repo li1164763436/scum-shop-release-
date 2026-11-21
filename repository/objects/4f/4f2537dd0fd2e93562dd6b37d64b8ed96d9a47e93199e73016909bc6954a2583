@@ -1,0 +1,346 @@
+async function loadStarterGiftPage() {
+  const [gifts, products, types] = await Promise.all([api('/api/gifts'), api('/api/products'), api('/api/gift-types')]);
+  state.gifts = list(gifts, ['gifts', 'items']);
+  state.products = list(products, ['products', 'items']);
+  Object.keys(giftTypes).forEach((key) => delete giftTypes[key]);
+  list(types).forEach((item) => { giftTypes[item.code] = item.name; });
+  const giftTypeSelect = $('#starterGiftForm').elements.giftType;
+  const selectedType = giftTypeSelect.value;
+  giftTypeSelect.innerHTML = Object.entries(giftTypes).map(([code, name]) => '<option value="' + esc(code) + '">' + esc(name) + '</option>').join('');
+  if (giftTypes[selectedType]) giftTypeSelect.value = selectedType;
+  if (state.selectedGiftId && !state.gifts.some((gift) => Number(gift.id) === Number(state.selectedGiftId))) state.selectedGiftId = null;
+  renderStarterGiftWorkbench();
+}
+const giftTypes = { normal: '普通', private: '私人', title: '称号', squad: '小队', monthly: '月度', weekly: '周度', quarterly: '季度' };
+const giftProductPreviewPageSize = 18;
+let giftProductPreviewPage = 1;
+function currentGift() { return state.gifts.find((gift) => Number(gift.id) === Number(state.selectedGiftId)) || null; }
+function renderStarterGiftList() {
+  $('#starterGiftList').innerHTML = state.gifts.length ? state.gifts.map((gift) => `<button type="button" class="gift-list-item ${Number(gift.id) === Number(state.selectedGiftId) ? 'active' : ''}" data-select-gift="${gift.id}"><strong>#${gift.id} ${esc(gift.name)}</strong><span>${esc(giftTypes[gift.type] || gift.type)}</span><small>${gift.enabled ? '已启用' : '已停用'}</small></button>`).join('') : '<div class="empty">暂无礼包，请点击新增礼包</div>';
+}
+function updateGiftVisibility() {
+  const type = $('#starterGiftForm').elements.giftType.value;
+  $$('[data-gift-private]').forEach((node) => { node.hidden = type !== 'private'; });
+  $$('[data-gift-title]').forEach((node) => { node.hidden = type !== 'title'; });
+  $$('[data-gift-period]').forEach((node) => { node.hidden = !['monthly', 'weekly', 'quarterly'].includes(type); });
+}
+function renderStarterGiftListV2() {
+  const productMap = new Map(state.products.map((product) => [Number(product.id), product]));
+  const day = (value) => {
+    if (!value) return '--';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? '--' : date.toLocaleDateString('zh-CN');
+  };
+  $('#starterGiftList').innerHTML = state.gifts.length ? state.gifts.map((gift) => {
+    const code = String(gift.codes || '').replace(/\s+/g, ' ').trim();
+    const products = (gift.products || []).map((item) => ({ ...item, product: productMap.get(Number(item.productId)) })).filter((item) => item.product);
+    const preview = products.slice(0, 4).map((item) => '<span class="gift-product-thumb">' + (item.product.imagePath ? '<img src="' + esc(item.product.imagePath) + '">' : '<span class="gift-product-saved-placeholder">无图</span>') + '<b>X' + (Number(item.quantity) || 1) + '</b></span>').join('');
+    const typeName = String(giftTypes[gift.type] || gift.type);
+    const resetCycle = gift.resetCycle && gift.resetCycle !== 'none' ? String(gift.resetCycle) : '';
+    const hasResetDetail = Boolean(gift.expiresAt || resetCycle || gift.nextResetAt);
+    const resetDetail = hasResetDetail
+      ? '<b>礼包到期：' + day(gift.expiresAt) + '</b><b>重置周期：' + esc(resetCycle || '--') + '</b><b>下次重置：' + day(gift.nextResetAt) + '</b>'
+      : '<b class="gift-reset-empty">--</b>';
+    return '<div class="gift-list-item ' + (Number(gift.id) === Number(state.selectedGiftId) ? 'active' : '') + '"><strong>#' + gift.id + '</strong><strong>' + esc(gift.name) + '</strong><span class="gift-preview">' + (gift.imagePath ? '<img src="' + esc(gift.imagePath) + '">' : '--') + '</span><span class="gift-type-badge">' + esc(typeName.endsWith('礼包') ? typeName : typeName + '礼包') + '</span><span class="gift-code-preview">' + esc(code ? code.slice(0, 10) + (code.length > 10 ? '…' : '') : '--') + '</span><span class="gift-product-preview">' + preview + (products.length > 4 ? '<i class="gift-product-more">…</i>' : '') + '</span><span class="gift-limit-summary"><b class="gift-limit-total">总：' + number(gift.totalLimit) + '</b><b class="gift-limit-daily">日：' + number(gift.dailyLimit) + '</b></span><span class="gift-price-detail"><b>' + number(gift.price) + '</b><small>商城币</small></span><span>' + number(gift.memberLevel) + '</span><span class="gift-reset-detail">' + resetDetail + '</span><button type="button" class="btn secondary gift-manage-trigger" data-gift-manage="' + gift.id + '" aria-label="管理礼包 ' + esc(gift.name) + '"><span>管理</span><i aria-hidden="true">···</i></button></div>';
+  }).join('') : '<div class="empty">暂无礼包，请点击新增礼包</div>';
+}
+function openStarterGiftModal() {
+  const modal = $('#starterGiftModal');
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  $('#starterGiftForm').elements.giftName.focus();
+}
+function updateGiftImagePreview(path) {
+  $('#giftImagePreview').innerHTML = path ? '<img src="' + esc(path) + '" alt="礼包图片">' : '<span>暂无图片</span>';
+}
+function renderGiftProductPreview() {
+  const items = state.giftProductDraft.map((item) => ({ ...item, product: state.products.find((product) => Number(product.id) === Number(item.productId)) })).filter((item) => item.product);
+  if (!items.length) {
+    giftProductPreviewPage = 1;
+    $('#giftProductCodePreview').innerHTML = '暂无已添加商品';
+    return;
+  }
+  const pageCount = Math.max(1, Math.ceil(items.length / giftProductPreviewPageSize));
+  giftProductPreviewPage = Math.min(pageCount, Math.max(1, giftProductPreviewPage));
+  const start = (giftProductPreviewPage - 1) * giftProductPreviewPageSize;
+  const pageItems = items.slice(start, start + giftProductPreviewPageSize);
+  const cells = pageItems.map((item) => '<span class="gift-product-thumb" title="' + esc(item.product.name || '商品') + '">' + (item.product.imagePath ? '<img src="' + esc(item.product.imagePath) + '" alt="">' : '<i>无图</i>') + '<b>X' + item.quantity + '</b></span>').join('');
+  $('#giftProductCodePreview').innerHTML = '<div class="gift-product-preview-grid">' + cells + '</div><div class="gift-product-preview-pages"><button type="button" data-gift-preview-page="prev"' + (giftProductPreviewPage <= 1 ? ' disabled' : '') + '>上一页</button><span>第 ' + giftProductPreviewPage + ' / ' + pageCount + ' 页 · 共 ' + items.length + ' 项</span><button type="button" data-gift-preview-page="next"' + (giftProductPreviewPage >= pageCount ? ' disabled' : '') + '>下一页</button></div>';
+}
+function openGiftProductPicker() {
+  const selected = new Map(state.giftProductDraft.map((item) => [Number(item.productId), Math.min(1000, Math.max(1, Number(item.quantity) || 1))]));
+  openModal({ title: '管理礼包商品', description: '选择礼包商品并设置发放数量。', submitText: '确认选择', body: '<div class="gift-product-picker-layout"><section class="gift-product-picker-main"><div class="gift-product-picker-panel-title"><div><h3>商品选择</h3><small>每页显示16个商品</small></div><span>' + state.products.length + ' 个商品</span></div><div class="gift-product-picker-search"><input type="search" placeholder="搜索商品名称"><button class="btn secondary" type="button">搜索</button></div><div class="gift-product-picker-list"></div><div class="gift-product-picker-pages"><button type="button" data-gift-page-prev>上一页</button><span data-gift-page-info></span><button type="button" data-gift-page-next>下一页</button></div></section><aside class="gift-product-picker-selected"><div class="gift-product-picker-panel-title"><div><h3>已选清单</h3><small>每页显示5条</small></div><span data-gift-selected-count>0 项</span></div><div class="gift-product-picker-selected-list"></div><div class="gift-product-picker-pages gift-product-picker-selected-pages"><button type="button" data-selected-page-prev>上一页</button><span data-selected-page-info></span><button type="button" data-selected-page-next>下一页</button></div></aside></div>', onSubmit: async () => { state.giftProductDraft = [...selected].map(([productId, quantity]) => ({ productId, quantity })); giftProductPreviewPage = 1; renderGiftProductPreview(); closeModal(); } });
+  $('#modalBackdrop').classList.add('gift-product-picker-backdrop', 'centered-modal', 'modal-static-backdrop');
+  const form = $('#modalForm');
+  const pageSize = 16;
+  const pageCount = Math.max(1, Math.ceil(state.products.length / pageSize));
+  let productPage = 1;
+  const selectedPageSize = 5;
+  let selectedPage = 1;
+  const renderProductPage = () => {
+    const start = (productPage - 1) * pageSize;
+    $('.gift-product-picker-list', form).innerHTML = state.products.slice(start, start + pageSize).map((product) => '<label class="gift-product-picker-item' + (selected.has(Number(product.id)) ? ' active' : '') + '">' + (product.imagePath ? '<img src="' + esc(product.imagePath) + '">' : '<span class="gift-product-picker-placeholder">无图</span>') + '<input type="checkbox" name="giftProductId" value="' + product.id + '"' + (selected.has(Number(product.id)) ? ' checked' : '') + ' hidden></label>').join('');
+    $('[data-gift-page-info]', form).textContent = '第 ' + productPage + ' / ' + pageCount + ' 页';
+    $('[data-gift-page-prev]', form).disabled = productPage <= 1;
+    $('[data-gift-page-next]', form).disabled = productPage >= pageCount;
+  };
+  const syncSelected = () => {
+    $('[data-gift-selected-count]', form).textContent = selected.size + ' 项';
+    const selectedEntries = [...selected];
+    const selectedPageCount = Math.max(1, Math.ceil(selectedEntries.length / selectedPageSize));
+    selectedPage = Math.min(selectedPage, selectedPageCount);
+    const selectedStart = (selectedPage - 1) * selectedPageSize;
+    $('.gift-product-picker-selected-list', form).innerHTML = selected.size ? selectedEntries.slice(selectedStart, selectedStart + selectedPageSize).map(([productId, quantity]) => {
+      const product = state.products.find((item) => Number(item.id) === productId);
+      return '<div class="gift-product-picker-selected-item">' + (product?.imagePath ? '<img src="' + esc(product.imagePath) + '">' : '<span>无图</span>') + '<div><strong>' + esc(product?.name || product?.sku || productId) + '</strong><div class="gift-product-picker-selected-actions"><label>数量<input type="number" min="1" max="1000" value="' + quantity + '" data-selected-quantity="' + productId + '"></label><button type="button" data-remove-selected-product="' + productId + '">移除</button></div></div></div>';
+    }).join('') : '<div class="gift-product-picker-selected-empty">暂未选择商品</div>';
+    $('[data-selected-page-info]', form).textContent = '第 ' + selectedPage + ' / ' + selectedPageCount + ' 页';
+    $('[data-selected-page-prev]', form).disabled = selectedPage <= 1;
+    $('[data-selected-page-next]', form).disabled = selectedPage >= selectedPageCount;
+  };
+  form.addEventListener('change', (event) => {
+    if (event.target.name === 'giftProductId') {
+      const productId = Number(event.target.value);
+      if (event.target.checked) { selected.set(productId, selected.get(productId) || 1); selectedPage = Math.ceil(selected.size / selectedPageSize); } else selected.delete(productId);
+      event.target.closest('.gift-product-picker-item')?.classList.toggle('active', event.target.checked);
+      syncSelected();
+    }
+    const selectedId = event.target.dataset.selectedQuantity;
+    if (selectedId) selected.set(Number(selectedId), Math.min(1000, Math.max(1, Number(event.target.value) || 1)));
+  });
+  form.addEventListener('click', (event) => {
+    const id = event.target.closest('[data-remove-selected-product]')?.dataset.removeSelectedProduct;
+    if (!id) return;
+    selected.delete(Number(id));
+    const input = form.querySelector('input[name="giftProductId"][value="' + CSS.escape(id) + '"]');
+    if (input) input.checked = false;
+    syncSelected();
+  });
+  $('[data-gift-page-prev]', form).addEventListener('click', () => { productPage = Math.max(1, productPage - 1); renderProductPage(); });
+  $('[data-gift-page-next]', form).addEventListener('click', () => { productPage = Math.min(pageCount, productPage + 1); renderProductPage(); });
+  $('[data-selected-page-prev]', form).addEventListener('click', () => { selectedPage = Math.max(1, selectedPage - 1); syncSelected(); });
+  $('[data-selected-page-next]', form).addEventListener('click', () => { selectedPage += 1; syncSelected(); });
+  renderProductPage();
+  syncSelected();
+}
+async function openGiftTypeSettings(draftTypes) {
+  const types = Array.isArray(draftTypes) ? draftTypes.slice() : list(await api('/api/gift-types'));
+  openModal({ title: '礼包类型设置', description: '查看现有类型并添加自定义礼包类型。', submitText: '保存', body: '<div class="gift-type-settings"><section class="gift-type-settings-card"><div class="gift-type-settings-head"><div><h3>现有类型</h3><small>共 ' + types.length + ' 个礼包类型</small></div><span>' + types.length + ' 项</span></div><div class="gift-type-settings-list">' + types.map((item, index) => '<div class="gift-type-settings-item"><b>' + esc(item.name) + '</b><div class="gift-type-settings-actions"><button type="button" data-gift-type-move="up" data-code="' + esc(item.code) + '"' + (index === 0 ? ' disabled' : '') + '>上移</button><button type="button" data-gift-type-move="down" data-code="' + esc(item.code) + '"' + (index === types.length - 1 ? ' disabled' : '') + '>下移</button><button type="button" data-gift-type-edit="' + esc(item.code) + '" data-name="' + esc(item.name) + '">编辑</button><button type="button" class="danger" data-gift-type-delete="' + esc(item.code) + '">删除</button></div></div>').join('') + '</div></section><section class="gift-type-settings-card gift-type-settings-create"><div class="gift-type-settings-head"><div><h3>新增类型</h3><small>填写新的礼包类型名称</small></div></div><label>类型名称<input name="name" maxlength="40" placeholder="请输入礼包类型名称"><small>保存后可在礼包类型选项中使用</small></label><div class="gift-type-create-actions"><button type="button" class="btn primary" data-gift-type-add>新增类型</button></div></section></div>', onSubmit: async () => {
+    const saved = list(await api('/api/gift-types'));
+    for (let index = 0; index < types.length; index++) {
+      let current = saved.findIndex((item) => item.code === types[index].code);
+      while (current > index) {
+        await api('/api/gift-types/' + encodeURIComponent(types[index].code) + '/move', { method: 'PATCH', body: JSON.stringify({ direction: 'up' }) });
+        [saved[current - 1], saved[current]] = [saved[current], saved[current - 1]];
+        current--;
+      }
+    }
+    closeModal(); await loadStarterGiftPage();
+  } });
+  $('#modalBackdrop').classList.add('gift-type-settings-modal', 'centered-modal', 'modal-static-backdrop');
+  $('#modalForm').onclick = async (event) => {
+    const move = event.target.closest('[data-gift-type-move]');
+    if (move) {
+      const index = types.findIndex((item) => item.code === move.dataset.code);
+      const target = index + (move.dataset.giftTypeMove === 'up' ? -1 : 1);
+      if (index < 0 || target < 0 || target >= types.length) return;
+      [types[index], types[target]] = [types[target], types[index]];
+      const row = move.closest('.gift-type-settings-item');
+      if (target < index) row.previousElementSibling.before(row); else row.nextElementSibling.after(row);
+      $('.gift-type-settings-item', $('#modalForm')).forEach((item, position) => {
+        $('[data-gift-type-move="up"]', item).disabled = position === 0;
+        $('[data-gift-type-move="down"]', item).disabled = position === types.length - 1;
+      });
+      return;
+    }
+    const add = event.target.closest('[data-gift-type-add]');
+    if (add) {
+      const input = $('#modalForm').elements.name;
+      if (!input.value.trim()) { input.focus(); return; }
+      await withBusy(add, async () => {
+        const item = await api('/api/gift-types', { method: 'POST', body: JSON.stringify({ name: input.value.trim() }) });
+        types.push(item);
+        closeModal(); await loadStarterGiftPage(); await openGiftTypeSettings(types);
+      });
+      return;
+    }
+    const edit = event.target.closest('[data-gift-type-edit]');
+    if (edit) { openGiftTypeEdit(edit.dataset.giftTypeEdit, edit.dataset.name); return; }
+    const remove = event.target.closest('[data-gift-type-delete]');
+    if (remove) openGiftTypeDelete(remove.dataset.giftTypeDelete);
+  };
+}
+function openGiftTypeEdit(code, currentName) {
+  closeModal();
+  openModal({ title: '编辑礼包类型', description: '修改礼包类型名称。', submitText: '保存修改', body: '<label class="full">类型名称<input name="name" required maxlength="40" value="' + esc(currentName) + '" placeholder="请输入礼包类型名称"></label>', onSubmit: async (form) => { await api('/api/gift-types/' + encodeURIComponent(code), { method: 'PUT', body: JSON.stringify({ name: form.elements.name.value.trim() }) }); closeModal(); await loadStarterGiftPage(); await openGiftTypeSettings(); } });
+  $('#modalBackdrop').classList.add('centered-modal', 'gift-type-action-modal', 'modal-static-backdrop');
+}
+function openGiftTypeDelete(code) {
+  closeModal();
+  openModal({ title: '删除礼包类型', description: '此操作无法撤销，请确认类型信息。', submitText: '确认删除', body: '<div class="gift-delete-confirm"><span>!</span><div><strong>确认删除该礼包类型吗？</strong><p>正在使用该类型时可能无法删除，请先检查关联礼包。</p></div></div>', onSubmit: async () => { await api('/api/gift-types/' + encodeURIComponent(code), { method: 'DELETE' }); closeModal(); await loadStarterGiftPage(); await openGiftTypeSettings(); } });
+  $('#modalBackdrop').classList.add('centered-modal', 'gift-type-action-modal', 'modal-static-backdrop');
+  $('#submitModal').classList.add('danger');
+}
+async function openGiftManage(id, anchor) {
+  const gift = state.gifts.find((item) => Number(item.id) === Number(id));
+  if (!gift) return;
+  $('.gift-manage-menu')?.remove();
+  const menu = document.createElement('div');
+  menu.className = 'gift-manage-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', '礼包管理操作');
+  const statusText = gift.enabled ? '当前已上架' : '当前已停用';
+  const statusAction = gift.enabled ? '禁用礼包' : '启用礼包';
+  const statusDescription = gift.enabled ? '暂停玩家领取，保留历史记录' : '恢复礼包展示与领取功能';
+  menu.innerHTML = '<div class="gift-manage-menu-head"><span class="gift-manage-menu-mark">礼</span><div><strong>' + esc(gift.name || '未命名礼包') + '</strong><small>礼包 #' + esc(gift.id) + ' · ' + statusText + '</small></div></div><div class="gift-manage-menu-actions"><button type="button" class="edit" role="menuitem" data-gift-action="edit" data-id="' + id + '"><span class="gift-manage-menu-icon">✎</span><span><b>编辑礼包</b><small>修改内容、限制和展示设置</small></span><i>›</i></button><button type="button" class="status ' + (gift.enabled ? 'disable' : 'enable') + '" role="menuitem" data-gift-action="status" data-id="' + id + '"><span class="gift-manage-menu-icon">' + (gift.enabled ? 'Ⅱ' : '▶') + '</span><span><b>' + statusAction + '</b><small>' + statusDescription + '</small></span><i>›</i></button><button type="button" class="danger" role="menuitem" data-gift-action="delete" data-id="' + id + '"><span class="gift-manage-menu-icon">×</span><span><b>删除礼包</b><small>永久删除礼包及关联配置</small></span><i>›</i></button></div><div class="gift-manage-menu-foot">点击菜单外空白区域即可关闭</div>';
+  document.body.append(menu);
+  const rect = anchor.getBoundingClientRect();
+  const left = Math.min(window.innerWidth - menu.offsetWidth - 8, Math.max(8, rect.right - menu.offsetWidth));
+  const below = rect.bottom + 8;
+  const above = rect.top - menu.offsetHeight - 8;
+  const top = below + menu.offsetHeight <= window.innerHeight - 8 ? below : Math.max(8, above);
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+document.addEventListener('click', (event) => {
+  if (event.target.closest('[data-gift-manage], .gift-manage-menu')) return;
+  $('.gift-manage-menu')?.remove();
+});
+
+function closeStarterGiftModal() {
+  const modal = $('#starterGiftModal');
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+}
+async function selectGift(id) {
+  state.selectedGiftId = Number(id);
+  const detail = await api(`/api/gifts/${encodeURIComponent(id)}`);
+  const index = state.gifts.findIndex((gift) => Number(gift.id) === Number(id));
+  if (index >= 0) state.gifts[index] = detail;
+  renderStarterGiftWorkbench();
+  openStarterGiftModal();
+}
+function renderStarterGiftWorkbench() {
+  const gift = currentGift();
+  const form = $('#starterGiftForm').elements;
+  form.giftId.value = gift?.id || '';
+  form.giftName.value = gift?.name || '';
+  form.giftType.value = gift?.type || 'normal';
+  form.description.value = gift?.description || '';
+  form.targetSteamId.value = gift?.targetSteamId || '';
+  form.requiredTitle.value = gift?.requiredTitle || '';
+  form.memberLevel.value = gift?.memberLevel ?? 0;
+  form.memberMode.value = gift?.memberMode || 'minimum';
+  form.totalLimit.value = gift?.totalLimit ?? 1;
+  form.dailyLimit.value = gift?.dailyLimit ?? 1;
+  form.periodLimit.value = gift?.periodLimit ?? 1;
+  form.price.value = gift?.price ?? 0;
+  form.codes.value = gift?.codes || '';
+  form.imagePath.value = gift?.imagePath || '';
+  form.expiresAt.value = localInput(gift?.expiresAt);
+  form.nextResetAt.value = localInput(gift?.nextResetAt);
+  form.resetDays.value = gift?.resetCycle && gift.resetCycle !== 'none' ? gift.resetCycle : '';
+  state.giftProductDraft = (gift?.products || []).map((item) => ({ productId: Number(item.productId), quantity: Number(item.quantity) || 1 }));
+  giftProductPreviewPage = 1;
+  form.enabled.checked = gift ? Boolean(gift.enabled) : true;
+  $('#giftEditorTitle').textContent = gift ? `编辑礼包 #${gift.id}` : '新增礼包';
+  if ($('#deleteStarterGift')) $('#deleteStarterGift').disabled = !gift;
+  updateGiftVisibility();
+  updateGiftImagePreview(form.imagePath.value);
+  renderGiftProductPreview();
+  renderStarterGiftListV2();
+}
+function refreshStarterGiftProductData() { if (state.page === 'starter-gift') renderStarterGiftListV2(); }
+$('#starterGiftForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  await withBusy(event.submitter, async () => {
+    const f = event.currentTarget.elements;
+    const id = f.giftId.value;
+    const body = { name: f.giftName.value.trim(), type: f.giftType.value, description: f.description.value.trim(), imagePath: f.imagePath.value.trim(), expiresAt: f.expiresAt.value || null, nextResetAt: f.nextResetAt.value || null, resetCycle: f.resetDays.value || null, targetSteamId: f.targetSteamId.value.trim(), requiredTitle: f.requiredTitle.value.trim(), memberLevel: Number(f.memberLevel.value), memberMode: f.memberMode.value, totalLimit: Number(f.totalLimit.value), dailyLimit: Number(f.dailyLimit.value), periodLimit: Number(f.periodLimit.value), price: Number(f.price.value), enabled: f.enabled.checked, codes: f.codes.value, products: state.giftProductDraft };
+    const saved = await api(id ? `/api/gifts/${encodeURIComponent(id)}` : '/api/gifts', { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) });
+    state.selectedGiftId = saved.id;
+    toast(id ? '礼包已更新' : '礼包已创建');
+    closeStarterGiftModal();
+    await loadStarterGiftPage();
+  });
+});
+
+$('#addStarterGift').addEventListener('click', () => { state.selectedGiftId = null; renderStarterGiftWorkbench(); openStarterGiftModal(); });
+
+$('#giftTypeSettings').addEventListener('click', openGiftTypeSettings);
+
+$('#closeStarterGiftModal').addEventListener('click', closeStarterGiftModal);
+
+$('#cancelStarterGiftModal').addEventListener('click', closeStarterGiftModal);
+
+$('#starterGiftModal').addEventListener('click', (event) => {
+  if (event.target !== event.currentTarget) return;
+  event.preventDefault();
+  event.stopPropagation();
+});
+
+$('#starterGiftForm').addEventListener('change', (event) => { if (event.target.name === 'giftType') updateGiftVisibility(); });
+
+$('#starterGiftForm').addEventListener('click', (event) => {
+  const previewPage = event.target.closest('[data-gift-preview-page]');
+  if (previewPage) {
+    giftProductPreviewPage += previewPage.dataset.giftPreviewPage === 'next' ? 1 : -1;
+    renderGiftProductPreview();
+    return;
+  }
+  if (event.target.closest('[data-manage-gift-product]')) openGiftProductPicker();
+  if (event.target.closest('[data-upload-gift-image]')) $('#giftImageFile').click();
+});
+
+$('#giftImageFile').addEventListener('change', async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  const form = $('#starterGiftForm').elements;
+  const query = new URLSearchParams({ giftType: form.giftType.value, giftName: form.giftName.value.trim() });
+  const path = await uploadImage(file, '/api/gifts/image?' + query);
+  form.imagePath.value = path;
+  updateGiftImagePreview(path);
+  event.target.value = '';
+});
+
+
+
+$('#deleteStarterGift')?.addEventListener('click', async () => {
+  const gift = currentGift();
+  if (!gift || !window.confirm(`确认永久删除礼包“${gift.name}”？所有相关数据将被永久删除，且无法恢复。`)) return;
+  await api(`/api/gifts/${encodeURIComponent(gift.id)}`, { method: 'DELETE' });
+  toast('礼包已永久删除');
+  closeStarterGiftModal();
+  state.selectedGiftId = null;
+  await loadStarterGiftPage();
+});
+
+async function handleGiftClick(event) {
+  const manageGiftId = event.target.closest('[data-gift-manage]')?.dataset.giftManage;
+  if (manageGiftId) { event.preventDefault(); event.stopPropagation(); await openGiftManage(manageGiftId, event.target.closest('[data-gift-manage]')); return true; }
+  const giftAction = event.target.closest('[data-gift-action]');
+  if (giftAction) {
+    $('.gift-manage-menu')?.remove();
+    const id = giftAction.dataset.id;
+    if (giftAction.dataset.giftAction === 'status') {
+      const gift = state.gifts.find((item) => Number(item.id) === Number(id));
+      if (!gift) { toast('礼包不存在或已刷新', true); return true; }
+      await withBusy(giftAction, async () => {
+        await api('/api/gifts/' + encodeURIComponent(id) + '/status', { method: 'PATCH', body: JSON.stringify({ enabled: !gift.enabled }) });
+        toast(gift.enabled ? '礼包已禁用' : '礼包已启用');
+        await loadStarterGiftPage();
+      });
+      return true;
+    }
+    const gift = await api('/api/gifts/' + encodeURIComponent(id));
+    if (giftAction.dataset.giftAction === 'edit') { closeModal(); state.selectedGiftId = Number(id); const index = state.gifts.findIndex((item) => Number(item.id) === Number(id)); if (index >= 0) state.gifts[index] = gift; renderStarterGiftWorkbench(); openStarterGiftModal(); }
+    if (giftAction.dataset.giftAction === 'delete') {
+      openModal({ title: '删除礼包', description: '此操作无法撤销，请确认礼包信息。', submitText: '确认删除', body: '<div class="gift-delete-confirm"><span>!</span><div><strong>确认删除“' + esc(gift.name) + '”吗？</strong><p>礼包配置、关联内容及后续领取入口将被删除，历史记录不会因此恢复。</p></div></div>', onSubmit: async () => { await api('/api/gifts/' + id, { method: 'DELETE' }); toast('礼包已删除'); closeModal(); await loadStarterGiftPage(); } });
+      $('#modalBackdrop').classList.add('centered-modal', 'gift-type-action-modal', 'modal-static-backdrop');
+      $('#submitModal').classList.add('danger');
+    }
+    return true;
+  }
+  const giftId = event.target.closest('[data-select-gift]')?.dataset.selectGift;
+  if (giftId !== undefined) await selectGift(giftId);
+}

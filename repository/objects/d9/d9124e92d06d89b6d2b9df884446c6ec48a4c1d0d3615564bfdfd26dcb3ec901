@@ -1,0 +1,77 @@
+const CHAT_PARSER_VERSION = 'v1';
+const CHAT_LINE = /^(\d{4})\.(\d{2})\.(\d{2})-(\d{2})\.(\d{2})\.(\d{2}): '(\d{17}):([^'\r\n]+)\(([1-9]\d*)\)' '(Global|Local|Squad|Admin): ([^'\r\n]*)'$/;
+const CLAIM_PREFIX = '@';
+const CLAIM_COMMAND = '领取';
+
+function shanghaiDate(parts) {
+  const [year, month, day, hour, minute, second] = parts.map(Number);
+  const value = new Date(Date.UTC(year, month - 1, day, hour - 8, minute, second));
+  const shifted = new Date(value.getTime() + 8 * 3600000);
+  if (shifted.getUTCFullYear() !== year || shifted.getUTCMonth() !== month - 1 || shifted.getUTCDate() !== day || shifted.getUTCHours() !== hour || shifted.getUTCMinutes() !== minute || shifted.getUTCSeconds() !== second) return null;
+  return value;
+}
+
+export function parseChatClaimCommand(message, claimPrefix = CLAIM_PREFIX) {
+  const text = String(message ?? '').trim();
+  const prefix = String(claimPrefix || CLAIM_PREFIX);
+  const commandPrefix = prefix + CLAIM_COMMAND;
+  if (!text.startsWith(commandPrefix)) return null;
+  const suffix = text.slice(commandPrefix.length);
+  if (!suffix || suffix.length > 101 || /[\r\n]/.test(suffix)) return null;
+  const target = suffix.startsWith(' ') ? suffix.slice(1) : suffix;
+  if (!target || target.length > 100 || target.trim() !== target) return null;
+  if (/^[1-9]\d*$/.test(target)) {
+    if (target.length > 16 || BigInt(target) > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    return { type: 'id', giftId: target, target, normalized: `${commandPrefix}${target}` };
+  }
+  if (/^[+-]?\d/.test(target)) return null;
+  return { type: 'name', giftName: target, target, normalized: `${commandPrefix}${target}` };
+}
+
+export function parseChatRecycleCommand(message, claimPrefix = CLAIM_PREFIX, recycleCommand = '回收') {
+  const text = String(message ?? '').trim();
+  const commandPrefix = String(claimPrefix || CLAIM_PREFIX) + String(recycleCommand || '回收').trim();
+  if (!commandPrefix || !text.startsWith(`${commandPrefix} `)) return null;
+  const target = text.slice(commandPrefix.length + 1);
+  if (!target || target.length > 16 || /[\r\n]/.test(target)) return null;
+  if (!/^[1-9]\d{0,15}$/.test(target) || BigInt(target) > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return { type: 'recycle', itemId: target, target, normalized: `${commandPrefix} ${target}` };
+}
+
+export function isIgnorableChatLine(line) {
+  const text = String(line || '').replace(/\u0000/g, '').trim();
+  if (!text) return true;
+  return /^(?:log\s*)?version\b/i.test(text)
+    || /^version\s*[:=]/i.test(text)
+    || /^\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}:\s*Game version:\s*\S+$/i.test(text);
+}
+
+export function parseChatLogLine(line, { claimPrefix = CLAIM_PREFIX, recycleCommand = '回收' } = {}) {
+  const text = String(line || '').replace(/\u0000/g, '');
+  if (isIgnorableChatLine(text)) return { type: 'ignored' };
+  const match = text.match(CHAT_LINE);
+  if (!match) return { type: 'unknown', reason: 'unsupported_format' };
+  const eventTime = shanghaiDate(match.slice(1, 7));
+  if (!eventTime) return { type: 'unknown', reason: 'invalid_event_time' };
+  const playerName = match[8].trim();
+  if (!playerName || playerName.length > 255) return { type: 'unknown', reason: 'invalid_player_name' };
+  const message = match[11];
+  if (message.length > 4000) return { type: 'unknown', reason: 'message_too_long' };
+  const command = parseChatRecycleCommand(message, claimPrefix, recycleCommand) || parseChatClaimCommand(message, claimPrefix);
+  return {
+    type: 'event',
+    event: {
+      eventTime,
+      steamId: match[7],
+      playerName,
+      characterNumber: Number(match[9]),
+      channel: match[10],
+      message,
+      command,
+      parseStatus: command ? 'claim_command' : 'not_command',
+      parserVersion: CHAT_PARSER_VERSION
+    }
+  };
+}
+
+export { CHAT_PARSER_VERSION, CHAT_LINE };

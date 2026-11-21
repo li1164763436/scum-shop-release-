@@ -1,0 +1,19 @@
+@echo off
+chcp 65001 >nul
+if exist "%~dp0scripts\ScumShopLauncher.exe" copy /y "%~dp0scripts\ScumShopLauncher.exe" "%~dp0ScumShopLauncher.exe" >nul
+if exist "%~dp0ScumShopLauncher.exe" (
+  start "" "%~dp0ScumShopLauncher.exe"
+  exit /b 0
+)
+set "SCRIPT=%~dp0scripts\control-services.ps1"
+if not exist "%SCRIPT%" (
+  echo 错误：找不到控制台脚本："%SCRIPT%"
+  pause
+  exit /b 1
+)
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%"
+if errorlevel 1 (
+  echo.
+  echo SCUM 商城控制台启动失败，请查看上方错误信息。
+  pause
+)

@@ -1,0 +1,134 @@
+const ANSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const ERROR_PATTERN = /(?:^|\n)\s*ERROR:|_error=|unknown\s+command|command\s+not\s+found|not\s+authorized|unauthorized|authentication\s+failed|access\s+denied|player\s+not\s+found|执行失败|命令失败|未授权|没有权限/i;
+
+export function assertScumRconSuccess(response) {
+  const text = String(response ?? '').replace(ANSI_PATTERN, '');
+  if (ERROR_PATTERN.test(text)) {
+    const error = new Error(`SCUM RCON 命令失败：${text.trim().slice(0, 300)}`);
+    error.code = 'RCON_COMMAND_FAILED';
+    error.uncertainDelivery = /result unknown|command timed out waiting for the SCUM game thread/i.test(text);
+    error.teleportPlayerArrived = /player reached the authorized saved vehicle location, but vehicle \d+ did not load within the verification window/i.test(text)
+      && /(?:^|[;\s])vehicle_load_pending=true(?:[;\s]|$)/i.test(text);
+    throw error;
+  }
+  return text;
+}
+
+function keyValueFields(text) {
+  return Object.fromEntries(String(text).replace(/\r\n?/g, '\n').split('\n').map((line) => {
+    const separator = line.indexOf('=');
+    return separator < 1 ? [] : [line.slice(0, separator).trim().toLowerCase(), line.slice(separator + 1).trim()];
+  }).filter((parts) => parts.length === 2));
+}
+
+export function parseTeleportCoordinateResult(response, expected = {}) {
+  const text = assertScumRconSuccess(response);
+  const fields = keyValueFields(text);
+  const requiredNumericNames = ['requested_b_x', 'requested_b_y', 'actual_b_x', 'actual_b_y', 'position_error_xy'];
+  const optionalNumericNames = ['requested_b_z', 'actual_b_z', 'position_error_z'];
+  const values = Object.fromEntries([...requiredNumericNames, ...optionalNumericNames].map((name) => [name, Number(fields[name])]));
+  if (fields.teleport_verified !== 'true' || requiredNumericNames.some((name) => fields[name] === undefined || !Number.isFinite(values[name]))) {
+    throw Object.assign(new Error('坐标传送返回缺少严格平面落点验证字段'), { code: 'TELEPORT_VERIFICATION_INVALID' });
+  }
+  for (const axis of ['x', 'y']) {
+    const requested = values[`requested_b_${axis}`];
+    const wanted = Number(expected[axis]);
+    if (!Number.isFinite(wanted) || Math.abs(requested - wanted) > 0.01) {
+      throw Object.assign(new Error('坐标传送返回的请求平面落点与商城发送值不一致'), { code: 'TELEPORT_REQUEST_MISMATCH' });
+    }
+  }
+  if (values.position_error_xy < 0 || values.position_error_xy > 200) {
+    throw Object.assign(new Error('坐标传送实际平面落点超出允许误差'), { code: 'TELEPORT_POSITION_ERROR' });
+  }
+  const calculatedXY = Math.hypot(values.actual_b_x - values.requested_b_x, values.actual_b_y - values.requested_b_y);
+  if (Math.abs(calculatedXY - values.position_error_xy) > 0.02) {
+    throw Object.assign(new Error('坐标传送平面落点误差字段不一致'), { code: 'TELEPORT_VERIFICATION_INVALID' });
+  }
+  const optionalNumber = (name) => fields[name] !== undefined && Number.isFinite(values[name]) ? values[name] : null;
+  return {
+    requested: { x: values.requested_b_x, y: values.requested_b_y, z: optionalNumber('requested_b_z') },
+    actual: { x: values.actual_b_x, y: values.actual_b_y, z: optionalNumber('actual_b_z') },
+    errorXY: values.position_error_xy,
+    errorZ: optionalNumber('position_error_z'),
+    verified: true
+  };
+}
+
+export function parseVehicleTeleportResult(response, expected = {}) {
+  const text = assertScumRconSuccess(response).replace(/\r\n?/g, '\n').trim();
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+  const fields = {};
+  let invalid = lines[0] !== 'vehicle_teleport=ok';
+  for (const line of lines) {
+    const separator = line.indexOf('=');
+    if (separator < 1) { invalid = true; continue; }
+    const key = line.slice(0, separator).trim().toLowerCase();
+    if (Object.hasOwn(fields, key)) invalid = true;
+    fields[key] = line.slice(separator + 1).trim();
+  }
+  const vehicleEntityId = Number(fields.vehicle_entity_id);
+  const targetSteamId = String(fields.target_steam_id || '');
+  const coordinates = { x: Number(fields.x), y: Number(fields.y), z: Number(fields.z) };
+  if (invalid
+    || fields.vehicle_teleport !== 'ok'
+    || fields.mode !== String(expected.mode || '')
+    || !Number.isSafeInteger(vehicleEntityId)
+    || vehicleEntityId !== Number(expected.vehicleEntityId)
+    || targetSteamId !== String(expected.targetSteamId || '')
+    || !Object.values(coordinates).every((value) => Number.isFinite(value) && Math.abs(value) <= 10_000_000)
+    || fields.source !== 'typed_private_adapter_callback') {
+    throw Object.assign(new Error('载具传送返回缺少完整或一致的实时验证字段'), { code: 'VEHICLE_TELEPORT_VERIFICATION_INVALID' });
+  }
+  return { mode: fields.mode, vehicleEntityId, targetSteamId, ...coordinates, source: fields.source, verified: true, raw: text };
+}
+
+export function parsePlayerEconomy(response, steamId) {
+  const text = assertScumRconSuccess(response).replace(/\r\n?/g, '\n');
+  const fields = Object.fromEntries(text.split('\n').map((line) => line.split('=').map((value) => value.trim())).filter((parts) => parts.length === 2));
+  if (fields.steam_id !== String(steamId) || !/^-?\d+$/.test(fields.money || '') || !/^-?\d+$/.test(fields.gold || '') || !Number.isSafeInteger(Number(fields.money)) || !Number.isSafeInteger(Number(fields.gold))) {
+    throw Object.assign(new Error('游戏资产查询返回数据无效'), { code: 'RCON_ECONOMY_INVALID' });
+  }
+  return { money: Number(fields.money), gold: Number(fields.gold) };
+}
+
+export function parseListPlayers(response) {
+  const text = assertScumRconSuccess(response).replace(/\r\n?/g, '\n');
+  const players = new Map();
+  let currentSteamId = '';
+  let pendingMoney;
+  let pendingGold;
+  for (const line of text.split('\n')) {
+    const native = /^player=\d+,name=([^,]*),steam_id=(7656119\d{10}),object=/i.exec(line);
+    if (native) {
+      players.set(native[2], { steamId: native[2], characterName: native[1] === '<unavailable>' ? '' : native[1], steamName: '', isAdmin: false, money: null, gold: null });
+      currentSteamId = native[2];
+      continue;
+    }
+    const money = line.match(/(?:^|[|,\s])(?:account\s+balance|money|cash|credits?)\s*(?:=|:)\s*(-?\d+(?:[,.]\d+)?)/i)?.[1]?.replace(',', '.');
+    const gold = line.match(/(?:^|[|,\s])(?:gold\s+balance|gold|gold\s+bars?)\s*(?:=|:)\s*(-?\d+(?:[,.]\d+)?)/i)?.[1]?.replace(',', '.');
+    const matches = [...line.matchAll(/(?<!\d)(7656119\d{10})(?!\d)/g)];
+    for (const match of matches) {
+      const steamId = match[1];
+      currentSteamId = steamId;
+      let before = line.slice(0, match.index).trim().replace(/^[\s#*|,;:\-\d.)\]]+/, '').replace(/(?:steam|steamid)\s*=\s*$/i, '').trim();
+      let after = line.slice(match.index + steamId.length).trim().replace(/^[\s|,;:\-\])]+/, '').trim();
+      const fields = before.split(/\s*[,|]\s*/).filter((field) => field && !/^player$/i.test(field));
+      const characterName = (fields.at(-1) || after.split(/\s*[,|]\s*/).filter(Boolean)[0] || '').replace(/\s*\($/, '').trim();
+      const previous = players.get(steamId);
+      players.set(steamId, { steamId, characterName: characterName || previous?.characterName || '', steamName: previous?.steamName || '', isAdmin: previous?.isAdmin || /\badmin\b|管理员/i.test(line), money: money === undefined ? pendingMoney ?? previous?.money ?? null : Number(money), gold: gold === undefined ? pendingGold ?? previous?.gold ?? null : Number(gold) });
+      pendingMoney = undefined;
+      pendingGold = undefined;
+    }
+    if (!matches.length && (money !== undefined || gold !== undefined)) {
+      if (currentSteamId && players.has(currentSteamId)) {
+        const player = players.get(currentSteamId);
+        if (money !== undefined) player.money = Number(money);
+        if (gold !== undefined) player.gold = Number(gold);
+      } else {
+        if (money !== undefined) pendingMoney = Number(money);
+        if (gold !== undefined) pendingGold = Number(gold);
+      }
+    }
+  }
+  return [...players.values()];
+}

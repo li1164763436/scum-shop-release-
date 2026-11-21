@@ -1,0 +1,150 @@
+import datetime
+import json
+import os
+import sqlite3
+import sys
+import time
+
+
+def database_path(root):
+    root = os.path.abspath(str(root or ''))
+    candidates = [
+        os.path.join(root, 'SCUM', 'Saved', 'SaveFiles', 'SCUM.db'),
+        os.path.join(root, 'Saved', 'SaveFiles', 'SCUM.db'),
+        os.path.join(root, 'SCUM.db'),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    raise RuntimeError('SCUM数据库不存在')
+
+
+def finite_coordinate(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(float(value)) <= 10_000_000
+
+
+def valid_steam_id(value):
+    return isinstance(value, str) and len(value) == 17 and value.isascii() and value.isdecimal()
+
+
+def saved_at(path):
+    return datetime.datetime.fromtimestamp(os.path.getmtime(path), datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def read_snapshot(root):
+    path = database_path(root)
+    uri = 'file:' + path.replace('\\', '/') + '?mode=ro'
+    database = sqlite3.connect(uri, uri=True, timeout=3)
+    database.row_factory = sqlite3.Row
+    try:
+        database.execute('PRAGMA query_only=ON')
+        database.execute('PRAGMA busy_timeout=3000')
+        database.execute('BEGIN')
+        observed_at = saved_at(path)
+        player_rows = database.execute(
+            "SELECT u.user_id AS steam_id,u.name,p.id AS prisoner_id,p.is_alive,"
+            "e.location_x,e.location_y,e.location_z "
+            "FROM user_profile u "
+            "JOIN prisoner p ON p.id=u.prisoner_id AND p.user_profile_id=u.id "
+            "JOIN prisoner_entity pe ON pe.prisoner_id=p.id "
+            "JOIN entity e ON e.id=pe.entity_id "
+            "WHERE p.is_alive=1 ORDER BY u.id"
+        ).fetchall()
+        players = []
+        player_ids = set()
+        for row in player_rows:
+            steam_id = row['steam_id']
+            coordinates = [row['location_x'], row['location_y'], row['location_z']]
+            if not valid_steam_id(steam_id) or steam_id in player_ids or not all(finite_coordinate(value) for value in coordinates):
+                raise RuntimeError('SCUM人物坐标快照包含无效记录')
+            player_ids.add(steam_id)
+            players.append({
+                'steamId': steam_id,
+                'name': str(row['name'] or '').strip()[:100] or '本人角色',
+                'worldX': coordinates[0],
+                'worldY': coordinates[1],
+                'worldZ': coordinates[2],
+                'observedAt': observed_at,
+                'source': 'scum_saved_database',
+            })
+
+        squad_rows = database.execute(
+            "SELECT sm.squad_id,s.name AS squad_name,u.user_id AS steam_id "
+            "FROM squad_member sm "
+            "JOIN squad s ON s.id=sm.squad_id "
+            "JOIN user_profile u ON u.id=sm.user_profile_id "
+            "ORDER BY sm.squad_id,sm.id"
+        ).fetchall()
+        squads = []
+        squad_members = set()
+        for row in squad_rows:
+            steam_id = row['steam_id']
+            squad_id = int(row['squad_id'] or 0)
+            if not valid_steam_id(steam_id) or steam_id in squad_members or squad_id < 1:
+                raise RuntimeError('SCUM小队成员快照包含无效记录')
+            squad_members.add(steam_id)
+            squads.append({
+                'steamId': steam_id,
+                'squadId': str(squad_id),
+                'squadName': str(row['squad_name'] or '').strip()[:100] or ('小队 ' + str(squad_id)),
+            })
+
+        flag_rows = database.execute(
+            "SELECT f.element_id,e.owner_profile_id,u.user_id AS owner_steam_id,u.name AS owner_name,"
+            "e.location_x,e.location_y,e.location_z "
+            "FROM base_element_flag f "
+            "JOIN base_element e ON e.element_id=f.element_id "
+            "JOIN user_profile u ON u.id=e.owner_profile_id "
+            "ORDER BY f.element_id"
+        ).fetchall()
+        flags = []
+        flag_ids = set()
+        for row in flag_rows:
+            flag_id = int(row['element_id'] or 0)
+            owner_steam_id = row['owner_steam_id']
+            coordinates = [row['location_x'], row['location_y'], row['location_z']]
+            if flag_id < 1 or flag_id in flag_ids or not valid_steam_id(owner_steam_id) or not all(finite_coordinate(value) for value in coordinates):
+                raise RuntimeError('SCUM领地旗坐标快照包含无效记录')
+            flag_ids.add(flag_id)
+            owner_name = str(row['owner_name'] or '').strip()[:100]
+            flags.append({
+                'id': 'scum-db:' + str(flag_id),
+                'ownerSteamId': owner_steam_id,
+                'name': (owner_name + ' 的领地旗') if owner_name else '本人领地旗',
+                'visibleToSteamIds': [owner_steam_id],
+                'worldX': coordinates[0],
+                'worldY': coordinates[1],
+                'worldZ': coordinates[2],
+                'observedAt': observed_at,
+                'source': 'scum_saved_database',
+            })
+        return {
+            'complete': True,
+            'source': 'read_only_saved_database',
+            'observedAt': observed_at,
+            'players': players,
+            'squads': squads,
+            'flags': flags,
+        }
+    finally:
+        database.close()
+
+
+def main():
+    request = json.loads(sys.stdin.read() or '{}')
+    last_error = None
+    for attempt in range(3):
+        try:
+            return read_snapshot(request.get('serverDirectory'))
+        except sqlite3.OperationalError as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(0.15 * (attempt + 1))
+    raise last_error
+
+
+try:
+    print(json.dumps(main(), ensure_ascii=False))
+except Exception as error:
+    print(json.dumps({'error': str(error)}, ensure_ascii=False))
+    sys.exit(1)

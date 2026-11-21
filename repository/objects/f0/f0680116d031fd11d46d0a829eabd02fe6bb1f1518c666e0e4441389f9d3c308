@@ -1,0 +1,60 @@
+import { ServiceError } from './commerce-service.js';
+import { isSteamId64 } from './scum-log-parser.js';
+
+function rowsOf(result) { return Array.isArray(result) && Array.isArray(result[0]) ? result[0] : result; }
+function limitOf(value, fallback = 50) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (!/^\d+$/.test(String(value)) || Number(value) < 1 || Number(value) > 200) throw new ServiceError('limit 必须是 1-200 的整数', 400, 'INVALID_LIMIT');
+  return Number(value);
+}
+function shanghaiParts(date) {
+  const shifted = new Date(date.getTime() + 8 * 3600000);
+  return { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth(), day: shifted.getUTCDate(), weekday: shifted.getUTCDay() };
+}
+function shanghaiUtc(year, month, day) { return new Date(Date.UTC(year, month, day) - 8 * 3600000); }
+export function rankingWindow(period, now = new Date()) {
+  if (!['daily', 'weekly', 'monthly'].includes(period)) throw new ServiceError('period 必须是 daily、weekly 或 monthly', 400, 'INVALID_PERIOD');
+  const part = shanghaiParts(now);
+  let start;
+  let end;
+  if (period === 'daily') { start = shanghaiUtc(part.year, part.month, part.day); end = shanghaiUtc(part.year, part.month, part.day + 1); }
+  else if (period === 'weekly') {
+    const sinceMonday = (part.weekday + 6) % 7;
+    start = shanghaiUtc(part.year, part.month, part.day - sinceMonday);
+    end = shanghaiUtc(part.year, part.month, part.day - sinceMonday + 7);
+  } else { start = shanghaiUtc(part.year, part.month, 1); end = shanghaiUtc(part.year, part.month + 1, 1); }
+  return { period, timezone: 'Asia/Shanghai', start, end };
+}
+function eventRow(row) {
+  return { id: Number(row.id), eventTime: row.eventTime, killerSteamId: row.killerSteamId, killerName: row.killerName || null, victimSteamId: row.victimSteamId, victimName: row.victimName || null, weapon: row.weapon || null, distance: row.distance === null || row.distance === undefined ? null : Number(row.distance), eventType: row.eventType };
+}
+
+export class KillRankingService {
+  constructor({ db, clock = () => Date.now() }) { this.db = db; this.clock = clock; }
+  async overview(workerStatus = null) {
+    const counts = rowsOf(await this.db.query("SELECT COUNT(*) AS totalEvents,SUM(event_type='kill') AS playerKills,SUM(event_type='suicide') AS suicides,MAX(event_time) AS latestEventAt FROM scum_kill_events"))[0] || {};
+    const failures = rowsOf(await this.db.query("SELECT COUNT(*) AS parseFailures FROM scum_log_parse_failures f JOIN scum_log_files l ON l.id=f.source_file_id WHERE l.source_type='kill'"))[0] || {};
+    const files = rowsOf(await this.db.query("SELECT COUNT(*) AS files,MAX(last_processed_at) AS lastProcessedAt FROM scum_log_files WHERE source_type='kill'"))[0] || {};
+    return { totalEvents: Number(counts.totalEvents || 0), playerKills: Number(counts.playerKills || 0), suicides: Number(counts.suicides || 0), parseFailures: Number(failures.parseFailures || 0), files: Number(files.files || 0), latestEventAt: counts.latestEventAt || null, lastProcessedAt: files.lastProcessedAt || null, collector: typeof workerStatus === 'function' ? workerStatus() : workerStatus };
+  }
+  async events({ limit, steamId } = {}) {
+    const safeLimit = limitOf(limit);
+    if (steamId !== undefined && !isSteamId64(steamId)) throw new ServiceError('steamId 必须是合法 SteamID', 400, 'INVALID_STEAM_ID');
+    const where = steamId ? 'WHERE killer_steam_id=? OR victim_steam_id=?' : '';
+    const params = steamId ? [String(steamId), String(steamId)] : [];
+    const rows = rowsOf(await this.db.query(`SELECT id,event_time AS eventTime,killer_steam_id AS killerSteamId,killer_name AS killerName,victim_steam_id AS victimSteamId,victim_name AS victimName,weapon,distance_meters AS distance,event_type AS eventType FROM scum_kill_events ${where} ORDER BY event_time DESC,id DESC LIMIT ${safeLimit}`, params));
+    return rows.map(eventRow);
+  }
+  async rankings({ period = 'daily', limit } = {}) {
+    const safeLimit = limitOf(limit);
+    const window = rankingWindow(String(period), new Date(this.clock()));
+    const rows = rowsOf(await this.db.query(`SELECT players.steamId,MAX(players.playerName) AS playerName,SUM(players.kills) AS kills,SUM(players.deaths) AS deaths FROM (
+      SELECT killer_steam_id AS steamId,MAX(killer_name) AS playerName,COUNT(*) AS kills,0 AS deaths FROM scum_kill_events WHERE event_time>=? AND event_time<? AND event_type='kill' GROUP BY killer_steam_id
+      UNION ALL
+      SELECT victim_steam_id AS steamId,MAX(victim_name) AS playerName,0 AS kills,COUNT(*) AS deaths FROM scum_kill_events WHERE event_time>=? AND event_time<? GROUP BY victim_steam_id
+    ) players GROUP BY players.steamId ORDER BY kills DESC,deaths ASC,players.steamId ASC LIMIT ${safeLimit}`, [window.start, window.end, window.start, window.end]));
+    return { period: window.period, timezone: window.timezone, start: window.start.toISOString(), end: window.end.toISOString(), items: rows.map((row) => { const kills = Number(row.kills || 0); const deaths = Number(row.deaths || 0); return { steamId: row.steamId, playerName: row.playerName || null, kills, deaths, kd: deaths === 0 ? kills : Number((kills / deaths).toFixed(2)) }; }) };
+  }
+}
+
+export { limitOf, rowsOf };

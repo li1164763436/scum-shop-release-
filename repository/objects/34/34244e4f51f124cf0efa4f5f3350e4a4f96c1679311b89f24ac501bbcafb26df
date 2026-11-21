@@ -1,0 +1,192 @@
+import { ServiceError } from './commerce-service.js';
+
+const ACTIVE_STATES = ['scheduled', 'countdown', 'maintenance', 'awaiting_recovery', 'awaiting_manual_confirmation'];
+
+function idOf(value) {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id < 1) throw new ServiceError('维护编号无效', 400, 'INVALID_ID');
+  return id;
+}
+function actorOf(value) { return String(value || 'system').trim().slice(0, 100) || 'system'; }
+function requiredText(value, name, max) {
+  const text = String(value ?? '').trim();
+  if (!text) throw new ServiceError(`${name}不能为空`, 400, 'INVALID_INPUT');
+  if (text.length > max) throw new ServiceError(`${name}不能超过 ${max} 字符`, 400, 'INVALID_INPUT');
+  return text;
+}
+function optionalText(value, name, max) {
+  const text = String(value ?? '').trim();
+  if (text.length > max) throw new ServiceError(`${name}不能超过 ${max} 字符`, 400, 'INVALID_INPUT');
+  return text || null;
+}
+function dateOf(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new ServiceError('计划时间无效', 400, 'INVALID_SCHEDULE');
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new ServiceError('计划时间无效', 400, 'INVALID_SCHEDULE');
+  return date;
+}
+function rowValue(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id), instanceId: row.instanceId || null, title: row.title, reason: row.reason || null,
+    scheduledAt: row.scheduledAt, state: row.state, fulfillmentPaused: Boolean(row.fulfillmentPaused),
+    pauseStartedAt: row.pauseStartedAt || null, maintenanceStartedAt: row.maintenanceStartedAt || null,
+    awaitingRecoveryAt: row.awaitingRecoveryAt || null, recoveryReadyAt: row.recoveryReadyAt || null,
+    completedAt: row.completedAt || null, cancelledAt: row.cancelledAt || null,
+    createdBy: row.createdBy || null, confirmedBy: row.confirmedBy || null, cancelledBy: row.cancelledBy || null,
+    createdAt: row.createdAt, updatedAt: row.updatedAt
+  };
+}
+const FIELDS = 'id,instance_id AS instanceId,title,reason,scheduled_at AS scheduledAt,state,fulfillment_paused AS fulfillmentPaused,pause_started_at AS pauseStartedAt,maintenance_started_at AS maintenanceStartedAt,awaiting_recovery_at AS awaitingRecoveryAt,recovery_ready_at AS recoveryReadyAt,completed_at AS completedAt,cancelled_at AS cancelledAt,created_by AS createdBy,confirmed_by AS confirmedBy,cancelled_by AS cancelledBy,created_at AS createdAt,updated_at AS updatedAt';
+
+export class MaintenanceService {
+  constructor({ db, store, clock = () => Date.now() }) { this.db = db; this.store = store; this.clock = clock; }
+
+  async list({ limit = 50 } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
+    return (await this.db.query(`SELECT ${FIELDS} FROM maintenance_windows ORDER BY scheduled_at DESC,id DESC LIMIT ${safeLimit}`)).map(rowValue);
+  }
+  async get(id, query = this.db, lock = false) {
+    const rows = await query.query(`SELECT ${FIELDS} FROM maintenance_windows WHERE id=?${lock ? ' FOR UPDATE' : ''}`, [idOf(id)]);
+    if (!rows[0]) throw new ServiceError('维护窗口不存在', 404, 'NOT_FOUND');
+    return rowValue(rows[0]);
+  }
+  async runs(id, query = this.db) {
+    return (await query.query('SELECT id,maintenance_id AS maintenanceId,minute_mark AS minuteMark,scheduled_for AS scheduledFor,status,sent_count AS sentCount,failed_count AS failedCount,last_error AS lastError,started_at AS startedAt,completed_at AS completedAt FROM maintenance_announcement_runs WHERE maintenance_id=? ORDER BY minute_mark DESC,id DESC', [idOf(id)])).map((row) => ({ ...row, id: Number(row.id), maintenanceId: Number(row.maintenanceId), minuteMark: Number(row.minuteMark), sentCount: Number(row.sentCount), failedCount: Number(row.failedCount) }));
+  }
+  async current(query = this.db) {
+    const rows = await query.query(`SELECT ${FIELDS} FROM maintenance_windows WHERE state IN (${ACTIVE_STATES.map(() => '?').join(',')}) ORDER BY scheduled_at DESC,id DESC LIMIT 1`, ACTIVE_STATES);
+    const active = rowValue(rows[0]);
+    const recovery = active && ['awaiting_recovery', 'awaiting_manual_confirmation'].includes(active.state) ? await this.recoveryStatus(active, query) : { successCount: 0, threshold: 0, ready: false, latestSampleAt: null };
+    return { active, fulfillmentPaused: Boolean(active?.fulfillmentPaused), recovery, runs: active ? await this.runs(active.id, query) : [] };
+  }
+  async audit(tx, maintenanceId, action, actor, details = null) {
+    await tx.query('INSERT INTO maintenance_audit_logs (maintenance_id,action,actor,details_json) VALUES (?,?,?,?)', [maintenanceId, action, actorOf(actor), details ? JSON.stringify(details) : null]);
+  }
+
+  async create(payload, actor = 'system') {
+    const now = this.clock();
+    const scheduledAt = dateOf(payload?.scheduledAt);
+    if (scheduledAt.getTime() < now + 60000) throw new ServiceError('计划时间必须至少晚于当前时间 1 分钟', 400, 'INVALID_SCHEDULE');
+    if (scheduledAt.getTime() > now + 30 * 86400000) throw new ServiceError('计划时间不能超过未来 30 天', 400, 'INVALID_SCHEDULE');
+    const config = await this.store.read();
+    const values = [optionalText(payload?.instanceId ?? config.fulfillment.instanceId, '实例 ID', 128), requiredText(payload?.title, '标题', 100), optionalText(payload?.reason, '原因', 500), scheduledAt, actorOf(actor)];
+    try {
+      return await this.db.transaction(async (tx) => {
+        const lock = await tx.query('SELECT GET_LOCK(?,10) AS acquired', ['maintenance-active-window']);
+        if (lock[0] && Number(lock[0].acquired) !== 1) throw new ServiceError('维护窗口正在被其他操作修改，请稍后重试', 409, 'MAINTENANCE_BUSY');
+        try {
+          const active = await tx.query(`SELECT id FROM maintenance_windows WHERE state IN (${ACTIVE_STATES.map(() => '?').join(',')}) LIMIT 1 FOR UPDATE`, ACTIVE_STATES);
+          if (active[0]) throw new ServiceError('已有活动维护窗口', 409, 'ACTIVE_MAINTENANCE_EXISTS');
+          const result = await tx.query("INSERT INTO maintenance_windows (instance_id,title,reason,scheduled_at,state,created_by) VALUES (?,?,?,?,'scheduled',?)", values);
+          await this.audit(tx, result.insertId, 'create', actor);
+          return this.get(result.insertId, tx);
+        } finally { await tx.query('SELECT RELEASE_LOCK(?) AS released', ['maintenance-active-window']); }
+      });
+    } catch (error) {
+      if (error?.code === 'ER_DUP_ENTRY' || error?.errno === 1062) throw new ServiceError('已有活动维护窗口', 409, 'ACTIVE_MAINTENANCE_EXISTS');
+      throw error;
+    }
+  }
+
+  async cancel(id, actor = 'system') {
+    return this.change(id, ['scheduled', 'countdown'], 'cancel', actor, "UPDATE maintenance_windows SET state='cancelled',fulfillment_paused=0,cancelled_at=CURRENT_TIMESTAMP(3),cancelled_by=? WHERE id=? AND state IN ('scheduled','countdown')", [actorOf(actor)]);
+  }
+
+  async delete(id, actor = 'system') {
+    const { deleteMaintenance } = await import('./deletion-service.js');
+    const safeId = idOf(id);
+    return this.db.transaction(async (tx) => {
+      const current = await this.get(safeId, tx, true);
+      if (current.fulfillmentPaused) throw new ServiceError('维护窗口正在执行，不能删除', 409, 'INVALID_STATE');
+      await deleteMaintenance(tx, safeId);
+      return { id: safeId, deleted: true, actor: actorOf(actor) };
+    });
+  }
+  async beginMaintenance(id, actor = 'system') {
+    const safeId = idOf(id);
+    return this.db.transaction(async (tx) => {
+      const current = await this.get(safeId, tx, true);
+      if (!['scheduled', 'countdown'].includes(current.state)) throw new ServiceError('当前维护状态不允许进入维护', 409, 'INVALID_STATE');
+      const updated = await tx.query("UPDATE maintenance_windows SET state='maintenance',fulfillment_paused=1,pause_started_at=COALESCE(pause_started_at,CURRENT_TIMESTAMP(3)),maintenance_started_at=COALESCE(maintenance_started_at,CURRENT_TIMESTAMP(3)) WHERE id=? AND state IN ('scheduled','countdown')", [safeId]);
+      if (!updated.affectedRows) throw new ServiceError('维护状态已变化', 409, 'STATE_CHANGED');
+      await this.audit(tx, safeId, 'begin_maintenance', actor);
+      return this.get(safeId, tx);
+    });
+  }
+  async enterMaintenance(id, actor = 'system') { return this.beginMaintenance(id, actor); }
+  async markCountdown(id) {
+    const safeId = idOf(id);
+    return this.db.transaction(async (tx) => {
+      const current = await this.get(safeId, tx, true);
+      if (current.state !== 'scheduled') return current;
+      await tx.query("UPDATE maintenance_windows SET state='countdown' WHERE id=? AND state='scheduled'", [safeId]);
+      await this.audit(tx, safeId, 'countdown_started', 'system');
+      return this.get(safeId, tx);
+    });
+  }
+  async markAwaitingRecovery(id, actor = 'system') {
+    return this.change(id, ['maintenance'], 'await_recovery', actor, "UPDATE maintenance_windows SET state='awaiting_recovery',awaiting_recovery_at=CURRENT_TIMESTAMP(3) WHERE id=? AND state='maintenance'");
+  }
+  async change(id, allowed, action, actor, sql, prefix = []) {
+    const safeId = idOf(id);
+    return this.db.transaction(async (tx) => {
+      const current = await this.get(safeId, tx, true);
+      if (!allowed.includes(current.state)) throw new ServiceError('当前维护状态不允许此操作', 409, 'INVALID_STATE');
+      const updated = await tx.query(sql, [...prefix, safeId]);
+      if (!updated.affectedRows) throw new ServiceError('维护状态已变化', 409, 'STATE_CHANGED');
+      await this.audit(tx, safeId, action, actor);
+      return this.get(safeId, tx);
+    });
+  }
+
+  async recoveryStatus(window, query = this.db, thresholdOverride, pollOverride) {
+    const config = await this.store.read();
+    const threshold = Math.min(Math.max(Number(thresholdOverride ?? config.maintenance.recoverySuccessThreshold), 1), 20);
+    const poll = Math.min(Math.max(Number(pollOverride ?? config.monitoring.pollIntervalMs), 1000), 300000);
+    const since = window.awaitingRecoveryAt || window.maintenanceStartedAt;
+    const rows = await query.query('SELECT sampled_at AS sampledAt,status,player_query_ok AS playerQueryOk FROM server_monitor_samples WHERE sampled_at>=? ORDER BY sampled_at DESC,id DESC LIMIT ?', [since, threshold]);
+    let successCount = 0;
+    let intervalsOk = true;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      if (row.status !== 'ok' || !row.playerQueryOk) break;
+      if (index > 0 && new Date(rows[index - 1].sampledAt).getTime() - new Date(row.sampledAt).getTime() > poll * 3) { intervalsOk = false; break; }
+      successCount += 1;
+    }
+    const latest = rows[0]?.sampledAt || null;
+    const fresh = latest ? this.clock() - new Date(latest).getTime() <= poll * 2 : false;
+    return { successCount, threshold, fresh, intervalsOk, ready: rows.length >= threshold && successCount >= threshold && fresh && intervalsOk, latestSampleAt: latest };
+  }
+  async evaluateRecovery(id, threshold, pollIntervalMs) {
+    const safeId = idOf(id);
+    return this.db.transaction(async (tx) => {
+      const current = await this.get(safeId, tx, true);
+      if (current.state === 'awaiting_manual_confirmation') return current;
+      if (current.state !== 'awaiting_recovery') throw new ServiceError('当前维护状态不允许恢复检测', 409, 'INVALID_STATE');
+      const recovery = await this.recoveryStatus(current, tx, threshold, pollIntervalMs);
+      if (!recovery.ready) return { ...current, recovery };
+      const updated = await tx.query("UPDATE maintenance_windows SET state='awaiting_manual_confirmation',recovery_ready_at=CURRENT_TIMESTAMP(3) WHERE id=? AND state='awaiting_recovery'", [safeId]);
+      if (!updated.affectedRows) return this.get(safeId, tx);
+      await this.audit(tx, safeId, 'recovery_ready', 'system', { successCount: recovery.successCount, threshold: recovery.threshold });
+      return this.get(safeId, tx);
+    });
+  }
+  async confirmRecovered(id, actor = 'system') {
+    const safeId = idOf(id);
+    return this.db.transaction(async (tx) => {
+      const current = await this.get(safeId, tx, true);
+      if (current.state !== 'awaiting_manual_confirmation') throw new ServiceError('当前维护状态不允许确认恢复', 409, 'INVALID_STATE');
+      const updated = await tx.query("UPDATE maintenance_windows SET state='completed',fulfillment_paused=0,confirmed_by=?,completed_at=CURRENT_TIMESTAMP(3) WHERE id=? AND state='awaiting_manual_confirmation'", [actorOf(actor), safeId]);
+      if (!updated.affectedRows) throw new ServiceError('维护状态已变化', 409, 'STATE_CHANGED');
+      await this.audit(tx, safeId, 'confirm_recovered', actor);
+      return this.get(safeId, tx);
+    });
+  }
+  async isFulfillmentPaused(query = this.db) {
+    const rows = await query.query(`SELECT id,title,reason FROM maintenance_windows WHERE fulfillment_paused=1 AND state IN (${ACTIVE_STATES.map(() => '?').join(',')}) ORDER BY id DESC LIMIT 1`, ACTIVE_STATES);
+    return rows[0] ? { paused: true, maintenanceId: Number(rows[0].id), title: rows[0].title, reason: rows[0].reason || rows[0].title } : { paused: false, maintenanceId: null, title: null, reason: null };
+  }
+}
+
+export { ACTIVE_STATES, rowValue as windowValue };

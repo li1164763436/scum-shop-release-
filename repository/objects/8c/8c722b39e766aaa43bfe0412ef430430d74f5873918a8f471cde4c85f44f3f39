@@ -1,0 +1,25 @@
+export function isRetryable(error) {
+  const status = error?.response?.status;
+  return !status || status >= 500;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function withRetry(operation, options = {}) {
+  const enabled = options.enabled ?? true;
+  const maxAttempts = enabled ? (options.maxAttempts ?? 4) : 1;
+  const baseDelayMs = options.baseDelayMs ?? 500;
+  const maxDelayMs = options.maxDelayMs ?? 5000;
+  const wait = options.sleep || sleep;
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts || !isRetryable(error)) throw error;
+      await wait(Math.min(maxDelayMs, baseDelayMs * (2 ** (attempt - 1))));
+    }
+  }
+  throw lastError;
+}

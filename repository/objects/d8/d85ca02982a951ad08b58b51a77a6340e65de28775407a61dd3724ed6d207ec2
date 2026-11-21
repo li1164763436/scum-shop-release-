@@ -1,0 +1,34 @@
+async function loadGateway() {
+  $('#gatewayStatusPanel')?.replaceChildren(Object.assign(document.createElement('div'), { textContent: '正在加载网关状态...' }));
+  $('#instanceRows')?.replaceChildren();
+  $('#playerRows')?.replaceChildren();
+  const [instances, players, bridge] = await Promise.allSettled([api('/api/gsm3/instances'), api('/api/ggcon/players'), loadBridgeStatus()]);
+  if (instances.status === 'fulfilled') {
+    state.instances = list(instances.value, ['instances', 'items']);
+    if ($('#instanceRows')) $('#instanceRows').innerHTML = state.instances.length ? state.instances.map((item) => `<tr><td><strong>${esc(pick(item, ['name'], '未命名实例'))}</strong><br><code>${esc(pick(item, ['id', 'instanceId']))}</code></td><td>${status(pick(item, ['status'], 'running'))}</td><td><code>${esc(pick(item, ['pid'], '--'))}</code></td><td><code>${esc(pick(item, ['workingDirectory', 'path'], '--'))}</code></td></tr>`).join('') : empty(4, '未发现 SCUM 实例');
+  } else if ($('#instanceRows')) $('#instanceRows').innerHTML = empty(4, instances.reason.message);
+  if (players.status === 'fulfilled') {
+    state.players = list(players.value, ['players', 'items']);
+    if ($('#playerRows')) $('#playerRows').innerHTML = state.players.length ? state.players.map((player) => `<tr><td><strong>${esc(pick(player, ['characterName', 'name'], '未命名角色'))}</strong><br><span class="muted">${esc(pick(player, ['steamName'], '--'))}</span></td><td><code>${esc(pick(player, ['steamId', 'steamId64']))}</code></td><td>${player.isAdmin ? status('active').replace('上架中', '管理员') : '<span class="badge">玩家</span>'}</td></tr>`).join('') : empty(3, '当前没有在线玩家');
+  } else if ($('#playerRows')) $('#playerRows').innerHTML = empty(3, players.reason.message);
+  await loadHealth();
+}
+
+$('#websiteBackgroundForm')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  await withBusy(event.submitter, async () => {
+    const f = event.currentTarget.elements;
+    if (!f.websiteBackgroundFile.files[0]) { toast('请选择背景图片', true); return; }
+    const imagePath = await uploadImage(f.websiteBackgroundFile.files[0], '/api/website/background');
+    await saveConfig({ website: { backgroundImage: imagePath } });
+    f.websiteBackgroundImage.value = imagePath;
+    f.websiteBackgroundFile.value = '';
+    toast('网站背景图已保存');
+    await loadConfig();
+  });
+});
+
+
+$('#reloadGateway')?.addEventListener('click', loadGateway);
+
+

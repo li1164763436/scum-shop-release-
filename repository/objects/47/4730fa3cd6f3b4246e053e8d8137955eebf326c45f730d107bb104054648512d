@@ -1,0 +1,25 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import mysql from 'mysql2/promise';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+try {
+  if (process.argv[2] !== 'shutdown') throw new Error('不支持的数据库操作');
+  const config = JSON.parse((await fs.readFile(path.join(root, 'data/config.json'), 'utf8')).replace(/^\uFEFF/, '')).mysql;
+  if (!['127.0.0.1','localhost'].includes(config.host)) throw new Error('只允许关闭本机内置数据库');
+  const iniPaths = [path.join(root, 'runtime/mysql-start.ini'), path.resolve(root, '../PackagedApp/runtime/mysql-start.ini')];
+  let expected;
+  for (const file of iniPaths) { try { const text = await fs.readFile(file, 'utf8'); expected = text.match(/^datadir\s*=\s*(.+)$/mi)?.[1]?.trim(); if (expected) break; } catch {} }
+  if (!expected) throw new Error('未找到内置数据库配置');
+  let rootPassword;
+  try { rootPassword = (await fs.readFile(path.join(root, 'runtime/secrets/mysql-root.secret'), 'utf8')).trim(); } catch {}
+  let connection;
+  try { connection = await mysql.createConnection({ host:config.host, port:config.port, user:'root', password:rootPassword || config.password, connectTimeout:5000 }); }
+  catch { connection = await mysql.createConnection({ host:config.host, port:config.port, user:config.user, password:config.password, connectTimeout:5000 }); }
+  try {
+    const [rows] = await connection.query('SELECT @@datadir AS directory');
+    if (path.resolve(rows[0].directory) !== path.resolve(expected)) throw new Error('当前数据库不属于此商城目录');
+    await connection.query('SHUTDOWN');
+  } finally { await connection.end().catch(() => {}); }
+} catch (error) { console.error('数据库正常关闭失败：' + (error.code || error.message)); process.exitCode = 1; }

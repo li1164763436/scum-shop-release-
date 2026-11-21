@@ -1,0 +1,50 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { ServiceError } from './commerce-service.js';
+
+export const IMAGE_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/x-png', 'image/webp', 'image/gif'];
+export const IMAGE_UPLOAD_PATH = '/uploads';
+
+export async function saveUploadedImage(root, mime, body, category, subdirectories = [], filenameSuffix = '') {
+  if (!['products', 'lottery', 'website', 'gifts'].includes(category)) throw new ServiceError('图片使用分类无效');
+  const segments = Array.isArray(subdirectories) ? subdirectories.map((value) => String(value || '').trim()).filter(Boolean) : [];
+  if (segments.some((value) => value === '.' || value === '..' || !/^[\p{L}\p{N}_ ()&-]{1,100}$/u.test(value))) throw new ServiceError('图片分类目录无效');
+  const image = Buffer.isBuffer(body) ? body : Buffer.alloc(0);
+  const formats = [
+    { ext: 'jpg', mime: 'image/jpeg', valid: image.length >= 3 && image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff },
+    { ext: 'png', mime: 'image/png', valid: image.length >= 8 && image.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
+    { ext: 'webp', mime: 'image/webp', valid: image.length >= 12 && image.subarray(0, 4).toString('ascii') === 'RIFF' && image.subarray(8, 12).toString('ascii') === 'WEBP' },
+    { ext: 'gif', mime: 'image/gif', valid: image.length >= 6 && ['GIF87a', 'GIF89a'].includes(image.subarray(0, 6).toString('ascii')) }
+  ];
+  const format = formats.find((item) => item.valid);
+  if (!format) throw new ServiceError('图片文件内容无效，仅支持 JPEG/PNG/WebP/GIF');
+  const directory = path.join(root, 'public', 'uploads', category, ...segments);
+  await fs.mkdir(directory, { recursive: true });
+  if (category === 'gifts') {
+    if (format.ext !== 'png') throw new ServiceError('礼包图片仅支持 PNG 格式');
+    const safeName = String(filenameSuffix || '').trim().replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 80);
+    if (!safeName) throw new ServiceError('礼包名称无效');
+    const filename = `${safeName}.png`;
+    await fs.writeFile(path.join(directory, filename), image);
+    return `${IMAGE_UPLOAD_PATH}/${category}/${segments.concat(filename).join('/')}`;
+  }
+  const entries = await fs.readdir(directory);
+  let number = entries.reduce((maximum, filename) => {
+    const match = /^(\d+)(?:_[^.]+)?\.(?:jpg|png|webp|gif|lock)$/.exec(filename);
+    return match ? Math.max(maximum, Number(match[1])) : maximum;
+  }, 0) + 1;
+  while (true) {
+    const name = String(number).padStart(4, '0');
+    const reservation = path.join(directory, `${name}.lock`);
+    try { await fs.mkdir(reservation); }
+    catch (error) { if (error.code === 'EEXIST') { number++; continue; } throw error; }
+    try {
+      const existing = await fs.readdir(directory);
+      if (existing.some((filename) => new RegExp(`^${name}\\.(jpg|png|webp|gif)$`).test(filename))) { number++; continue; }
+      const safeSuffix = String(filenameSuffix || '').trim().replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 80);
+      const filename = `${name}${safeSuffix ? `_${safeSuffix}` : ''}.${format.ext}`;
+      await fs.writeFile(path.join(directory, filename), image, { flag: 'wx' });
+      return `${IMAGE_UPLOAD_PATH}/${category}/${segments.concat(filename).join('/')}`;
+    } finally { await fs.rmdir(reservation); }
+  }
+}

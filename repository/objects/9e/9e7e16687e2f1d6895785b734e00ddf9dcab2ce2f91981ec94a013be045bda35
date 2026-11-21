@@ -1,0 +1,76 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ConfigStore } from '../src/services/config-store.js';
+import { createDatabase } from '../src/services/database.js';
+import { ensureSchema } from '../src/services/schema.js';
+
+export const PLAYER_DATA_TABLES = [
+  'scum_chat_claim_audits', 'lottery_fulfillment_logs', 'fulfillment_attempts',
+  'player_admin_verifications', 'player_admin_action_attempts', 'player_admin_actions',
+  'activity_gift_claims', 'lottery_draws', 'reward_claims', 'lottery_batches',
+  'gift_claims', 'redeem_code_claims', 'fulfillment_tasks', 'order_items', 'orders',
+  'reward_requests', 'player_online_accruals', 'player_checkins', 'player_online_totals',
+  'lottery_player_states', 'stock_trades', 'stock_holdings', 'stock_watchlists',
+  'coin_ledger', 'shop_sessions', 'admin_role_audits', 'steam_bind_challenges',
+  'online_player_snapshots', 'player_presence_events', 'scum_kill_events',
+  'scum_chat_events', 'scum_log_parse_failures', 'scum_log_files',
+  'player_titles', '商城用户'
+];
+
+export const PRESERVED_CONFIGURATION_TABLES = [
+  'products', 'gift_packages', 'gift_actions', 'redeem_codes', 'redeem_code_actions',
+  'reward_rules', 'activities', 'activity_gifts', 'activity_lottery_pools',
+  'lottery_pools', 'lottery_pool_versions', 'lottery_prizes', 'stocks',
+  'stock_volume_bindings', 'stock_price_history', 'stock_market_announcements',
+  'maintenance_windows', 'maintenance_announcement_runs', 'maintenance_audit_logs',
+  'scheduled_announcement_runs', 'server_monitor_samples', 'player_admin_capability_probes'
+];
+
+export function parsePurgeArgs(argv) {
+  if (argv.length !== 2 || argv[0] !== '--confirm' || argv[1] !== 'PURGE_ALL_PLAYER_DATA') {
+    throw new Error('拒绝执行：必须提供 --confirm PURGE_ALL_PLAYER_DATA');
+  }
+  return { confirmed: true };
+}
+
+export async function purgePlayerData(db) {
+  const availableRows = await db.query('SELECT table_name AS tableName FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type = ?', ['BASE TABLE']);
+  const available = new Set(availableRows.map((row) => row.tableName));
+  const tables = PLAYER_DATA_TABLES.filter((table) => available.has(table));
+  const skipped = PLAYER_DATA_TABLES.filter((table) => !available.has(table));
+  const deleted = await db.transaction(async (tx) => {
+    const summary = [];
+    for (const table of tables) {
+      const result = await tx.query(`DELETE FROM \`${table}\``);
+      summary.push({ table, count: Number(result.affectedRows) || 0 });
+    }
+    return summary;
+  });
+  return { deleted, skipped };
+}
+
+export async function runPurgeCli(argv = process.argv.slice(2), dependencies = {}) {
+  parsePurgeArgs(argv);
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const store = dependencies.store || new ConfigStore(path.join(root, 'data', 'config.json'));
+  const config = await store.read();
+  const db = dependencies.db || await createDatabase(config.mysql);
+  try {
+    await ensureSchema(db);
+    const result = await purgePlayerData(db);
+    console.log('玩家业务数据清理完成：');
+    for (const item of result.deleted) console.log(`${item.table}: ${item.count}`);
+    for (const table of result.skipped) console.log(`${table}: 跳过（当前版本不存在）`);
+    console.log('运营配置表已保留；下一位商城注册玩家仍将创建为普通 user。');
+    return result;
+  } finally {
+    if (!dependencies.db) await db.close();
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runPurgeCli().catch((error) => {
+    console.error(`清理失败：${error.message}`);
+    process.exitCode = 1;
+  });
+}

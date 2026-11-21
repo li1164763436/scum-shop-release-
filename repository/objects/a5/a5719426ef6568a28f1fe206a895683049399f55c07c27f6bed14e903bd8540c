@@ -1,0 +1,40 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import mysql from 'mysql2/promise';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const config = JSON.parse((await fs.readFile(path.join(root, 'data', 'config.json'), 'utf8')).replace(/^\uFEFF/, '')).mysql;
+const db = await mysql.createConnection({ ...config, charset: 'utf8mb4', timezone: 'Z', decimalNumbers: true });
+let updated = 0;
+try {
+  await db.beginTransaction();
+  const [before] = await db.execute("SELECT id,item_id AS itemId,fulfillment_codes AS fulfillmentCodes FROM products WHERE parent_category='NPC' AND category_name='木偶' FOR UPDATE");
+  if (!before.length) throw new Error('数据库中没有找到 NPC / 木偶商品');
+  for (const item of before) {
+    const code = String(item.fulfillmentCodes || item.itemId || '').trim();
+    const itemId = String(item.itemId || '').trim();
+    const next = /^#spawnzombie\s+/i.test(code) ? code : '#SpawnZombie ' + itemId;
+    if (next !== code) { await db.execute('UPDATE products SET fulfillment_codes=?,updated_at=CURRENT_TIMESTAMP(3) WHERE id=?', [next, item.id]); updated++; }
+  }
+  const [check] = await db.execute("SELECT COUNT(1) AS total,SUM(fulfillment_codes REGEXP '^#SpawnZombie[[:space:]]+') AS valid FROM products WHERE parent_category='NPC' AND category_name='木偶'");
+  if (Number(check[0].total) !== Number(check[0].valid)) throw new Error('木偶商品前缀核验失败');
+  await db.commit();
+  const dataRoot = path.join(root, 'data');
+  const folders = (await fs.readdir(dataRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory() && entry.name.startsWith('release-catalog-'));
+  let snapshotFiles = 0;
+  for (const folder of folders) {
+    for (const name of ['products.json', 'products.sql']) {
+      const file = path.join(dataRoot, folder.name, name);
+      try {
+        const source = await fs.readFile(file, 'utf8');
+        const next = source.replace(/#spawnitem (BP_Zombie_[A-Za-z0-9_]+)/g, '#SpawnZombie $1');
+        if (next !== source) { await fs.writeFile(file, next, 'utf8'); snapshotFiles++; }
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+  }
+  console.log(JSON.stringify({ total: Number(check[0].total), valid: Number(check[0].valid), updated, snapshotFiles }, null, 2));
+} catch (error) {
+  await db.rollback().catch(() => {});
+  throw error;
+} finally { await db.end(); }

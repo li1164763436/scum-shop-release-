@@ -1,0 +1,256 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import Joi from 'joi';
+import { buildAnnouncementCommand, buildMessageCommand } from './command-policy.js';
+import { findScumGameRconConfig, prepareNativeScumRconConfig, prepareScumGameRconPassword, readScumRconIni, scumPathsFromRoot, writeScumGameRconConfig } from './scum-rcon-config.js';
+import { normalizeStockMarketConfig } from './stock-market-hours.js';
+
+const itemSchema = Joi.object({
+  id: Joi.string().pattern(/^[A-Za-z0-9_]{1,80}$/).required(),
+  name: Joi.string().trim().min(1).max(80).required(),
+  maxAmount: Joi.number().integer().min(1).max(1000).required()
+});
+const gatewaySchema = Joi.object({
+  baseUrl: Joi.string().uri({ scheme: ['http', 'https'] }).required(),
+  apiKey: Joi.string().allow('').max(500).required(),
+  timeoutMs: Joi.number().integer().min(500).max(120000).required()
+});
+const sourceSchema = Joi.object({
+  mode: Joi.valid('source-tcp').required(), discoveryMode: Joi.string().valid('auto', 'manual').required(),
+  host: Joi.string().allow('').max(255).required(), port: Joi.number().integer().valid(28015).required(),
+  password: Joi.string().allow('').max(500).required(), serverDirectory: Joi.string().allow('').max(1000).required(),
+  configPath: Joi.string().allow('').max(1000).required(), noPasswordAuth: Joi.boolean().required(),
+  connectTimeoutMs: Joi.number().integer().min(100).max(120000).required(), authTimeoutMs: Joi.number().integer().min(100).max(120000).required(),
+  commandTimeoutMs: Joi.number().integer().min(100).max(120000).required(), maxPacketSize: Joi.number().integer().min(64).max(16777216).required(),
+  syncPassword: Joi.boolean().strip(), rotatePassword: Joi.boolean().strip()
+});
+const pipeSchema = Joi.object({ mode: Joi.valid('scum-shop-pipe').required(), endpointFile: Joi.string().max(1000).required(), timeoutMs: Joi.number().integer().min(100).max(120000).required() });
+const rconSchema = Joi.alternatives().try(
+  gatewaySchema.keys({ mode: Joi.valid('http-legacy').required(), apiKeyMode: Joi.string().valid('x-api-key', 'api-key', 'authorization-bearer', 'authorization-apikey').required() }),
+  sourceSchema,
+  pipeSchema
+);
+const DATABASE_NAME_PATTERN = /^[A-Za-z0-9_$-]{1,64}$/;
+const sourceDefaults = { mode: 'source-tcp', discoveryMode: 'auto', host: '127.0.0.1', port: 28015, password: '', serverDirectory: '', configPath: '', noPasswordAuth: false, connectTimeoutMs: 5000, authTimeoutMs: 5000, commandTimeoutMs: 5000, maxPacketSize: 1048576 };
+
+const starterGiftItemSchema = Joi.object({ sku: Joi.string().pattern(/^[A-Za-z0-9_.-]{1,64}$/).required(), quantity: Joi.number().integer().min(1).max(1000).required() });
+const starterGiftSchema = Joi.object({
+  id: Joi.string().pattern(/^[A-Za-z0-9_.-]{1,64}$/).required(), name: Joi.string().trim().min(1).max(100).required(),
+  category: Joi.string().trim().min(1).max(100).required(), enabled: Joi.boolean().required(),
+  items: Joi.array().items(starterGiftItemSchema).max(20).required()
+});
+const announcementItemSchema = Joi.object({
+  id: Joi.string().pattern(/^[A-Za-z0-9_.-]{1,64}$/).required(), enabled: Joi.boolean().required(),
+  name: Joi.string().trim().min(1).max(100).required(), message: Joi.string().trim().min(1).max(500).required(),
+  executionTime: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/).required(),
+  weekdays: Joi.array().items(Joi.number().integer().min(1).max(7)).min(1).unique().required(),
+  intervalMinutes: Joi.number().integer().min(0).max(10080).required()
+});
+const maintenanceText = Joi.string().trim().min(1).max(500).required();
+const maintenanceSchema = Joi.object({
+  enabled: Joi.boolean().required(), pollIntervalMs: Joi.number().integer().min(1000).max(60000).required(),
+  countdownMinutes: Joi.array().items(Joi.number().integer().min(1).max(1440)).min(1).unique().required(),
+  recoverySuccessThreshold: Joi.number().integer().min(1).max(20).required(),
+  countdownMessage: maintenanceText,
+  maintenanceMessage: maintenanceText,
+  recoveryMessage: maintenanceText
+});
+const exchangeSchema = Joi.object({
+  enabled: Joi.boolean().required(),
+  coinToGoldRate: Joi.number().greater(0).max(1000000).required(),
+  goldToCoinRate: Joi.number().greater(0).max(1000000).required(),
+  maxAmount: Joi.number().integer().min(1).max(1000000000).required()
+});
+const characterGrowthSchema = Joi.object({
+  attributePointPrice: Joi.number().integer().min(0).max(1000000000).required(),
+  skillLevelPrice: Joi.number().integer().min(0).max(1000000000).required()
+});
+const schema = Joi.object({
+  website: Joi.object({ backgroundImage: Joi.string().pattern(/^(?:https?:\/\/[^\s]{1,1990}|\/uploads\/(?:images|website)\/[A-Za-z0-9][A-Za-z0-9_.-]{0,199})$/).allow('').max(2000).required() }).required(),
+  gsm3: gatewaySchema.required(), ggcon: rconSchema.required(),
+  mysql: Joi.object({ host: Joi.string().hostname().required(), port: Joi.number().integer().min(1).max(65535).required(), user: Joi.string().min(1).max(100).required(), database: Joi.string().pattern(DATABASE_NAME_PATTERN).required(), password: Joi.string().allow('').max(500).required() }).required(),
+  fulfillment: Joi.object({ instanceId: Joi.string().allow('').max(100).required(), sharedSecret: Joi.string().allow('').max(500).required(), workerEnabled: Joi.boolean().required(), pollIntervalMs: Joi.number().integer().min(250).max(3600000).required(), commandIntervalMs: Joi.number().integer().min(0).max(5000).required(), maxAttempts: Joi.number().integer().min(1).max(100).required(), notifyOnSuccess: Joi.boolean().required(), deliveryName: Joi.string().trim().allow('').max(50).pattern(/^[^"#;\r\n]*$/).required(), successMessage: Joi.string().trim().min(1).required(), purchaseMessage: Joi.string().trim().min(1).required(), giftMessage: Joi.string().trim().min(1).required(), recycleMessage: Joi.string().trim().min(1).required(), withdrawMessage: Joi.string().trim().min(1).required(), bulkWithdrawMessage: Joi.string().trim().min(1).required() }).required(),
+  starterGifts: Joi.array().items(starterGiftSchema).max(50).unique('id').required(),
+  announcements: Joi.object({ enabled: Joi.boolean().required(), pollIntervalMs: Joi.number().integer().min(1000).max(3600000).required(), items: Joi.array().items(announcementItemSchema).max(50).unique('id').required() }).required(),
+  monitoring: Joi.object({ enabled: Joi.boolean().required(), pollIntervalMs: Joi.number().integer().min(5000).max(300000).required(), retentionDays: Joi.number().integer().min(1).max(90).required() }).required(),
+  scumLogs: Joi.object({ enabled: Joi.boolean().required(), directory: Joi.string().allow('').max(1000).required(), pollIntervalMs: Joi.number().integer().min(1000).max(300000).required(), retentionDays: Joi.number().integer().min(1).max(3650).required() }).required(),
+  chatLogs: Joi.object({ enabled: Joi.boolean().required(), directory: Joi.string().allow('').max(1000).required(), pollIntervalMs: Joi.number().integer().min(1000).max(300000).required(), retentionDays: Joi.number().integer().min(1).max(3650).required(), claimPrefix: Joi.string().trim().min(1).max(20).pattern(/^[\p{L}\p{N}@#_+-]+$/u).required(), recycleCommand: Joi.string().trim().min(1).max(20).pattern(/^[\p{L}\p{N}_+-]+$/u).invalid('领取').required(), autoReplyEnabled: Joi.boolean().required() }).required(),
+  maintenance: maintenanceSchema.required(),
+  exchange: exchangeSchema.required(),
+  characterGrowth: characterGrowthSchema.required(),
+  stockMarket: Joi.object({ enabled: Joi.boolean().required(), tradingDays: Joi.array().items(Joi.number().integer().min(1).max(7)).min(1).unique().required(), openTime: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/).required(), closeTime: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/).required() }).required(),
+  reconnect: Joi.object({ enabled: Joi.boolean().required(), maxAttempts: Joi.number().integer().min(1).max(10).required(), baseDelayMs: Joi.number().integer().min(0).max(30000).required(), maxDelayMs: Joi.number().integer().min(0).max(120000).required() }).required(),
+  commandPolicy: Joi.object({ allowedMessageLength: Joi.number().integer().min(1).max(500).required(), allowedItems: Joi.array().items(itemSchema).max(100).required() }).required()
+});
+
+export function isValidDatabaseName(value) { return typeof value === 'string' && DATABASE_NAME_PATTERN.test(value); }
+export function normalizeCountdownMarks(value) {
+  const items = Array.isArray(value) ? value : [30, 15, 10, 5, 1];
+  return [...new Set(items.map(Number))].sort((a, b) => b - a);
+}
+export const normalizeCountdownMinutes = normalizeCountdownMarks;
+function normalizeGgcon(config) {
+  if (!config) return { ...sourceDefaults };
+  if (config.mode === 'http-legacy') return { apiKey: '', apiKeyMode: 'x-api-key', timeoutMs: 5000, ...config };
+  if (config.mode === 'scum-shop-pipe') return { mode: 'scum-shop-pipe', endpointFile: 'runtime/bridge/endpoint.json', timeoutMs: 5000, ...config };
+  if (config.baseUrl && !config.mode) return { mode: 'http-legacy', apiKey: '', apiKeyMode: 'x-api-key', timeoutMs: 5000, ...config };
+  const normalized = { ...sourceDefaults, ...config, mode: 'source-tcp', port: 28015 };
+  if (normalized.host === '0.0.0.0' || normalized.host === '::') normalized.host = '127.0.0.1';
+  return normalized;
+}
+
+export class ConfigStore {
+  constructor(filePath) { this.filePath = filePath; }
+  async read() {
+    const config = JSON.parse(await fs.readFile(this.filePath, 'utf8'));
+    const starterGifts = Array.isArray(config.starterGifts)
+      ? config.starterGifts
+      : [{ id: 'default', name: '新手礼包', category: '基础礼包', enabled: false, items: [], ...config.starterGift }];
+    return {
+      ...config,
+      website: { backgroundImage: '', ...config.website },
+      ggcon: normalizeGgcon(config.ggcon),
+      mysql: { host: '127.0.0.1', port: 3306, user: 'root', database: 'scum_shop', password: '', ...config.mysql },
+      fulfillment: { instanceId: '', sharedSecret: '', workerEnabled: false, pollIntervalMs: 5000, commandIntervalMs: 0, maxAttempts: 5, notifyOnSuccess: true, deliveryName: '', successMessage: '{username}，{orderName} {action}，数量 {quantity}。', purchaseMessage: '[玩家昵称]的【{orderName}】', giftMessage: '[玩家昵称]的【{orderName}】', recycleMessage: '[玩家昵称]的【{orderName}】', withdrawMessage: '[玩家昵称]的【{orderName}】', bulkWithdrawMessage: '[玩家昵称]的【{orderName}】', ...config.fulfillment },
+      starterGifts,
+      announcements: { enabled: false, pollIntervalMs: 5000, ...config.announcements, items: (config.announcements?.items || []).map((item) => ({ name: item.name || item.id || '公告任务', executionTime: item.executionTime || '00:00', weekdays: Array.isArray(item.weekdays) && item.weekdays.length ? item.weekdays : [1,2,3,4,5,6,7], intervalMinutes: Number(item.intervalMinutes ?? 0), ...item })) },
+      monitoring: { enabled: true, pollIntervalMs: 10000, retentionDays: 7, ...config.monitoring },
+      exchange: { enabled: true, coinToGoldRate: 1, goldToCoinRate: 1, maxAmount: 100000, ...config.exchange },
+      characterGrowth: { attributePointPrice: 0, skillLevelPrice: 0, ...config.characterGrowth },
+      scumLogs: { enabled: true, directory: 'E:\\trae win\\scum\\2025\\SCUM\\Saved\\SaveFiles\\Logs', pollIntervalMs: 5000, retentionDays: 365, ...config.scumLogs },
+      chatLogs: { enabled: true, directory: config.scumLogs?.directory || 'E:\\trae win\\scum\\2025\\SCUM\\Saved\\SaveFiles\\Logs', pollIntervalMs: 5000, retentionDays: 365, autoReplyEnabled: false, ...config.chatLogs, claimPrefix: !config.chatLogs?.claimPrefix || config.chatLogs.claimPrefix === '@领取' ? '@' : config.chatLogs.claimPrefix, recycleCommand: config.chatLogs?.recycleCommand || '回收' },
+      maintenance: {
+        enabled: false, pollIntervalMs: 5000, countdownMinutes: [30, 15, 10, 5, 1], recoverySuccessThreshold: 3,
+        countdownMessage: '服务器将在 {minutes} 分钟后进入维护，请尽快安全下线。',
+        maintenanceMessage: '服务器现已进入维护，商城自动发货已暂停。',
+        recoveryMessage: '服务器已通过连续监控检测，等待管理员确认恢复发货。',
+        ...config.maintenance,
+        countdownMessage: config.maintenance?.countdownMessage ?? config.maintenance?.announcementTemplate ?? '服务器将在 {minutes} 分钟后进入维护，请尽快安全下线。',
+        countdownMinutes: normalizeCountdownMarks(config.maintenance?.countdownMinutes ?? config.maintenance?.countdownMarks)
+      },
+      stockMarket: normalizeStockMarketConfig(config.stockMarket)
+    };
+  }
+  async save(input, { allowLocalRconPassword = false, readGameRconConfig = true, ensureGameRconConfig = false } = {}) {
+    const current = await this.read();
+    const syncPassword = input.ggcon?.syncPassword === true;
+    const rotatePassword = input.ggcon?.rotatePassword === true;
+    let passwordToSync = null;
+    if (syncPassword) {
+      const requestedPassword = String(input.ggcon?.password || '');
+      if (!/^[0-9a-f]{64}$/i.test(requestedPassword)) throw new Error('配置无效：RCON 密码必须是 64 位十六进制密钥');
+      passwordToSync = requestedPassword.toLowerCase();
+    } else if (rotatePassword) passwordToSync = randomBytes(32).toString('hex');
+    const requestedRoot = String(input.ggcon?.serverDirectory || '').trim();
+    let discovered = null;
+    if (requestedRoot) {
+      const paths = scumPathsFromRoot(requestedRoot);
+      if (readGameRconConfig) {
+        discovered = { paths, rcon: await readScumRconIni(paths.rconConfig) };
+        if (discovered.rcon.port !== 28015) throw new Error('游戏端 RCON 端口必须固定为 28015');
+        if (!discovered.rcon.password) throw new Error('游戏端 RCON 配置中未设置密钥');
+      }
+      input = {
+        ...input,
+        ggcon: { ...input.ggcon, mode: 'source-tcp', discoveryMode: 'manual', serverDirectory: paths.root, ...(discovered ? { host: discovered.rcon.host, port: discovered.rcon.port, password: discovered.rcon.password } : {}) },
+        scumLogs: { ...input.scumLogs, directory: paths.logsDirectory },
+        chatLogs: { ...input.chatLogs, directory: paths.logsDirectory }
+      };
+    }
+    const requestedGgcon = { ...current.ggcon, ...input.ggcon };
+    const modeChanged = input.ggcon?.mode && input.ggcon.mode !== current.ggcon.mode;
+    const mergedGgcon = normalizeGgcon(modeChanged ? input.ggcon : requestedGgcon);
+    if (mergedGgcon.mode === 'source-tcp') {
+      const clearServerConfig = input.ggcon?.clearServerConfig === true;
+      mergedGgcon.password = discovered?.rcon.password || (current.ggcon.mode === 'source-tcp' ? current.ggcon.password : '');
+      if (allowLocalRconPassword && input.ggcon?.password) mergedGgcon.password = input.ggcon.password;
+      mergedGgcon.serverDirectory = clearServerConfig ? '' : requestedRoot || input.ggcon?.serverDirectory?.trim() || (current.ggcon.mode === 'source-tcp' ? current.ggcon.serverDirectory : '');
+      mergedGgcon.configPath = clearServerConfig ? '' : input.ggcon?.configPath?.trim() || (current.ggcon.mode === 'source-tcp' ? current.ggcon.configPath : '');
+      if (passwordToSync) {
+        mergedGgcon.password = passwordToSync;
+        mergedGgcon.noPasswordAuth = false;
+      }
+    } else if (mergedGgcon.mode === 'http-legacy') mergedGgcon.apiKey = input.ggcon?.apiKey?.trim() || current.ggcon.apiKey || '';
+    const merged = {
+      website: { ...current.website, ...input.website },
+      gsm3: { ...current.gsm3, ...input.gsm3, apiKey: input.gsm3?.apiKey?.trim() || current.gsm3.apiKey }, ggcon: mergedGgcon,
+      mysql: { ...current.mysql, ...input.mysql, password: input.mysql?.password?.trim() || current.mysql.password },
+      fulfillment: { ...current.fulfillment, ...input.fulfillment, sharedSecret: input.fulfillment?.sharedSecret?.trim() || current.fulfillment.sharedSecret },
+      starterGifts: input.starterGifts ?? current.starterGifts, announcements: { ...current.announcements, ...input.announcements },
+      monitoring: { ...current.monitoring, ...input.monitoring },
+      scumLogs: { ...current.scumLogs, ...input.scumLogs, directory: input.scumLogs?.directory?.trim() || current.scumLogs.directory },
+      chatLogs: { ...current.chatLogs, ...input.chatLogs, directory: input.chatLogs?.directory?.trim() || current.chatLogs.directory },
+      maintenance: { ...current.maintenance, ...input.maintenance, countdownMinutes: normalizeCountdownMarks(input.maintenance?.countdownMinutes ?? input.maintenance?.countdownMarks ?? current.maintenance.countdownMinutes) },
+      exchange: { ...current.exchange, ...input.exchange },
+      characterGrowth: { ...current.characterGrowth, ...input.characterGrowth },
+      stockMarket: normalizeStockMarketConfig({ ...current.stockMarket, ...input.stockMarket }),
+      reconnect: { ...current.reconnect, ...input.reconnect }, commandPolicy: { ...current.commandPolicy, ...input.commandPolicy }
+    };
+    const { value, error } = schema.validate(merged, { abortEarly: true, stripUnknown: true });
+    if (error) throw new Error(`配置无效：${error.details[0].message}`);
+    for (const gift of value.starterGifts) {
+      const quantities = new Map();
+      for (const item of gift.items) quantities.set(item.sku, (quantities.get(item.sku) || 0) + item.quantity);
+      if ([...quantities.values()].some((quantity) => quantity > 1000)) throw new Error(`配置无效：礼包 ${gift.id} 中同一 SKU 合并后的数量不能超过 1000`);
+    }
+    if (value.reconnect.baseDelayMs > value.reconnect.maxDelayMs) throw new Error('配置无效：基础重试延迟不能大于最大重试延迟');
+    normalizeStockMarketConfig(value.stockMarket);
+    const messageLimit = value.commandPolicy.allowedMessageLength;
+    const notificationTemplateFields = ['successMessage','purchaseMessage','giftMessage','recycleMessage','withdrawMessage','bulkWithdrawMessage'];
+    for (const field of notificationTemplateFields) {
+      if ((input.fulfillment?.[field] !== undefined || input.commandPolicy?.allowedMessageLength !== undefined) && value.fulfillment[field].length > messageLimit) throw new Error(`配置无效：发货通知模板不能超过 ${messageLimit} 个字符`);
+    }
+    if (input.announcements !== undefined || input.commandPolicy?.allowedMessageLength !== undefined) {
+      for (const item of value.announcements.items) {
+        const lines = item.message.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        if (!lines.length) throw new Error(`配置无效：公告 ${item.name} 内容不能为空`);
+        try { for (const line of lines) { if (line.startsWith('#')) buildAnnouncementCommand({ command: line }); else buildMessageCommand({ global: true, message: line }, value.commandPolicy); } }
+        catch (error) { throw new Error(`配置无效：公告任务 ${item.name} 内容不符合安全规则：${error.message}`); }
+      }
+    }
+    if (input.maintenance !== undefined || input.commandPolicy?.allowedMessageLength !== undefined) {
+      if (!value.maintenance.countdownMessage.includes('{minutes}')) throw new Error('配置无效：维护倒计时模板必须包含 {minutes}');
+      if ((value.maintenance.countdownMessage.match(/\{[^}]+\}/g) || []).some((placeholder) => placeholder !== '{minutes}')) throw new Error('配置无效：维护倒计时模板仅支持 {minutes} 占位符');
+      if ((value.maintenance.maintenanceMessage.match(/\{[^}]+\}/g) || []).length || (value.maintenance.recoveryMessage.match(/\{[^}]+\}/g) || []).length) throw new Error('配置无效：进入维护与恢复模板不支持占位符');
+      const samples = [value.maintenance.countdownMessage.replaceAll('{minutes}', '1440'), value.maintenance.maintenanceMessage, value.maintenance.recoveryMessage];
+      if (samples.some((text) => text.length > messageLimit)) throw new Error(`配置无效：维护消息不能超过 ${messageLimit} 个字符`);
+      try { for (const text of samples) buildMessageCommand({ steamId: '76561198000000000', message: text }, value.commandPolicy); }
+      catch (error) { throw new Error(`配置无效：维护消息不符合命令安全限制：${error.message}`); }
+    }
+    let gameChange = null;
+    if (ensureGameRconConfig) {
+      if (!requestedRoot || value.ggcon.mode !== 'source-tcp') throw new Error('配置无效：生成游戏端 RCON 配置需要 SCUM 服务器根目录');
+      const paths = scumPathsFromRoot(requestedRoot);
+      gameChange = await prepareNativeScumRconConfig(paths.rconConfig, value.ggcon);
+    } else if (passwordToSync) {
+      if (value.ggcon.mode !== 'source-tcp') throw new Error('配置无效：仅 Source TCP 模式可同步 RCON 密码');
+      const gameFile = await findScumGameRconConfig(value.scumLogs.directory, value.chatLogs.directory);
+      gameChange = await prepareScumGameRconPassword(gameFile, value.ggcon.password);
+    }
+    const temporary = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      if (gameChange) await writeScumGameRconConfig(gameChange);
+      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+      await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+      await fs.rename(temporary, this.filePath);
+    } catch (error) {
+      await fs.rm(temporary, { force: true }).catch(() => {});
+      if (gameChange) {
+        try { await writeScumGameRconConfig(gameChange, true); }
+        catch (restoreError) { throw new Error(`${error.message}；${restoreError.message}`); }
+      }
+      throw error;
+    }
+    return value;
+  }
+  sanitize(config) {
+    const ggcon = config.ggcon.mode === 'http-legacy'
+      ? { mode: 'http-legacy', baseUrl: config.ggcon.baseUrl, apiKeyMode: config.ggcon.apiKeyMode, timeoutMs: config.ggcon.timeoutMs, hasApiKey: Boolean(config.ggcon.apiKey) }
+      : config.ggcon.mode === 'scum-shop-pipe'
+        ? { mode: 'scum-shop-pipe', endpointFile: config.ggcon.endpointFile, timeoutMs: config.ggcon.timeoutMs }
+        : { mode: 'source-tcp', discoveryMode: config.ggcon.discoveryMode, host: config.ggcon.host, port: config.ggcon.port, noPasswordAuth: config.ggcon.noPasswordAuth, connectTimeoutMs: config.ggcon.connectTimeoutMs, authTimeoutMs: config.ggcon.authTimeoutMs, commandTimeoutMs: config.ggcon.commandTimeoutMs, maxPacketSize: config.ggcon.maxPacketSize, gameDirectory: config.ggcon.serverDirectory, hasPassword: Boolean(config.ggcon.password), hasServerDirectory: Boolean(config.ggcon.serverDirectory), hasConfigPath: Boolean(config.ggcon.configPath) };
+    return { website: { backgroundImage: config.website?.backgroundImage || '' }, gsm3: { baseUrl: config.gsm3.baseUrl, timeoutMs: config.gsm3.timeoutMs, hasApiKey: Boolean(config.gsm3.apiKey) }, ggcon, mysql: { host: config.mysql.host, port: config.mysql.port, user: config.mysql.user, database: config.mysql.database, hasPassword: Boolean(config.mysql.password) }, fulfillment: { instanceId: config.fulfillment.instanceId, workerEnabled: config.fulfillment.workerEnabled, pollIntervalMs: config.fulfillment.pollIntervalMs, commandIntervalMs: config.fulfillment.commandIntervalMs, maxAttempts: config.fulfillment.maxAttempts, notifyOnSuccess: config.fulfillment.notifyOnSuccess, deliveryName: config.fulfillment.deliveryName, successMessage: config.fulfillment.successMessage, purchaseMessage: config.fulfillment.purchaseMessage, giftMessage: config.fulfillment.giftMessage, recycleMessage: config.fulfillment.recycleMessage, withdrawMessage: config.fulfillment.withdrawMessage, bulkWithdrawMessage: config.fulfillment.bulkWithdrawMessage, hasSharedSecret: Boolean(config.fulfillment.sharedSecret) }, announcements: config.announcements, monitoring: config.monitoring, exchange: config.exchange, characterGrowth: config.characterGrowth, scumLogs: { enabled: config.scumLogs.enabled, pollIntervalMs: config.scumLogs.pollIntervalMs, retentionDays: config.scumLogs.retentionDays, hasDirectory: Boolean(config.scumLogs.directory) }, chatLogs: { enabled: config.chatLogs.enabled, pollIntervalMs: config.chatLogs.pollIntervalMs, retentionDays: config.chatLogs.retentionDays, claimPrefix: config.chatLogs.claimPrefix, recycleCommand: config.chatLogs.recycleCommand, autoReplyEnabled: config.chatLogs.autoReplyEnabled, hasDirectory: Boolean(config.chatLogs.directory) }, maintenance: config.maintenance, stockMarket: config.stockMarket, reconnect: config.reconnect, commandPolicy: config.commandPolicy };
+  }
+  async publicConfig() { return this.sanitize(await this.read()); }
+}

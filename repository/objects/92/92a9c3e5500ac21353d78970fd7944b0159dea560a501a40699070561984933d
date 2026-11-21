@@ -1,0 +1,229 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import Joi from 'joi';
+import { verifyLicenseSignature } from './license-trust.js';
+
+export const LICENSE_PRODUCT_CODE = 'scum-rcon';
+
+const requestNonceSchema = Joi.string().pattern(/^[A-Za-z0-9_-]{43}$/).required();
+const licenseIdSchema = Joi.string().guid({ version: ['uuidv4'] }).required();
+const issuedDataSchema = Joi.object({
+  licenseId: licenseIdSchema,
+  licenseToken: Joi.string().min(1).max(8192).required(),
+  username: Joi.string().trim().min(1).max(255).required(),
+  expiresAt: Joi.string().isoDate().required(),
+  serverTime: Joi.string().isoDate().required(),
+  productCode: Joi.string().valid(LICENSE_PRODUCT_CODE).required(),
+  requestNonce: requestNonceSchema
+}).unknown(false);
+const verifyDataSchema = Joi.object({
+  valid: Joi.boolean().valid(true).required(),
+  licenseId: licenseIdSchema,
+  username: Joi.string().trim().min(1).max(255).required(),
+  expiresAt: Joi.string().isoDate().required(),
+  serverTime: Joi.string().isoDate().required(),
+  productCode: Joi.string().valid(LICENSE_PRODUCT_CODE).required(),
+  requestNonce: requestNonceSchema
+}).unknown(false);
+const signatureSchema = Joi.object({
+  keyId: Joi.string().required(),
+  algorithm: Joi.string().valid('Ed25519').required(),
+  value: Joi.string().base64().required()
+}).unknown(false);
+const failureSchema = Joi.object({
+  success: Joi.boolean().valid(false).required(),
+  message: Joi.string().trim().min(1).max(1000).required(),
+  code: Joi.string().trim().min(1).max(100).required()
+}).unknown(false);
+
+export class LicenseError extends Error {
+  constructor(message, code = 'LICENSE_ERROR', options = {}) {
+    super(message, options);
+    this.name = 'LicenseError';
+    this.code = code;
+    this.status = options.status;
+  }
+}
+
+function validateBaseUrl(value, env) {
+  let url;
+  try { url = new URL(value); }
+  catch (error) { throw new LicenseError('授权服务器地址无效', 'LICENSE_BASE_URL_INVALID', { cause: error }); }
+  const allowHttp = env.NODE_ENV !== 'production' && env.LICENSE_ALLOW_HTTP === 'true';
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && allowHttp)) {
+    throw new LicenseError('授权服务器必须使用 HTTPS', 'LICENSE_HTTPS_REQUIRED');
+  }
+  if (url.username || url.password || url.search || url.hash) throw new LicenseError('授权服务器地址无效', 'LICENSE_BASE_URL_INVALID');
+  return url.toString().replace(/\/$/, '');
+}
+
+function timeoutFrom(env) {
+  if (env.LICENSE_TIMEOUT_MS === undefined) return 10000;
+  const value = Number(env.LICENSE_TIMEOUT_MS);
+  if (!Number.isInteger(value) || value < 100 || value > 120000) throw new LicenseError('授权超时配置无效', 'LICENSE_TIMEOUT_INVALID');
+  return value;
+}
+
+function parseTime(value, code) {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) throw new LicenseError('授权中心响应格式无效', code);
+  return time;
+}
+
+export class LicenseClient {
+  constructor({ baseUrl, timeoutMs, fetchImpl = globalThis.fetch, env = process.env, signatureVerifier = verifyLicenseSignature } = {}) {
+    if (typeof fetchImpl !== 'function') throw new LicenseError('当前 Node.js 不支持在线授权', 'LICENSE_FETCH_UNAVAILABLE');
+    if (typeof signatureVerifier !== 'function') throw new LicenseError('授权签名验证器无效', 'LICENSE_SIGNATURE_VERIFIER_INVALID');
+    this.baseUrl = validateBaseUrl(baseUrl, env);
+    this.timeoutMs = timeoutMs ?? timeoutFrom(env);
+    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 100 || this.timeoutMs > 120000) throw new LicenseError('授权超时配置无效', 'LICENSE_TIMEOUT_INVALID');
+    this.fetchImpl = fetchImpl;
+    this.signatureVerifier = signatureVerifier;
+  }
+
+  async request(operation, payload, dataSchema) {
+    const requestNonce = randomBytes(32).toString('base64url');
+    let response;
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      try {
+        response = await this.fetchImpl(`${this.baseUrl}/api/v1/client/${operation}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({ ...payload, productCode: LICENSE_PRODUCT_CODE, requestNonce }),
+          redirect: 'error',
+          signal: controller.signal
+        });
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+      } finally { clearTimeout(timer); }
+    }
+    if (!response) {
+      if (lastError?.name === 'AbortError') throw new LicenseError('授权中心请求超时', 'LICENSE_TIMEOUT', { cause: lastError });
+      throw new LicenseError('无法连接授权中心', 'LICENSE_NETWORK_ERROR', { cause: lastError });
+    }
+
+    let body;
+    try { body = await response.json(); }
+    catch (error) { throw new LicenseError('授权中心响应格式无效', 'LICENSE_RESPONSE_INVALID', { status: response.status, cause: error }); }
+
+    if (!response.ok || body?.success !== true) {
+      const { value, error } = failureSchema.validate(body, { convert: false });
+      const code = response.status === 403 ? 'LICENSE_INVALID' : (error ? 'LICENSE_RESPONSE_INVALID' : value.code);
+      const message = response.status === 403 ? '授权已失效' : (error ? '授权中心响应格式无效' : value.message);
+      throw new LicenseError(message, code, { status: response.status });
+    }
+    const successSchema = Joi.object({ success: Joi.boolean().valid(true).required(), data: dataSchema.required(), signature: signatureSchema.required() }).unknown(false);
+    const { value, error } = successSchema.validate(body, { abortEarly: true, convert: false });
+    if (error) throw new LicenseError('授权响应签名无效', 'LICENSE_SIGNATURE_INVALID', { status: response.status, cause: error });
+    if (!this.signatureVerifier(value.data, value.signature)) throw new LicenseError('授权响应签名无效', 'LICENSE_SIGNATURE_INVALID', { status: response.status });
+    const expectedNonce = Buffer.from(requestNonce);
+    const responseNonce = Buffer.from(value.data.requestNonce);
+    if (expectedNonce.length !== responseNonce.length || !timingSafeEqual(expectedNonce, responseNonce)) {
+      throw new LicenseError('授权响应与请求不匹配', 'LICENSE_RESPONSE_REPLAYED', { status: response.status });
+    }
+    return value.data;
+  }
+
+  async register({ username, password }) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/api/v1/account/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ username, password }),
+        redirect: 'error',
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new LicenseError('授权中心请求超时', 'LICENSE_TIMEOUT', { cause: error });
+      throw new LicenseError('无法连接授权中心', 'LICENSE_NETWORK_ERROR', { cause: error });
+    } finally { clearTimeout(timer); }
+    let body;
+    try { body = await response.json(); }
+    catch (error) { throw new LicenseError('授权中心响应格式无效', 'LICENSE_RESPONSE_INVALID', { status: response.status, cause: error }); }
+    if (!response.ok || body?.success !== true) {
+      const { value, error } = failureSchema.validate(body, { convert: false });
+      throw new LicenseError(error ? '授权中心响应格式无效' : value.message, error ? 'LICENSE_RESPONSE_INVALID' : value.code, { status: response.status });
+    }
+    return body.data;
+  }
+
+  async activate({ username, password, cardKey }) {
+    return this.request('activate', { username, password, cardKey }, issuedDataSchema);
+  }
+
+  async connect({ username, password }) {
+    return this.request('connect', { username, password }, issuedDataSchema);
+  }
+
+  async verify({ licenseToken }) {
+    const data = await this.request('verify', { licenseToken }, verifyDataSchema);
+    if (parseTime(data.expiresAt, 'LICENSE_RESPONSE_INVALID') <= parseTime(data.serverTime, 'LICENSE_RESPONSE_INVALID')) {
+      throw new LicenseError('授权已过期', 'LICENSE_EXPIRED');
+    }
+    return data;
+  }
+}
+
+export async function authenticateLicenseAccount({ store, password, clientFactory = (baseUrl) => new LicenseClient({ baseUrl }) }) {
+  const saved = await store.read();
+  const secret = String(password || '');
+  if (secret.length < 8 || secret.length > 28) throw new LicenseError('授权账号密码格式无效', 'LICENSE_CREDENTIALS_INVALID');
+  const issued = await clientFactory(saved.baseUrl).connect({ username: saved.username, password: secret });
+  if (issued.licenseId !== saved.licenseId || issued.username !== saved.username) {
+    throw new LicenseError('重新认证的授权身份与本机许可证不一致', 'LICENSE_IDENTITY_MISMATCH');
+  }
+  const updated = {
+    baseUrl: saved.baseUrl,
+    licenseId: issued.licenseId,
+    licenseToken: issued.licenseToken,
+    username: issued.username,
+    expiresAt: issued.expiresAt,
+    lastVerifiedAt: issued.serverTime
+  };
+  await store.save(updated);
+  return store.sanitize(updated);
+}
+
+export async function assertStartupAllowed({ store, clientFactory = (baseUrl) => new LicenseClient({ baseUrl }) }) {
+  const saved = await store.read();
+  const client = clientFactory(saved.baseUrl);
+  const verified = await client.verify({ licenseToken: saved.licenseToken });
+  if (verified.licenseId !== saved.licenseId) {
+    throw new LicenseError('授权标识与本地记录不一致', 'LICENSE_RESPONSE_INVALID');
+  }
+  const updated = {
+    baseUrl: saved.baseUrl,
+    licenseId: verified.licenseId,
+    licenseToken: saved.licenseToken,
+    username: verified.username,
+    expiresAt: verified.expiresAt,
+    lastVerifiedAt: verified.serverTime
+  };
+  await store.save(updated);
+  return store.sanitize(updated);
+}
+
+export async function createLicensedDatabase({ configStore, licenseStore, createDatabase, clientFactory }) {
+  const config = await configStore.read();
+  await assertStartupAllowed({ store: licenseStore, clientFactory });
+  const db = await createDatabase(config.mysql);
+  return { config, db };
+}
+
+export function formatLicenseStartupError(error) {
+  if (error?.code === 'LICENSE_NOT_ACTIVATED') return '授权失败：账号尚未激活卡密，请先访问授权中心网站激活卡密';
+  if (error?.code === 'LICENSE_EXPIRED') return '授权失败：授权已过期';
+  if (error?.code === 'LICENSE_INVALID') return '授权失败：授权已失效';
+  if (error?.code === 'LICENSE_TIMEOUT' || error?.code === 'LICENSE_NETWORK_ERROR') return '授权失败：无法连接授权中心';
+  if (error?.code === 'LICENSE_SIGNATURE_INVALID') return '授权失败：授权中心响应签名无效';
+  if (error?.code === 'LICENSE_RESPONSE_REPLAYED') return '授权失败：授权中心响应与请求不匹配';
+  if (typeof error?.message === 'string' && error.message.length > 0 && error.message.length <= 1000) return `授权失败：${error.message}`;
+  return '授权失败：无法验证授权';
+}

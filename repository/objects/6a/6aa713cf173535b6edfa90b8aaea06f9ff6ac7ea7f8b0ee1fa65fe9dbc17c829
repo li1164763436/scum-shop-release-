@@ -1,0 +1,61 @@
+import path from 'node:path';
+import winston from 'winston';
+import { redact } from '../utils/redactor.js';
+
+const DEFAULT_REPEAT_WINDOW_MS = 60_000;
+const MAX_REPEAT_KEYS = 2_000;
+
+function errorObject(value) {
+  if (!(value instanceof Error)) return value;
+  return { message: value.message, code: value.code || value.name, stack: value.stack };
+}
+
+const normalizeFormat = winston.format((info) => {
+  if (!info.component) info.component = 'application';
+  if (info.error instanceof Error) info.error = errorObject(info.error);
+  Object.assign(info, redact(info));
+  return info;
+});
+
+function repeatKey(info) {
+  const fields = ['level', 'component', 'message', 'code', 'error', 'errorCode', 'command', 'eventId', 'announcementId', 'taskId', 'orderId', 'file'];
+  return JSON.stringify(fields.map((field) => [field, info[field] ?? null]));
+}
+
+function suppressRepeatedFormat(windowMs = DEFAULT_REPEAT_WINDOW_MS) {
+  const recent = new Map();
+  return winston.format((info) => {
+    if (!['warn', 'error'].includes(String(info.level))) return info;
+    const now = Date.now();
+    const key = repeatKey(info);
+    const previous = recent.get(key);
+    if (previous && now - previous.writtenAt < windowMs) {
+      previous.suppressed += 1;
+      previous.lastSeenAt = now;
+      return false;
+    }
+    if (previous?.suppressed) {
+      info.repeatCount = previous.suppressed;
+      info.repeatWindowMs = Math.max(0, previous.lastSeenAt - previous.writtenAt);
+    }
+    recent.set(key, { writtenAt: now, lastSeenAt: now, suppressed: 0 });
+    if (recent.size > MAX_REPEAT_KEYS) {
+      const cutoff = now - windowMs * 2;
+      for (const [entryKey, state] of recent) if (state.lastSeenAt < cutoff) recent.delete(entryKey);
+    }
+    return info;
+  })();
+}
+
+export function createLogger(logDir) {
+  const fileFormat = winston.format.combine(normalizeFormat(), suppressRepeatedFormat(), winston.format.timestamp(), winston.format.json());
+  return winston.createLogger({
+    level: process.env.LOG_LEVEL || 'info',
+    format: fileFormat,
+    transports: [
+      new winston.transports.File({ filename: path.join(logDir, 'error.log'), level: 'error', maxsize: 2 * 1024 * 1024, maxFiles: 5, tailable: true }),
+      new winston.transports.File({ filename: path.join(logDir, 'combined.log'), maxsize: 5 * 1024 * 1024, maxFiles: 5, tailable: true }),
+      ...(process.env.NODE_ENV === 'production' ? [] : [new winston.transports.Console({ format: winston.format.combine(normalizeFormat(), winston.format.colorize(), winston.format.simple()) })])
+    ]
+  });
+}

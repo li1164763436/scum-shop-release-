@@ -1,0 +1,61 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createPrivateKey, createPublicKey, sign } from 'node:crypto';
+import {
+  releaseManifestSignaturePayload,
+  updateTransportOptions,
+  verifyReleaseManifestSignature
+} from '../src/services/update-transport.js';
+
+function argument(name) {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : '';
+}
+
+const manifestArgument = argument('--manifest');
+const verifyOnly = process.argv.includes('--verify');
+if (!manifestArgument) {
+  throw new Error('Usage: node scripts/sign-release-manifest.js --manifest <path> (--verify | --private-key <pem> --key-id <id>)');
+}
+const manifestPath = path.resolve(manifestArgument);
+const rawManifest = await fs.readFile(manifestPath, 'utf8');
+const manifest = JSON.parse(rawManifest.replace(/^\uFEFF/, ''));
+
+if (verifyOnly) {
+  const result = verifyReleaseManifestSignature(manifest, {
+    publicKeys: updateTransportOptions({}).publicKeys,
+    requireSignature: true
+  });
+  process.stdout.write(`${result.keyId}\n`);
+} else {
+  const privateKeyArgument = argument('--private-key');
+  const keyId = String(argument('--key-id') || '').trim();
+  if (!privateKeyArgument || !keyId) {
+    throw new Error('Signing requires --private-key <pem> and --key-id <id>');
+  }
+  const privateKeyPath = path.resolve(privateKeyArgument);
+  const privateKeyPem = await fs.readFile(privateKeyPath, 'utf8');
+  delete manifest.signature;
+  const privateKey = createPrivateKey(privateKeyPem);
+  const publicKey = createPublicKey(privateKey);
+  if (publicKey.asymmetricKeyType !== 'ec' || publicKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+    throw new Error('Release signing key must be an ECDSA P-256 private key');
+  }
+  manifest.signature = {
+    algorithm: 'ecdsa-p256-sha256',
+    keyId,
+    value: sign('sha256', releaseManifestSignaturePayload(manifest), {
+      key: privateKey,
+      dsaEncoding: 'ieee-p1363'
+    }).toString('base64')
+  };
+  const temporary = `${manifestPath}.${process.pid}.tmp`;
+  await fs.writeFile(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+  try { await fs.rename(temporary, manifestPath); }
+  finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
+  verifyReleaseManifestSignature(manifest, {
+    publicKeys: updateTransportOptions({}).publicKeys,
+    requireSignature: true
+  });
+  process.stdout.write(`${keyId}\n`);
+}

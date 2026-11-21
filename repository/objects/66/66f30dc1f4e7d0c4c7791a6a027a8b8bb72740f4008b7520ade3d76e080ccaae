@@ -1,0 +1,110 @@
+import readline from 'node:readline';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { assertStartupAllowed, LicenseClient } from '../src/services/license-client.js';
+import { LicenseStore } from '../src/services/license-store.js';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const operation = process.argv[2] || 'activate';
+const store = new LicenseStore(process.env.LICENSE_FILE || path.join(root, 'runtime', 'secrets', 'license.json'));
+let inputPayload = null;
+
+async function readInputPayload() {
+  if (process.env.LICENSE_INPUT_JSON !== '1') return;
+  let text = '';
+  for await (const chunk of process.stdin) {
+    text += chunk;
+    if (text.length > 16384) throw new Error('授权输入过长');
+  }
+  try { inputPayload = JSON.parse(text); }
+  catch { throw new Error('授权输入格式无效'); }
+}
+
+function ask(prompt, { hidden = false } = {}) {
+  if (!hidden || !process.stdin.isTTY) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    return new Promise((resolve) => rl.question(prompt, (answer) => { rl.close(); resolve(answer); }));
+  }
+  return new Promise((resolve, reject) => {
+    const input = process.stdin;
+    const output = process.stdout;
+    let value = '';
+    output.write(prompt);
+    input.setRawMode(true);
+    input.resume();
+    input.setEncoding('utf8');
+    const cleanup = () => { input.off('data', onData); input.setRawMode(false); input.pause(); output.write('\n'); };
+    const onData = (chunk) => {
+      for (const character of chunk) {
+        if (character === '\r' || character === '\n') { cleanup(); resolve(value); return; }
+        if (character === '\u0003') { cleanup(); reject(new Error('操作已取消')); return; }
+        if (character === '\u007f' || character === '\b') value = value.slice(0, -1);
+        else if (character >= ' ') value += character;
+      }
+    };
+    input.on('data', onData);
+  });
+}
+
+async function required(environmentName, prompt, hidden = false) {
+  const payloadNames = { LICENSE_ACCOUNT_USERNAME: 'username', LICENSE_ACCOUNT_PASSWORD: 'password', LICENSE_CARD_KEY: 'cardKey' };
+  const value = inputPayload?.[payloadNames[environmentName]] ?? process.env[environmentName] ?? await ask(prompt, { hidden });
+  if (!String(value || '').trim()) throw new Error(`${prompt.replace(/[：:]$/, '')}不能为空`);
+  return String(value).trim();
+}
+
+async function resolveBaseUrl(requireEnvironment = false) {
+  if (inputPayload?.baseUrl) return String(inputPayload.baseUrl).trim();
+  if (process.env.LICENSE_SERVER_URL) return process.env.LICENSE_SERVER_URL.trim();
+  if (!requireEnvironment) {
+    try { return (await store.read()).baseUrl; }
+    catch (error) { if (error?.code !== 'LICENSE_NOT_ACTIVATED') throw error; }
+  }
+  throw new Error('请设置 LICENSE_SERVER_URL 指定授权服务器地址');
+}
+
+async function saveIssued(baseUrl, data) {
+  await store.save({
+    baseUrl,
+    licenseId: data.licenseId,
+    licenseToken: data.licenseToken,
+    username: data.username,
+    expiresAt: data.expiresAt,
+    lastVerifiedAt: data.serverTime
+  });
+}
+
+async function main() {
+  if (!['activate', 'connect', 'status'].includes(operation)) throw new Error('操作必须是 activate、connect 或 status');
+  if (operation === 'status') {
+    const verified = await assertStartupAllowed({ store });
+    console.log(`授权有效：${verified.username}，到期时间：${verified.expiresAt}`);
+    return;
+  }
+  await readInputPayload();
+  const baseUrl = await resolveBaseUrl(operation === 'activate');
+  const username = await required('LICENSE_ACCOUNT_USERNAME', '账号：');
+  let password = await required('LICENSE_ACCOUNT_PASSWORD', '密码：', true);
+  let cardKey = null;
+  try {
+    if (operation === 'activate') cardKey = await required('LICENSE_CARD_KEY', '卡密：', true);
+    inputPayload = null;
+    const client = new LicenseClient({ baseUrl });
+    const data = operation === 'activate'
+      ? await client.activate({ username, password, cardKey })
+      : await client.connect({ username, password });
+    await saveIssued(baseUrl, data);
+    const action = operation === 'activate' ? '激活成功' : '重新连接成功';
+    console.log(`${action}：${data.username}，到期时间：${data.expiresAt}`);
+  } finally {
+    password = null;
+    cardKey = null;
+    inputPayload = null;
+  }
+}
+
+try { await main(); }
+catch (error) {
+  console.error(`授权操作失败：${error?.message || '未知错误'}`);
+  process.exitCode = 1;
+}

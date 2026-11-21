@@ -1,0 +1,349 @@
+async function loadLotteryLogs(page = state.lotteryLogPage) {
+  if (!$('#lotteryLogRows')) return;
+  $('#lotteryLogRows').innerHTML = empty(7, '正在加载抽奖日志...', true);
+  try {
+    const data = await api(`/api/fulfillment/lottery-logs?page=${encodeURIComponent(page)}&limit=${state.lotteryLogLimit}`);
+    state.lotteryFulfillmentLogs = Array.isArray(data?.items) ? data.items : [];
+    state.lotteryLogPage = Number(data?.page || page);
+    state.lotteryLogTotal = Number(data?.total || 0);
+    const pages = Math.max(1, Math.ceil(state.lotteryLogTotal / state.lotteryLogLimit));
+    $('#lotteryLogPageInfo').textContent = `第 ${state.lotteryLogPage} / ${pages} 页，共 ${state.lotteryLogTotal} 条`;
+    $('#lotteryLogPrev').disabled = state.lotteryLogPage <= 1;
+    $('#lotteryLogNext').disabled = state.lotteryLogPage >= pages;
+    $('#lotteryLogRows').innerHTML = state.lotteryFulfillmentLogs.length ? state.lotteryFulfillmentLogs.map((item) => `<tr><td><code>${esc(item.steamId || '--')}</code></td><td>${esc(item.poolName || `奖池 #${item.poolId || '--'}`)}<br><span class="muted">${esc(item.rewardName || '--')} · ${esc(item.rewardType || '--')}</span></td><td><code>${esc(item.taskType || '--')}</code></td><td>${status(item.status)}</td><td>${item.errorSummary ? esc(item.errorSummary) : '--'}</td><td><span class="muted">批次 ${esc(item.lotteryBatchId)} / 结果 ${esc(item.lotteryDrawId)}</span><br><span class="muted">订单 ${esc(item.orderNo || item.orderId)} / 任务 ${esc(item.fulfillmentTaskId)}</span></td><td>${esc(date(item.updatedAt || item.createdAt))}<br><span class="muted">创建：${esc(date(item.createdAt))}</span></td></tr>`).join('') : empty(7, '暂无抽奖履约日志');
+  } catch (error) {
+    $('#lotteryLogRows').innerHTML = empty(7, error.message === '接口不存在' ? '抽奖日志接口尚未启用' : error.message);
+  }
+}
+
+function localInput(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const offset = parsed.getTimezoneOffset() * 60000;
+  return new Date(parsed.getTime() - offset).toISOString().slice(0, 16);
+}
+function selectedNumbers(select) { return [...select.selectedOptions].map((item) => Number(item.value)); }
+function fillStage5Select(select, items, label, selected = []) {
+  const chosen = new Set(selected.map(Number));
+  select.innerHTML = items.map((item) => `<option value="${Number(item.id)}"${chosen.has(Number(item.id)) ? ' selected' : ''}>${esc(item.name || item.code || `${label} #${item.id}`)}</option>`).join('');
+}
+function lotteryCurrent() { return state.lotteryPools.find((item) => Number(item.id) === Number(state.selectedLotteryPoolId)); }
+function normalizeLotteryPoolPage() {
+  const pageCount = Math.max(1, Math.ceil(state.lotteryPools.length / state.lotteryPoolPageSize));
+  state.lotteryPoolPage = Math.min(Math.max(1, state.lotteryPoolPage), pageCount);
+  return pageCount;
+}
+function renderLotteryPoolList() {
+  if (!$('#lotteryPoolList')) return;
+  const pageCount = normalizeLotteryPoolPage();
+  const start = (state.lotteryPoolPage - 1) * state.lotteryPoolPageSize;
+  const items = state.lotteryPools.slice(start, start + state.lotteryPoolPageSize);
+  $('#lotteryPoolCount').textContent = `${state.lotteryPools.length} 个奖池`;
+  $('#lotteryPoolPageInfo').textContent = `第 ${state.lotteryPoolPage} / ${pageCount} 页`;
+  $('#lotteryPoolPrev').disabled = state.lotteryPoolPage <= 1;
+  $('#lotteryPoolNext').disabled = state.lotteryPoolPage >= pageCount;
+  $('#lotteryPoolList').innerHTML = items.length ? items.map((item) => {
+    const selected = Number(item.id) === Number(state.selectedLotteryPoolId);
+    return `<article class="lottery-pool-item${selected ? ' selected' : ''}"><div class="lottery-pool-thumb">${item.imagePath ? `<img src="${esc(item.imagePath)}" alt="${esc(item.name)}">` : '<span>暂无图片</span>'}</div><div class="lottery-pool-meta"><div class="lottery-pool-title"><strong>${esc(item.name)}</strong><span class="lottery-status ${item.enabled ? 'enabled' : 'disabled'}"><i></i>${item.enabled ? '启用' : '停用'}</span></div><span class="lottery-pool-price">商城币 <b>${number(item.singlePrice)}</b> / 单抽</span><small>${item.versionNo ? `当前奖励版本 v${number(item.versionNo)}` : '尚未发布奖励版本'}</small></div><div class="lottery-pool-actions"><button class="btn ${selected ? 'primary' : 'secondary'}" type="button" data-lottery-pool-prizes="${item.id}">查看奖品</button><button class="btn secondary" type="button" data-lottery-pool-edit="${item.id}">编辑</button><button class="btn danger" type="button" data-lottery-pool-delete="${item.id}">删除</button></div></article>`;
+  }).join('') : '<div class="stock-record-empty">暂无奖池，请点击“添加奖池”。</div>';
+}
+function defaultLotteryWindow() {
+  return { startsAt: new Date().toISOString(), endsAt: '2099-12-31T23:59:59.000Z' };
+}
+function updateLotteryImagePreview(path) {
+  const preview = $('#lotteryPoolImagePreview');
+  if (preview) preview.innerHTML = path ? `<img src="${esc(path)}" alt="奖池图片预览">` : '<span>暂无图片</span>';
+}
+function lotteryPoolModal(pool = {}) {
+  pool = { ...pool, enabled: ![false, 0, '0', 'false'].includes(pool.enabled) };
+  let enabledCheckbox = null;
+  openModal({
+    title: pool.id ? '编辑奖池' : '添加奖池', description: '配置奖池基础信息。', submitText: '保存奖池',
+    body: `<input type="hidden" name="id" value="${esc(pool.id || '')}"><input type="hidden" name="enabled" value="${pool.enabled === false ? 'false' : 'true'}"><label class="full">奖池名称<input name="name" value="${esc(pool.name || '')}" maxlength="100" required></label><label>抽奖货币<select name="currencyType"><option value="coin">商城币</option></select></label><label>单抽金额<input name="singlePrice" type="number" min="0" step="1" value="${esc(pool.singlePrice ?? 0)}" required></label><label>连抽金额<input name="tenPrice" type="number" min="0" step="1" value="${esc(pool.tenPrice ?? Number(pool.singlePrice ?? 0)*10)}" required><span class="field-hint">10连抽的总金额（商城币）</span></label><label class="full">图片路径<input name="imagePath" value="${esc(pool.imagePath || '')}" maxlength="500" placeholder="上传后自动回填，也可填写站内路径"></label><div class="image-upload full"><div class="image-preview" id="lotteryPoolImagePreview">${pool.imagePath ? `<img src="${esc(pool.imagePath)}" alt="奖池图片预览">` : '<span>暂无图片</span>'}</div><div><input id="lotteryPoolImageFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden><button class="btn secondary" type="button" data-upload-lottery-image>上传图片</button><p>JPG / PNG / WebP / GIF，最大 2MB</p></div></div>`,
+    onSubmit: async (form) => {
+      const values = Object.fromEntries(new FormData(form));
+      const id = values.id;
+      const window = id ? { startsAt: pool.startsAt, endsAt: pool.endsAt } : defaultLotteryWindow();
+      const body = { name: values.name.trim(), description: pool.description || '', imagePath: values.imagePath.trim(), enabled: enabledCheckbox ? enabledCheckbox.checked : values.enabled === 'true', currencyType: values.currencyType, singlePrice: Number(values.singlePrice), tenPrice: Number(values.tenPrice), luckGrowth: Number(values.luckGrowth), ...window };
+      const saved = await api(id ? `/api/lottery/pools/${encodeURIComponent(id)}` : '/api/lottery/pools', { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) });
+      closeModal();
+      toast(id ? '奖池已更新' : '奖池已创建');
+      await loadActivitiesLottery({ poolId: saved.id });
+    }
+  });
+  const form = $('#modalForm');
+  $$('.lottery-enabled-switch', $('#modalBackdrop')).forEach((node) => node.remove());
+  const imagePathField = form.elements.imagePath?.closest('label');
+  const amountField = form.elements.singlePrice?.closest('label');
+  const luckGrowthField = document.createElement('label');
+  luckGrowthField.innerHTML = `每次幸运增长<input name="luckGrowth" type="number" min="1" max="100" step="1" value="${Number(pool.luckGrowth) || 1}" required><span class="field-hint">未抽中清空幸运值奖品时增加。</span>`;
+  amountField?.after(luckGrowthField);
+  const imageUpload = $('.image-upload', form);
+  if (imagePathField && imageUpload) {
+    const imageCard = document.createElement('section');
+    imageCard.className = 'lottery-image-card full';
+    imagePathField.before(imageCard);
+    imagePathField.classList.remove('full');
+    imagePathField.classList.add('lottery-image-path');
+    imageUpload.classList.remove('full');
+    imageUpload.classList.add('lottery-image-side');
+    imageCard.append(imagePathField, imageUpload);
+  }
+  const enabledSwitch = document.createElement('label');
+  enabledSwitch.className = 'lottery-enabled-switch';
+  enabledSwitch.innerHTML = `<input type="checkbox"${pool.enabled === false ? '' : ' checked'}><span></span><b>${pool.enabled === false ? '已关闭' : '已启用'}</b>`;
+  $('#modalBackdrop .modal-head .icon-btn')?.before(enabledSwitch);
+  enabledCheckbox = $('input', enabledSwitch);
+  enabledCheckbox.addEventListener('change', (event) => {
+    form.elements.enabled.value = event.currentTarget.checked ? 'true' : 'false';
+    $('b', enabledSwitch).textContent = event.currentTarget.checked ? '已启用' : '已关闭';
+  });
+  $('#modalBackdrop').classList.add('centered-modal', 'lottery-pool-editor-modal');
+}
+function lotteryPrizeTypeLabel(type) {
+  return { gift: '礼包', product: '物资商品', shop_coin: '商城币', custom: '自定义物品' }[type] || type;
+}
+function lotteryPrizeName(prize) {
+  if (prize.rewardType === 'gift') return state.gifts.find((item) => Number(item.id) === Number(prize.giftId))?.name || `礼包 #${prize.giftId}`;
+  if (prize.rewardType === 'product') return state.lotteryProducts.find((item) => Number(item.id) === Number(prize.productId))?.name || `商品 #${prize.productId}`;
+  if (prize.rewardType === 'shop_coin') return '商城币';
+  return prize.rewardName || prize.itemId || '自定义物品';
+}
+function lotteryPrizeQuantity(prize) { return prize.rewardType === 'shop_coin' ? Number(prize.coinAmount || 0) : Number(prize.quantity || 1); }
+document.addEventListener('change', (event) => {
+  const select=event.target.closest('[data-lottery-prize-sort]');
+  if(!select||!state.lotteryVersionDraft)return;
+  state.lotteryPrizeSort=select.value==='desc'?'desc':'asc';
+  state.lotteryPrizePage=1;
+  lotteryVersionModal();
+});
+function renderLotteryVersionDraft() {
+  const draft = state.lotteryVersionDraft;
+  if (!draft) return '';
+  const sort = state.lotteryPrizeSort === 'desc' ? 'desc' : 'asc'; const indexed=draft.prizes.map((prize,index)=>({prize,index})).sort((a,b)=>(Number(a.prize.luckRequired||0)-Number(b.prize.luckRequired||0))*(sort==='desc'?-1:1)||a.index-b.index); const pageCount=Math.max(1,Math.ceil(indexed.length/6)); state.lotteryPrizePage=Math.min(Math.max(1,Number(state.lotteryPrizePage)||1),pageCount); const start=(state.lotteryPrizePage-1)*6;
+  const rows = indexed.slice(start,start+6).map(({prize,index}) => `<tr><td><strong>${esc(lotteryPrizeName(prize))}</strong><small>${esc(lotteryPrizeTypeLabel(prize.rewardType))}</small></td><td>${number(lotteryPrizeQuantity(prize))}</td><td>${number(prize.stockRemaining ?? prize.stockQuantity ?? 1)} / ${number(prize.stockQuantity ?? 1)}</td><td>${number(prize.luckRequired || 0)}${prize.resetLuck || prize.isPity ? '<small class="luck-reset-tag">抽中清空</small>' : ''}</td><td>${number(prize.weight)}%</td><td>${esc(prize.rarity)}</td><td><div class="lottery-prize-row-actions"><button class="btn secondary" type="button" data-edit-lottery-prize="${index}">编辑</button><button class="btn danger" type="button" data-remove-lottery-prize="${index}">移除</button></div></td></tr>`).join('');
+  const pagination=`<div class="lottery-prize-pagination"><button class="btn secondary" type="button" data-lottery-prize-page="prev"${state.lotteryPrizePage<=1?' disabled':''}>上一页</button><span>第 ${state.lotteryPrizePage} / ${pageCount} 页 · 共 ${indexed.length} 项</span><button class="btn secondary" type="button" data-lottery-prize-page="next"${state.lotteryPrizePage>=pageCount?' disabled':''}>下一页</button></div>`;
+  return `<section class="modal-section full lottery-prize-detail-card"><div class="section-title"><div><h3>奖项列表</h3><p>配置库存、幸运值、中奖概率和清空条件。</p></div><div class="lottery-prize-toolbar"><select data-lottery-prize-sort aria-label="幸运值排序"><option value="asc"${sort==='asc'?' selected':''}>幸运值从低到高</option><option value="desc"${sort==='desc'?' selected':''}>幸运值从高到低</option></select><button class="btn secondary" type="button" data-add-lottery-prize>＋ 添加奖品</button></div></div><div class="table-wrap"><table class="lottery-prize-detail-table"><thead><tr><th>奖品名称</th><th>数量</th><th>库存数量</th><th>幸运值</th><th>中奖概率</th><th>稀有度</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="empty">暂无奖项，请点击“添加奖品”。</td></tr>'}</tbody></table></div>${pagination}</section>`;
+}
+function captureLotteryVersionDraft() { if (state.lotteryVersionDraft) { state.lotteryVersionDraft.dailyFreeCount = 0; state.lotteryVersionDraft.pityThreshold = state.lotteryVersionDraft.luckGrowth || 1; } }
+async function lotteryPoolPrizesModal(poolId) {
+  state.selectedLotteryPoolId = Number(poolId);
+  const index = state.lotteryPools.findIndex((item) => Number(item.id) === Number(poolId));
+  state.lotteryPoolPage = Math.floor(index / state.lotteryPoolPageSize) + 1;
+  renderLotteryPoolList();
+  await loadLotteryVersion();
+  state.lotteryVersionDraft = null;
+  state.lotteryPrizePage = 1;
+  state.lotteryPrizeSort = 'asc';
+  lotteryVersionModal();
+  return;
+  const pool = lotteryCurrent();
+  const version = state.lotteryVersion;
+  const prizes = version?.prizes || [];
+  const rows = prizes.map((prize) => `<article class="lottery-prize-summary"><div><strong>${esc(lotteryPrizeName(prize))}</strong><span>${esc(lotteryPrizeTypeLabel(prize.rewardType))} · 幸运度 ${number(prize.luckRequired || 0)} · 中奖几率 ${number(prize.weight)}% · ${esc(prize.rarity)}</span></div></article>`).join('');
+  openModal({
+    title: '奖池奖励版本',
+    description: `${pool.name} · 抽奖金额 ${number(pool.singlePrice)} 商城币`,
+    submitText: '关闭',
+    body: `<section class="modal-section full"><div class="section-title"><div><h3>奖池奖励版本</h3><p>${version ? `当前版本 v${number(version.versionNo)}` : '当前奖池尚未发布奖励版本。'}</p></div><button class="btn primary" type="button" data-open-lottery-version>发布奖池新版本</button></div></section>${version ? `<section class="modal-section full"><div class="lottery-version-metrics"><article><span>当前版本</span><strong>v${number(version.versionNo)}</strong></article><article><span>抽奖机制</span><strong>幸运度</strong></article><article><span>概率规则</span><strong>中奖几率 %</strong></article><article><span>奖项数量</span><strong>${number(prizes.length)}</strong></article></div></section><section class="modal-section full"><h3>奖品列表</h3><div class="lottery-prize-summary-list">${rows || '<div class="stock-record-empty">当前版本暂无奖品。</div>'}</div></section>` : '<div class="stock-record-empty full">点击“发布奖池新版本”添加奖品并创建首个版本。</div>'}`,
+    onSubmit: async () => closeModal()
+  });
+  $('#modalBackdrop').classList.add('centered-modal', 'lottery-version-editor-modal');
+  $('#cancelModal').hidden = true;
+}
+function lotteryVersionModal() {
+  const pool = lotteryCurrent();
+  if (!pool) { toast('请先选择奖池', true); return; }
+  if (!state.lotteryVersionDraft) {
+    const version = state.lotteryVersion;
+    state.lotteryVersionDraft = {
+      dailyFreeCount: Number(version?.dailyFreeCount || 0),
+      pityThreshold: Number(pool.luckGrowth || version?.pityThreshold || 1),
+      luckGrowth: Number(pool.luckGrowth || version?.pityThreshold || 1),
+      prizes: (version?.prizes || []).map((prize) => ({ ...prize, options: { ...(prize.options || {}) } }))
+    };
+  }
+  const draft = state.lotteryVersionDraft;
+  openModal({
+    title: '查看奖品', description: `${pool.name} · 当前版本 ${state.lotteryVersion ? `v${number(state.lotteryVersion.versionNo)}` : '尚未发布'} · 抽奖金额 ${number(pool.singlePrice)} 商城币`, submitText: '保存',
+    body: `<section class="modal-section full"><div class="lottery-version-metrics"><article><span>当前版本</span><strong>${state.lotteryVersion ? `v${number(state.lotteryVersion.versionNo)}` : '无'}</strong></article><article><span>抽奖机制</span><strong>幸运度</strong></article><article><span>概率规则</span><strong>中奖几率 %</strong></article><article><span>奖项数量</span><strong>${number(draft.prizes.length)}</strong></article></div></section>${renderLotteryVersionDraft()}`,
+    onSubmit: async () => {
+      captureLotteryVersionDraft();
+      if (!draft.prizes.length) { toast('请至少添加一个奖品', true); return; }
+      await api(`/api/lottery/pools/${pool.id}/versions`, { method: 'POST', body: JSON.stringify(draft) });
+      state.lotteryVersionDraft = null;
+      closeModal();
+      toast('奖池新版本已保存');
+      await loadActivitiesLottery({ poolId: pool.id });
+    }
+  });
+  $('#modalBackdrop').classList.add('centered-modal', 'lottery-version-editor-modal', 'modal-static-backdrop');
+  const prizePagers = $$('.lottery-prize-pagination', $('#modalBody'));
+  prizePagers.slice(0, -1).forEach((pager) => pager.remove());
+}
+function updateLotteryPrizeModalFields() {
+  const form = $('#modalForm');
+  const type = form?.elements?.rewardType?.value;
+  if (!type) { $$('[data-reward-field]', form).forEach((field) => { field.hidden = true; }); return; }
+  $$('[data-reward-field]', form).forEach((field) => { field.hidden = field.dataset.rewardField !== type; });
+  const warehouseField = $('.lottery-prefer-warehouse-field', form);
+  if (warehouseField) warehouseField.hidden = type === 'shop_coin';
+}
+function renderLotteryPrizeProduct(form) {
+  const product = state.lotteryProducts.find((item) => String(item.id) === String(form.elements.productId.value));
+  const display = $('[data-lottery-prize-product-display]', form);
+  display.innerHTML = product ? `<div class="lottery-prize-product-media">${product.imagePath ? `<img src="${esc(product.imagePath)}" alt="${esc(product.name)}">` : '<span>商品</span>'}<b>×${number(form.elements.productQuantity.value || 1)}</b></div><strong title="${esc(product.name)}">${esc(product.name)}</strong><button class="btn secondary" type="button" data-manage-lottery-product>管理商品</button>` : '<div class="lottery-prize-product-empty">暂未选择商品</div><button class="btn secondary" type="button" data-manage-lottery-product>管理商品</button>';
+  $('[data-manage-lottery-product]', display).addEventListener('click', () => openLotteryPrizeProductPicker(form));
+}
+function openLotteryPrizeProductPicker(form) {
+  const pageSize = 20; let page = 1; let keyword = ''; let selectedId = String(form.elements.productId.value || ''); let quantity = Math.max(1, Number(form.elements.productQuantity.value) || 1);
+  const backdrop = document.createElement('div'); backdrop.className = 'lottery-product-picker-backdrop';
+  backdrop.innerHTML = '<section class="lottery-product-picker"><header><div><h3>管理奖品</h3><p>左侧选择一个商品，右侧设置发放数量。</p></div><button class="icon-btn" type="button" data-close-lottery-product>×</button></header><div class="lottery-product-picker-main"><div class="lottery-product-picker-browser"><div class="lottery-product-picker-search"><input type="search" placeholder="搜索商品名称或编号" data-lottery-product-search><button class="btn primary" type="button" data-search-lottery-product>搜索</button></div><div data-lottery-product-list></div><footer><button class="btn secondary" type="button" data-lottery-product-prev>上一页</button><span data-lottery-product-page></span><button class="btn secondary" type="button" data-lottery-product-next>下一页</button></footer></div><aside><h4>已选清单</h4><div data-lottery-product-selected></div><button class="btn primary" type="button" data-confirm-lottery-product>确认选择</button></aside></div></section>';
+  document.body.append(backdrop);
+  const fuzzyMatch = (value) => { const text = String(value || '').toLowerCase().replace(/\s+/g, ''); const target = keyword.replace(/\s+/g, ''); if (!target || text.includes(target)) return true; let index = 0; for (const character of text) if (character === target[index]) index++; return index === target.length; };
+  const render = () => { const filtered = state.lotteryProducts.filter((product) => [product.id, product.name, product.itemId].some(fuzzyMatch)); const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize)); page = Math.min(page, pageCount); const items = filtered.slice((page - 1) * pageSize, page * pageSize); $('[data-lottery-product-list]', backdrop).innerHTML = items.map((product) => `<button class="lottery-product-picker-item${String(product.id) === selectedId ? ' active' : ''}" type="button" data-select-lottery-product="${esc(product.id)}">${product.imagePath ? `<img src="${esc(product.imagePath)}" alt="${esc(product.name)}">` : '<span>商品</span>'}<strong>${esc(product.name)}${product.enabled===false?'（已下架）':''}</strong></button>`).join('') || '<div class="empty">暂无匹配商品</div>'; const selected = state.lotteryProducts.find((product) => String(product.id) === selectedId); $('[data-lottery-product-selected]', backdrop).innerHTML = selected ? `<article>${selected.imagePath ? `<img src="${esc(selected.imagePath)}" alt="${esc(selected.name)}">` : '<span>商品</span>'}<strong>${esc(selected.name)}</strong><label>数量<input type="number" min="1" max="1000" value="${quantity}" data-lottery-product-quantity></label><button class="btn danger" type="button" data-remove-lottery-product>移除</button></article>` : '<div class="empty">暂未选择商品</div>'; $('[data-lottery-product-page]', backdrop).textContent = `第 ${page} / ${pageCount} 页 · 共 ${filtered.length} 个商品`; $('[data-lottery-product-prev]', backdrop).disabled = page <= 1; $('[data-lottery-product-next]', backdrop).disabled = page >= pageCount; };
+  backdrop.addEventListener('click', (event) => { if (event.target === backdrop || event.target.closest('[data-close-lottery-product]')) { backdrop.remove(); return; } if (event.target.closest('[data-search-lottery-product]')) { keyword = $('[data-lottery-product-search]', backdrop).value.trim().toLowerCase(); page = 1; render(); return; } if (event.target.closest('[data-lottery-product-prev]')) { page -= 1; render(); return; } if (event.target.closest('[data-lottery-product-next]')) { page += 1; render(); return; } if (event.target.closest('[data-remove-lottery-product]')) { selectedId = ''; quantity = 1; render(); return; } if (event.target.closest('[data-confirm-lottery-product]')) { if (!selectedId) { toast('请先选择商品', true); return; } form.elements.productId.value = selectedId; form.elements.productQuantity.value = String(quantity); renderLotteryPrizeProduct(form); backdrop.remove(); return; } const selected = event.target.closest('[data-select-lottery-product]')?.dataset.selectLotteryProduct; if (selected) { selectedId = selected; quantity = 1; render(); } });
+  $('[data-lottery-product-search]', backdrop).addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); keyword = event.currentTarget.value.trim().toLowerCase(); page = 1; render(); } });
+  backdrop.addEventListener('input', (event) => { if (event.target.matches('[data-lottery-product-quantity]')) quantity = Math.max(1, Math.min(1000, Number(event.target.value) || 1)); }); render();
+}
+function lotteryPrizeModal(index = null) {
+  captureLotteryVersionDraft();
+  const current = index === null ? {} : state.lotteryVersionDraft.prizes[index];
+  const rewardType = current.rewardType || 'gift';
+  const gifts = state.gifts.map((gift) => `<option value="${gift.id}"${Number(current.giftId) === Number(gift.id) ? ' selected' : ''}>${esc(gift.name)}</option>`).join('');
+  const products = state.lotteryProducts.map((item) => `<option value="${item.id}"${Number(current.productId) === Number(item.id) ? ' selected' : ''}>${esc(item.name)}${item.enabled===false?'（已下架）':''}</option>`).join('');
+  openModal({
+    title: index === null ? '添加奖品' : '编辑奖品', description: '选择奖励来源后仅显示对应配置项。', submitText: index === null ? '添加奖品' : '保存奖品',
+    body: `<section class="modal-section full"><h3>奖励来源</h3><div class="modal-section-grid"><label>来源<select name="rewardType"><option value="gift"${rewardType === 'gift' ? ' selected' : ''}>礼包</option><option value="product"${rewardType === 'product' ? ' selected' : ''}>物资商品</option><option value="shop_coin"${rewardType === 'shop_coin' ? ' selected' : ''}>商城币</option><option value="custom"${rewardType === 'custom' ? ' selected' : ''}>自定义物品</option></select></label><label data-reward-field="gift">礼包<select name="giftId">${gifts}</select></label><label data-reward-field="product">物资商品<select name="productId">${products}</select></label><label data-reward-field="shop_coin">商城币数量<input name="coinAmount" type="number" min="1" max="100000000" value="${Number(current.coinAmount) || ''}"></label><label data-reward-field="custom">奖励名称<input name="rewardName" maxlength="100" value="${esc(current.rewardName || '')}"></label><label data-reward-field="custom">SCUM Item ID<input name="itemId" maxlength="80" value="${esc(current.itemId || '')}"></label><label data-reward-field="custom">数量<input name="quantity" type="number" min="1" max="100000" value="${Number(current.quantity) || ''}"></label><label data-reward-field="custom">AmmoCount（可选）<input name="ammoCount" type="number" min="1" max="100000000" value="${Number(current.options?.ammoCount) || ''}"></label><label data-reward-field="custom">CashValue（Cash 必填）<input name="cashValue" type="number" min="1" max="100000000" value="${Number(current.options?.cashValue) || ''}"></label><label data-reward-field="custom">Cash 尾部数量（可选）<input name="extraQuantity" type="number" min="1" max="100000" value="${Number(current.options?.extraQuantity) || ''}"></label></div></section><section class="modal-section full"><h3>抽奖设置</h3><div class="modal-section-grid"><label>幸运度要求<input name="luckRequired" type="number" min="0" max="100" value="${Number(current.luckRequired) || 0}" required><span class="field-hint">0 表示始终进入候选，100 表示仅最高幸运度进入候选。</span></label><label>中奖几率 %<input name="weight" type="number" min="1" max="100" value="${Number(current.weight) || 100}" required><span class="field-hint">用于同一候选范围内的随机权重。</span></label><label>稀有度<input name="rarity" maxlength="50" value="${esc(current.rarity || '普通')}" required></label><label>标签<input name="label" maxlength="100" value="${esc(current.label || '')}"></label></div></section>`,
+    onSubmit: async (form) => {
+      const type = form.elements.rewardType.value;
+      const prize = { rewardType: type, giftId: Number(form.elements.giftId.value) || undefined, productId: Number(form.elements.productId.value) || undefined, coinAmount: Number(form.elements.coinAmount.value) || undefined, rewardName: form.elements.rewardName.value.trim(), itemId: form.elements.itemId.value.trim(), quantity: type === 'product' ? Number(form.elements.productQuantity.value) || 1 : Number(form.elements.quantity.value) || undefined, options: Object.fromEntries(['ammoCount', 'cashValue', 'extraQuantity'].map((name) => [name, Number(form.elements[name].value)]).filter(([, value]) => value > 0)), luckRequired: Number(form.elements.luckRequired.value), weight: Number(form.elements.weight.value), stockQuantity: Number(form.elements.stockQuantity.value), rarity: form.elements.rarity.value.trim(), label: form.elements.label.value.trim(), preferWarehouse: form.elements.preferWarehouse.checked, resetLuck: form.elements.resetLuck.checked, isPity: form.elements.resetLuck.checked };
+      if (index === null) state.lotteryVersionDraft.prizes.push(prize); else state.lotteryVersionDraft.prizes[index] = prize;
+      lotteryVersionModal();
+    }
+  });
+  const form = $('#modalForm');
+  form.elements.rewardType.querySelector('option[value="custom"]')?.remove();
+  form.elements.rewardType.required = true;
+  if (index === null) { form.elements.rewardType.add(new Option('请选择奖励来源', '', true, true), 0); form.elements.rewardType.value = ''; }
+  form.elements.rewardType.closest('label')?.classList.add('lottery-reward-source-field');
+  $$('[data-reward-field]', form).forEach((field) => field.classList.add('lottery-reward-content-field'));
+  form.elements.luckRequired?.removeAttribute('max');
+  form.elements.weight.closest('label').firstChild.textContent = '中奖概率（%）';
+  if (index === null) {
+    form.elements.luckRequired.value = ''; form.elements.luckRequired.placeholder = '0';
+    form.elements.weight.value = ''; form.elements.weight.placeholder = '100';
+    form.elements.rarity.value = ''; form.elements.rarity.placeholder = '普通、传奇';
+    form.elements.label.value = '';
+  }
+  const luckHint = form.elements.luckRequired?.closest('label')?.querySelector('.field-hint');
+  if (luckHint) luckHint.textContent = '0 表示始终进入候选；其他数值需玩家累计幸运值达到后进入候选。';
+  const resetLuckField = document.createElement('label');
+  resetLuckField.className = 'switch lottery-reset-luck-field';
+  resetLuckField.title = '勾选后，玩家抽中该奖品时幸运值归零。';
+  resetLuckField.innerHTML = `<input name="resetLuck" type="checkbox"${current.resetLuck || current.isPity ? ' checked' : ''}><span></span>抽中后清空幸运值`;
+  const warehouseField = document.createElement('label');
+  warehouseField.className = 'switch lottery-prefer-warehouse-field';
+  warehouseField.title = '开启后物品类奖励直接存入玩家云储仓库，不发送到游戏角色。';
+  warehouseField.innerHTML = `<input name="preferWarehouse" type="checkbox"${current.preferWarehouse ? ' checked' : ''}><span></span>玩家优先存入仓库`;
+  const stockField = document.createElement('label');
+  stockField.className = 'lottery-stock-field';
+  stockField.innerHTML = `<span>库存数量</span><input name="stockQuantity" type="number" min="1" max="1000000" value="${index === null ? '' : Number(current.stockQuantity) || 1}" placeholder="1" required><span class="field-hint">库存为0后不再进入中奖候选。</span>`;
+  const settingsGrid = $$('.modal-section', form).at(-1)?.querySelector('.modal-section-grid');
+  const luckField = form.elements.luckRequired.closest('label');
+  const chanceField = form.elements.weight.closest('label');
+  const rarityField = form.elements.rarity.closest('label');
+  const labelField = form.elements.label.closest('label');
+  rarityField.insertAdjacentHTML('beforeend', '<span class="field-hint">用于展示奖品稀有等级。</span>');
+  labelField.insertAdjacentHTML('beforeend', '<span class="field-hint">用于奖品附加说明，可留空。</span>');
+  labelField.classList.add('lottery-label-field');
+  settingsGrid?.replaceChildren(stockField, luckField, chanceField, rarityField, labelField, resetLuckField);
+  const settingsTitle = settingsGrid?.previousElementSibling;
+  if (settingsTitle) {
+    const heading = document.createElement('div');
+    heading.className = 'lottery-prize-settings-heading';
+    settingsTitle.before(heading);
+    heading.append(settingsTitle, warehouseField);
+  }
+  const productField = $('[data-reward-field="product"]', form);
+  if (productField) {
+    productField.classList.add('lottery-prize-product-field');
+    const productSelect = form.elements.productId;
+    if (index === null) { productSelect.add(new Option('', '', true, true), 0); productSelect.value = ''; }
+    productSelect.hidden = true;
+    const quantity = document.createElement('input'); quantity.type = 'hidden'; quantity.name = 'productQuantity'; quantity.value = String(current.quantity || 1);
+    const display = document.createElement('div'); display.className = 'lottery-prize-product-display'; display.dataset.lotteryPrizeProductDisplay = '';
+    productField.replaceChildren(productSelect, quantity, display);
+    renderLotteryPrizeProduct(form);
+  }
+  $('#modalBackdrop').classList.add('centered-modal', 'lottery-prize-editor-modal', 'modal-static-backdrop');
+  updateLotteryPrizeModalFields();
+}
+async function loadActivitiesLottery({ poolId = state.selectedLotteryPoolId } = {}) {
+  try {
+    const poolsPromise = api('/api/lottery/pools');
+    const giftsPromise = api('/api/gifts');
+    const productsPromise = api('/api/lottery/products');
+    const recordsPromise = api('/api/lottery/records?limit=50');
+    const [pools, gifts, products, records] = await Promise.all([poolsPromise, giftsPromise, productsPromise, recordsPromise]);
+    state.lotteryPools = list(pools); state.gifts = list(gifts); state.lotteryProducts = list(products); state.lotteryRecords = list(records);
+    state.selectedLotteryPoolId = state.lotteryPools.some((item) => Number(item.id) === Number(poolId)) ? Number(poolId) : null;
+    if (state.selectedLotteryPoolId) {
+      const index = state.lotteryPools.findIndex((item) => Number(item.id) === Number(state.selectedLotteryPoolId));
+      state.lotteryPoolPage = Math.floor(index / state.lotteryPoolPageSize) + 1;
+    }
+    renderLotteryPoolList();
+    await loadLotteryVersion();
+    const recordRows = $('#lotteryRecordRows');
+    if (recordRows) recordRows.innerHTML = state.lotteryRecords.length ? state.lotteryRecords.map((item) => `<tr><td>#${number(item.id)}</td><td>${esc(item.steamId)}</td><td>${esc(item.poolName)}</td><td>v${number(item.versionId)}</td><td>${number(item.drawCount)}</td><td>${number(item.freeCount)}</td><td>${number(item.pricePaid)}</td><td>${number(item.pityBefore)} → ${number(item.pityAfter)}</td><td>${date(item.createdAt)}</td></tr>`).join('') : empty(9, '暂无抽奖记录');
+  } catch (error) {
+    $('#lotteryPoolList').innerHTML = `<div class="stock-record-empty">奖池加载失败：${esc(error.message)}</div>`;
+    throw error;
+  }
+}
+async function loadLotteryVersion() {
+  const pool = lotteryCurrent();
+  state.lotteryVersion = null;
+  state.lotteryVersionDraft = null;
+  if (!pool?.currentVersionId) return;
+  state.lotteryVersion = await api(`/api/lottery/versions/${encodeURIComponent(pool.currentVersionId)}`);
+}
+$('#activityReload').addEventListener('click',(event)=>withBusy(event.currentTarget,loadActivitiesLottery));
+
+$('#lotteryPoolAdd').addEventListener('click',()=>lotteryPoolModal());
+
+$('#lotteryPoolPrev').addEventListener('click',()=>{state.lotteryPoolPage-=1;renderLotteryPoolList();});
+
+$('#lotteryPoolNext').addEventListener('click',()=>{state.lotteryPoolPage+=1;renderLotteryPoolList();});
+
+
+
+$('#reloadLotteryLogs')?.addEventListener('click', () => loadLotteryLogs(state.lotteryLogPage));
+$('#lotteryLogPrev')?.addEventListener('click', () => loadLotteryLogs(Math.max(1, state.lotteryLogPage - 1)));
+$('#lotteryLogNext')?.addEventListener('click', () => loadLotteryLogs(state.lotteryLogPage + 1));
+
+async function handleLotteryDraftClick(event) {
+  const prizePage=event.target.closest('[data-lottery-prize-page]');
+  if(prizePage){state.lotteryPrizePage=Math.max(1,(Number(state.lotteryPrizePage)||1)+(prizePage.dataset.lotteryPrizePage==='next'?1:-1));lotteryVersionModal();return true;}
+  const removePrize = event.target.closest('[data-remove-lottery-prize]');
+  if (removePrize && state.lotteryVersionDraft) { captureLotteryVersionDraft(); state.lotteryVersionDraft.prizes.splice(Number(removePrize.dataset.removeLotteryPrize), 1); lotteryVersionModal(); return true; }
+  const editPrize = event.target.closest('[data-edit-lottery-prize]');
+  if (editPrize && state.lotteryVersionDraft) { lotteryPrizeModal(Number(editPrize.dataset.editLotteryPrize)); return true; }
+  if (event.target.closest('[data-add-lottery-prize]')) { lotteryPrizeModal(); return true; }
+}
+
+async function handleLotteryPoolClick(event) {
+  if (event.target.closest('[data-upload-lottery-image]')) $('#lotteryPoolImageFile')?.click();
+  const poolPrizesId = event.target.closest('[data-lottery-pool-prizes]')?.dataset.lotteryPoolPrizes;
+  if (poolPrizesId) await lotteryPoolPrizesModal(poolPrizesId);
+  if (event.target.closest('[data-open-lottery-version]')) lotteryVersionModal();
+  const poolEditId = event.target.closest('[data-lottery-pool-edit]')?.dataset.lotteryPoolEdit;
+  if (poolEditId) lotteryPoolModal(state.lotteryPools.find((item) => Number(item.id) === Number(poolEditId)) || {});
+  const poolDeleteId = event.target.closest('[data-lottery-pool-delete]')?.dataset.lotteryPoolDelete;
+  if (poolDeleteId && window.confirm('确认永久删除该奖池？历史版本、抽奖、订单、履约和关联数据将全部删除，且无法恢复。')) await withBusy(event.target.closest('button'), async () => {
+    await api(`/api/lottery/pools/${encodeURIComponent(poolDeleteId)}`, { method: 'DELETE' });
+    toast('奖池及所有相关数据已永久删除');
+    await loadActivitiesLottery({ poolId: null });
+  });
+}

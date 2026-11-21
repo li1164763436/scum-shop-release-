@@ -1,0 +1,382 @@
+function renderExchange() {
+  const config = state.exchangeConfig || {};
+  const account = state.account?.account && typeof state.account.account === 'object' ? state.account.account : state.account || {};
+  const coinBalance = pick(account, ['balance', 'coinBalance', 'coins'], state.user?.balance || 0);
+  const goldBalance = pick(account, ['gameGold', 'game_gold'], null);
+
+  $$('[data-exchange-form]').forEach((form) => {
+    const direction = form.elements.direction.value;
+    const coinToGold = direction === 'coin_to_gold';
+    const rate = Number(coinToGold ? config.coinToGoldRate : config.goldToCoinRate) || 0;
+    const amount = Math.max(0, Math.floor(Number(form.elements.amount.value) || 0));
+    const output = Math.floor(amount * rate);
+    $('[data-exchange-balance]', form).textContent = coinToGold
+      ? number(coinBalance)
+      : (goldBalance === null || goldBalance === undefined ? '—' : number(goldBalance));
+    $('[data-exchange-rate]', form).textContent = coinToGold
+      ? `${number(rate > 0 ? 1 / rate : 0)} 商城币 = 1 金条`
+      : `1 金条 = ${number(rate)} 商城币`;
+    $('[data-exchange-output]', form).textContent = `${number(output)} ${coinToGold ? '金条' : '商城币'}`;
+    form.elements.amount.max = String(config.maxAmount || 100000);
+    const submit = $('button[type="submit"]', form);
+    const status = $('[data-exchange-status]', form);
+    submit.disabled = config.enabled === false;
+    if (config.enabled === false) status.textContent = '资产兑换当前已停用';
+    else if (status.textContent === '资产兑换当前已停用') status.textContent = '';
+  });
+}
+
+async function loadExchangeConfig() {
+  try {
+    state.exchangeConfig = await api('/api/shop/account/exchange-config');
+    renderExchange();
+  } catch (error) {
+    $$('[data-exchange-status]').forEach((status) => { status.textContent = chineseErrorMessage(error.message, '兑换信息读取失败，请稍后重试'); });
+    if (error.status === 401) openAuth('login');
+  }
+}
+
+async function exchangeCurrency(form, button) {
+  const amount = Number(form.elements.amount.value);
+  const status = $('[data-exchange-status]', form);
+  if (!Number.isSafeInteger(amount) || amount < 1) { form.elements.amount.reportValidity(); return; }
+  await withBusy(button, async () => {
+    try {
+      const data = await api('/api/shop/account/exchange', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': uuid() },
+        body: JSON.stringify({ direction: form.elements.direction.value, amount })
+      });
+      if (data.status === 'uncertain') {
+        status.textContent = '结果待核查，请勿重复提交。';
+        toast('兑换结果暂时无法确认，工作人员正在核查，请勿重复提交', 'error', '结果待核查');
+      } else {
+        const target = data.direction === 'coin_to_gold' ? '金条' : '商城币';
+        status.textContent = `兑换成功，到账 ${number(data.outputAmount)} ${target}`;
+        toast(`兑换成功，到账 ${number(data.outputAmount)} ${target}`);
+        form.elements.amount.value = '';
+      }
+      await loadAccount();
+    } catch (error) {
+      status.textContent = error.code === 'PLAYER_OFFLINE'
+        ? '游戏角色必须在线，请先进入游戏并等待状态同步。'
+        : chineseErrorMessage(error.message, '兑换失败，请稍后重试');
+      toast(status.textContent, 'error');
+      if (error.status === 401) openAuth('login');
+    }
+  });
+}
+
+const skillAttributeGroups = {
+  strength: ['BoxingSkill', 'MeleeWeaponsSkill', 'RiflesSkill', 'HandgunSkill', 'ArcherySkill'],
+  constitution: ['RunningSkill', 'EnduranceSkill', 'ResistanceSkill'],
+  dexterity: ['ThieverySkill', 'DrivingSkill', 'StealthSkill', 'MotorcycleSkill', 'AviationSkill'],
+  intelligence: ['AwarenessSkill', 'SnipingSkill', 'CamouflageSkill', 'SurvivalSkill', 'EngineeringSkill', 'DemolitionSkill', 'MedicalSkill', 'CookingSkill', 'FarmingSkill', 'TacticsSkill']
+};
+
+const purchaseAttributeMeta = {
+  strength: { name: '力量', max: 8 },
+  constitution: { name: '体质', max: 5 },
+  dexterity: { name: '敏捷', max: 5 },
+  intelligence: { name: '智力', max: 5 }
+};
+
+const purchaseSkillNames = {
+  BoxingSkill: '拳击', MeleeWeaponsSkill: '近战武器', RiflesSkill: '步枪', HandgunSkill: '手枪', ArcherySkill: '弓箭',
+  RunningSkill: '跑步', EnduranceSkill: '耐力', ResistanceSkill: '抗性',
+  ThieverySkill: '盗窃', DrivingSkill: '驾驶', StealthSkill: '潜行', MotorcycleSkill: '摩托车', AviationSkill: '航空',
+  AwarenessSkill: '感知', SnipingSkill: '狙击', CamouflageSkill: '伪装', SurvivalSkill: '生存', EngineeringSkill: '工程',
+  DemolitionSkill: '爆破', MedicalSkill: '医疗', CookingSkill: '烹饪', FarmingSkill: '农耕', TacticsSkill: '战术'
+};
+
+function renderPurchaseSkills() {
+  const key = state.selectedPurchaseAttribute;
+  const meta = purchaseAttributeMeta[key];
+  const skillsByKey = new Map(state.profileSkills.map((skill) => [String(pick(skill, ['name', 'skillName'], '')), skill]));
+  $('#purchaseSkillTitle').textContent = '技能等级';
+  $('#purchaseSkillList').innerHTML = (skillAttributeGroups[key] || []).map((skillKey) => {
+    const skill = skillsByKey.get(skillKey);
+    const name = pick(skill, ['cnName'], purchaseSkillNames[skillKey] || skillKey);
+    const level = pick(skill, ['level', 'skillLevel'], '—');
+    const experienceValue = pick(skill, ['experience', 'xp'], null);
+    const experience = experienceValue === null || experienceValue === undefined ? '—' : number(experienceValue);
+    const reached = Number(level) >= 3 && Number(experienceValue) >= 9999999;
+    if (reached) state.selectedPurchaseSkills.delete(skillKey);
+    const checked = state.selectedPurchaseSkills.has(skillKey) ? ' checked' : '';
+    return `<article><div><strong>${escapeHtml(name)}</strong><small>当前等级 ${escapeHtml(level)} · 经验 ${escapeHtml(experience)}</small></div><b>3 级</b><label class="purchase-skill-choice"><input type="checkbox" data-purchase-skill="${escapeHtml(skillKey)}"${checked}${reached ? ' disabled' : ''}><span>${reached ? '已满' : '选择'}</span></label></article>`;
+  }).join('');
+  updateSkillPurchaseTotal();
+}
+
+function updateSkillPurchaseTotal() {
+  $('#skillPurchaseTotal').textContent = number(state.selectedPurchaseSkills.size * state.characterGrowthConfig.skillLevelPrice);
+  updateCharacterPurchaseAvailability();
+}
+
+function updateCharacterPurchaseAvailability() {
+  const attributeMeta = purchaseAttributeMeta[state.selectedPurchaseAttribute];
+  const current = Number(state.profileAttributes[state.selectedPurchaseAttribute]);
+  const quantity = state.purchaseAttributeQuantities[state.selectedPurchaseAttribute] || 0;
+  const attributeOpen = Boolean(state.user) && state.characterGrowthConfig.attributePointPrice > 0 && quantity > 0 && Number.isFinite(current) && current + quantity <= attributeMeta.max;
+  const skillOpen = Boolean(state.user) && state.characterGrowthConfig.skillLevelPrice > 0 && state.selectedPurchaseSkills.size > 0;
+  $('#purchaseAttributeButton').disabled = !attributeOpen;
+  $('#purchaseSkillButton').disabled = !skillOpen;
+  const open = state.characterGrowthConfig.attributePointPrice > 0 || state.characterGrowthConfig.skillLevelPrice > 0;
+  $('#characterPurchaseStatus').textContent = open ? '购买已开放' : '暂未开放';
+  $('#characterPurchaseState').textContent = open ? '可购买' : '暂未开放';
+  $('#characterPurchaseHint').textContent = open ? '角色彻底离线后可购买' : '后台设置价格后开放';
+}
+
+function prepareAttributePurchase() {
+  const attribute = state.selectedPurchaseAttribute;
+  const quantity = state.purchaseAttributeQuantities[attribute] || 0;
+  if (quantity < 1) return;
+  const total = quantity * state.characterGrowthConfig.attributePointPrice;
+  state.attributePurchaseDraft = { type: 'attribute', attribute, quantity };
+  $('#attributePurchaseName').textContent = purchaseAttributeMeta[attribute].name;
+  $('#attributePurchaseSteamId').textContent = pick(state.user, ['steamId', 'steamID', 'steam_id'], '—');
+  $('#attributePurchaseQuantity').textContent = String(quantity);
+  $('#attributePurchaseConfirmTotal').textContent = number(total);
+  openModal($('#attributePurchaseModal'));
+}
+
+async function confirmAttributePurchase() {
+  if (!state.attributePurchaseDraft) return;
+  const draft = state.attributePurchaseDraft;
+  try {
+    await withBusy($('#confirmAttributePurchase'), async () => {
+      const data = await api('/api/shop/account/character-growth/purchase', { method: 'POST', headers: { 'Idempotency-Key': uuid() }, body: JSON.stringify(draft) });
+      state.purchaseAttributeQuantities[draft.attribute] = 0;
+      state.attributePurchaseDraft = null;
+      closeModal($('#attributePurchaseModal'));
+      purchaseResult(data.status === 'completed' ? `已消耗 ${number(data.totalPrice)} 商城币，玩家属性修改成功` : data.status === 'failed' ? '玩家属性修改失败，商城币已退还' : `已消耗 ${number(data.totalPrice)} 商城币，等待游戏角色离线后修改`, data.status === 'failed' ? 'error' : 'success');
+      await loadAccount();
+    });
+  } catch (error) {
+    purchaseResult(chineseErrorMessage(error.message, '角色成长操作失败，请稍后重试'), 'error');
+  } finally {
+    updateCharacterPurchaseAvailability();
+  }
+}
+
+function prepareSkillPurchase() {
+  const skills = [...state.selectedPurchaseSkills];
+  if (!skills.length) return;
+  const names = skills.map((key) => purchaseSkillNames[key] || key);
+  state.skillPurchaseDraft = { type: 'skill', skills };
+  $('#skillPurchaseNames').textContent = names.join('、');
+  $('#skillPurchaseSteamId').textContent = pick(state.user, ['steamId', 'steamID', 'steam_id'], '—');
+  $('#skillPurchaseQuantity').textContent = String(skills.length);
+  $('#skillPurchaseConfirmTotal').textContent = number(skills.length * state.characterGrowthConfig.skillLevelPrice);
+  openModal($('#skillPurchaseModal'));
+}
+
+async function confirmSkillPurchase() {
+  if (!state.skillPurchaseDraft) return;
+  const draft = state.skillPurchaseDraft;
+  try {
+    await withBusy($('#confirmSkillPurchase'), async () => {
+      const data = await api('/api/shop/account/character-growth/purchase', { method: 'POST', headers: { 'Idempotency-Key': uuid() }, body: JSON.stringify(draft) });
+      state.selectedPurchaseSkills.clear();
+      state.skillPurchaseDraft = null;
+      closeModal($('#skillPurchaseModal'));
+      purchaseResult(data.status === 'completed' ? `已消耗 ${number(data.totalPrice)} 商城币，玩家技能等级修改成功` : data.status === 'failed' ? '玩家技能等级修改失败，商城币已退还' : `已消耗 ${number(data.totalPrice)} 商城币，等待游戏角色离线后修改`, data.status === 'failed' ? 'error' : 'success');
+      await loadAccount();
+    });
+  } catch (error) {
+    purchaseResult(chineseErrorMessage(error.message, '角色成长操作失败，请稍后重试'), 'error');
+  } finally {
+    updateCharacterPurchaseAvailability();
+  }
+}
+
+function selectPurchaseAttribute(key) {
+  if (!purchaseAttributeMeta[key]) return;
+  state.selectedPurchaseAttribute = key;
+  $$('[data-purchase-attribute]').forEach((item) => {
+    const active = item.dataset.purchaseAttribute === key;
+    item.classList.toggle('active', active);
+    item.setAttribute('aria-pressed', String(active));
+  });
+  const quantity = state.purchaseAttributeQuantities[key] || 0;
+  $('#attributePurchaseTotal').textContent = number(quantity * state.characterGrowthConfig.attributePointPrice);
+  renderPurchaseSkills();
+}
+
+function updatePurchaseAttributeQuantity(item, step) {
+  const key = item.dataset.purchaseAttribute;
+  const rawValue = state.profileAttributes[key];
+  const current = Number(rawValue);
+  const remaining = rawValue === null || rawValue === undefined || !Number.isFinite(current)
+    ? purchaseAttributeMeta[key].max
+    : Math.max(0, Math.floor(purchaseAttributeMeta[key].max - current));
+  const limit = Math.max(0, remaining);
+  const quantity = Math.min(limit, Math.max(0, state.purchaseAttributeQuantities[key] + step));
+  state.purchaseAttributeQuantities[key] = quantity;
+  $(`[data-purchase-quantity="${key}"]`).textContent = String(quantity);
+  $('#attributePurchaseTotal').textContent = number(quantity * state.characterGrowthConfig.attributePointPrice);
+  updateCharacterPurchaseAvailability();
+}
+
+function renderCharacterPurchase() {
+  Object.entries(purchaseAttributeMeta).forEach(([key, meta]) => {
+    const rawValue = state.profileAttributes[key];
+    const value = Number(rawValue);
+    const hasValue = rawValue !== null && rawValue !== undefined && Number.isFinite(value);
+    const current = hasValue ? value.toFixed(1) : '—';
+    const remaining = hasValue ? Math.max(0, Math.floor(meta.max - value)) : meta.max;
+    state.purchaseAttributeQuantities[key] = Math.min(remaining, Math.max(0, state.purchaseAttributeQuantities[key] || 0));
+    $(`[data-purchase-current="${key}"]`).textContent = current;
+    $(`[data-purchase-quantity="${key}"]`).textContent = String(state.purchaseAttributeQuantities[key]);
+  });
+  const selectedQuantity = state.purchaseAttributeQuantities[state.selectedPurchaseAttribute] || 0;
+  $('#attributePointPrice').textContent = number(state.characterGrowthConfig.attributePointPrice);
+  $('#attributePurchaseTotal').textContent = number(selectedQuantity * state.characterGrowthConfig.attributePointPrice);
+  $('#skillLevelPrice').textContent = number(state.characterGrowthConfig.skillLevelPrice);
+  updateSkillPurchaseTotal();
+  selectPurchaseAttribute(state.selectedPurchaseAttribute);
+}
+
+function renderProfileSkills() {
+  const keys = skillAttributeGroups[state.selectedAttribute] || [];
+  const skills = state.profileSkills.filter((skill) => keys.includes(String(pick(skill, ['name', 'skillName'], ''))));
+  $('#accountSkillList').innerHTML = skills.length
+    ? skills.map((skill) => `<div class="skill-row"><span><small>技能名称</small><strong>${escapeHtml(pick(skill, ['cnName', 'name', 'skillName'], '—'))}</strong></span><span><small>等级</small><strong>${escapeHtml(pick(skill, ['level', 'skillLevel'], '—'))}</strong></span><span><small>经验</small><strong class="skill-experience">${number(pick(skill, ['experience', 'xp'], 0))}</strong></span></div>`).join('')
+    : emptyState('该属性暂无技能数据', '暂无技能数据');
+}
+
+function renderGameProfile(data = {}) {
+  const profile = data.gameProfile || data.profile || {};
+  const attributes = profile.attributes || {};
+  const attributeItems = [
+    ['strength', '力量', pick(attributes, ['strength', 'baseStrength'], null)],
+    ['constitution', '体质', pick(attributes, ['constitution', 'baseConstitution'], null)],
+    ['dexterity', '敏捷', pick(attributes, ['dexterity', 'baseDexterity'], null)],
+    ['intelligence', '智力', pick(attributes, ['intelligence', 'baseIntelligence'], null)]
+  ];
+  const gameMoney = pick(data, ['gameMoney'], null);
+  const gameGold = pick(data, ['gameGold'], null);
+  $('#accountGameMoney').textContent = gameMoney === null || gameMoney === undefined ? '—' : number(gameMoney);
+  $('#accountGameGold').textContent = gameGold === null || gameGold === undefined ? '—' : number(gameGold);
+  $('#accountAttributeList').innerHTML = attributeItems.map(([key, name, value]) => {
+    const numericValue = Number(value);
+    const displayValue = value === null || value === undefined || !Number.isFinite(numericValue) ? '—' : numericValue.toFixed(1);
+    const active = key === state.selectedAttribute;
+    return `<button type="button" class="attribute-card attribute-${key}${active ? ' active' : ''}" data-attribute-filter="${key}" aria-pressed="${active}"><div class="attribute-meter"><strong>${displayValue}</strong></div><small>${name}</small></button>`;
+  }).join('');
+  state.profileAttributes = Object.fromEntries(attributeItems.map(([key, , value]) => [key, value]));
+  state.profileSkills = asList(profile, ['skills']);
+  renderProfileSkills();
+  renderCharacterPurchase();
+}
+
+async function loadAccount() {
+  state.pagination.ledger = 0;
+  $('#ledgerList').innerHTML = emptyState('正在读取账户流水', '正在读取账户流水');
+  try {
+    const data = await api('/api/shop/account');
+    state.account = data || {};
+    const user = accountUser(data);
+    if (user) setUser(user);
+    renderGameProfile(data);
+    renderExchange();
+    renderLedger(asList(data, ['ledger', 'transactions', 'items']));
+  } catch (error) {
+    state.account = {};
+    renderGameProfile();
+    $('#accountSkillList').innerHTML = emptyState('角色档案暂不可用', '角色档案暂不可用');
+    $('#ledgerList').innerHTML = emptyState(chineseErrorMessage(error.message, '账户数据读取失败，请稍后重试'), '账户数据暂不可用');
+    if (error.status === 401) openAuth('login');
+  }
+}
+
+function renderLedger(items) {
+  if (!items.length) { $('#ledgerList').innerHTML = emptyState('暂无商城币流水', '暂无流水记录'); return; }
+  const page = pageItems(items, 'ledger');
+  $('#ledgerList').innerHTML = page.items.map((item) => {
+    const amount = Number(pick(item, ['amount', 'change'], 0));
+    const type = pick(item, ['type', 'category'], 'adjustment');
+    return `<div class="ledger-row"><span><small>变动类型</small><strong>${escapeHtml(ledgerLabels[type] || '其他变动')}</strong></span><span><small>说明</small><strong>${escapeHtml(chineseErrorMessage(pick(item, ['displayNote', 'display_note'], ''), '账户余额变动'))}</strong></span><span><small>变动金额</small><strong class="ledger-amount ${amount >= 0 ? 'positive' : 'negative'}">${type==='lottery_win'?'—':(amount >= 0 ? '+' : '')+number(amount)}</strong></span><span><small>时间 / 余额</small><strong>${escapeHtml(dateTime(pick(item, ['createdAt', 'created_at', 'time'])))}</strong><small>余额 ${number(pick(item, ['balanceAfter', 'balance_after', 'balance'], 0))}</small></span></div>`;
+  }).join('') + paginationMarkup('ledger', page.totalPages, page.page);
+}
+
+function duration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = total % 60;
+  return `${hours} 小时 ${minutes} 分钟 ${rest} 秒`;
+}
+async function loadOrders() {
+  state.pagination.orders = 0;
+  $('#orderList').innerHTML = emptyState('正在读取订单档案', '正在读取订单');
+  try {
+    const data = await api('/api/shop/orders');
+    state.orders = asList(data, ['orders', 'items']);
+    renderOrders();
+  } catch (error) {
+    $('#orderList').innerHTML = emptyState(chineseErrorMessage(error.message, '订单读取失败，请稍后重试'), '订单数据暂不可用');
+    if (error.status === 401) openAuth('login');
+  }
+}
+
+function renderOrders() {
+  if (!state.orders.length) { $('#orderList').innerHTML = emptyState('还没有物资订单', '暂无订单'); return; }
+  const page = pageItems(state.orders, 'orders');
+  $('#orderList').innerHTML = page.items.map((order) => {
+    const id = pick(order, ['id', 'orderId']);
+    const status = String(pick(order, ['status'], 'pending')).toLowerCase();
+    return `<article class="order-entry" data-order-id="${escapeHtml(id)}"><button class="order-summary" type="button" aria-expanded="false"><span><small>订单号</small><strong>${escapeHtml(pick(order, ['orderNo', 'order_no', 'number'], id))}</strong></span><span><small>金额</small><strong class="amount">${number(pick(order, ['totalAmount', 'total_amount', 'amount'], 0))} 币</strong></span><span><small>状态</small><i class="status ${escapeHtml(status)}">${escapeHtml(statusLabels[status] || '状态待确认')}</i></span><span><small>创建时间</small><strong>${escapeHtml(dateTime(pick(order, ['createdAt', 'created_at'])))}</strong></span><span class="order-toggle">＋</span></button><div class="order-details" hidden></div></article>`;
+  }).join('') + paginationMarkup('orders', page.totalPages, page.page);
+}
+
+async function toggleOrder(entry) {
+  const detail = $('.order-details', entry);
+  const summary = $('.order-summary', entry);
+  const opening = detail.hidden;
+  if (!opening) {
+    detail.hidden = true; entry.classList.remove('open'); summary.setAttribute('aria-expanded', 'false'); return;
+  }
+  detail.hidden = false; entry.classList.add('open'); summary.setAttribute('aria-expanded', 'true');
+  const id = entry.dataset.orderId;
+  if (state.orderDetails.has(id)) { renderOrderDetail(detail, state.orderDetails.get(id)); return; }
+  detail.innerHTML = emptyState('正在读取订单明细', '正在读取订单明细');
+  try {
+    const data = await api(`/api/shop/orders/${encodeURIComponent(id)}`);
+    state.orderDetails.set(id, data || {});
+    renderOrderDetail(detail, data || {});
+  } catch (error) { detail.innerHTML = emptyState(chineseErrorMessage(error.message, '订单明细读取失败，请稍后重试'), '订单明细暂不可用'); }
+}
+
+function renderOrderDetail(container, data) {
+  const items = asList(data, ['items', 'orderItems', 'details']);
+  if (!items.length) { container.innerHTML = emptyState('该订单暂无明细', '暂无订单明细'); return; }
+  container.innerHTML = `<div class="order-items">${items.map((item) => `<div class="order-item"><span><strong>${escapeHtml(pick(item, ['name', 'productName'], '未命名物资'))}</strong><small>${escapeHtml(pick(item, ['sku'], '—'))}</small></span><span>单价 ${number(pick(item, ['unitPrice', 'unit_price', 'price'], 0))} 币</span><span>× ${number(pick(item, ['quantity'], 1))}</span></div>`).join('')}</div>`;
+}
+
+function startChallengeCountdown(seconds = 60) {
+  state.challengeUntil = Date.now() + seconds * 1000;
+  clearInterval(state.challengeTimer);
+  const button = $('#challengeButton');
+  const tick = () => {
+    const remaining = Math.max(0, Math.ceil((state.challengeUntil - Date.now()) / 1000));
+    button.disabled = remaining > 0;
+    button.textContent = remaining > 0 ? `${remaining} 秒后重试` : '重新请求验证码';
+    if (!remaining) clearInterval(state.challengeTimer);
+  };
+  tick(); state.challengeTimer = setInterval(tick, 1000);
+}
+
+async function requestChallenge() {
+  const form = $('#registerForm');
+  const steamInput = form.elements.steamId;
+  if (!steamInput.checkValidity()) { steamInput.reportValidity(); return; }
+  await withBusy($('#challengeButton'), async () => {
+    try {
+      await api('/api/shop/auth/challenge', { method: 'POST', body: JSON.stringify({ steamId: steamInput.value.trim() }) });
+      toast('验证码已发送，请回到游戏内查看消息');
+      startChallengeCountdown(60);
+      form.elements.verificationCode.focus();
+    } catch (error) { toast(error.message, 'error'); }
+  });
+}

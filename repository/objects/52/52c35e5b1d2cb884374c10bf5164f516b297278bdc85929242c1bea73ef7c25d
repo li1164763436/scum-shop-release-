@@ -1,0 +1,28 @@
+const COMMAND_DESCRIPTIONS = new Map([
+  ['listplayers', '查询当前在线玩家列表'],
+  ['queryplayereconomy', '查询玩家经济数据（现金、银行余额和金条）'],
+  ['help', '检查 RCON 支持的命令能力'],
+  ['querysaveditemowner', '查询云仓库物品所有者'],
+  ['removesavedowneditem', '从云仓库移除已保存物品'],
+  ['spawnitemforplayer', '向指定玩家发放物品'],
+  ['spawnitem', '在玩家位置生成物品'],
+  ['sendchat', '向游戏内发送消息'],
+  ['kickplayer', '将指定玩家踢出服务器'],
+  ['kick', '将指定玩家踢出服务器']
+]);
+
+export function rconCommandName(command) {
+  return String(command || '').trim().split(/\s+/)[0] || '未知命令';
+}
+
+export function describeRconCommand(command) {
+  const commandName = rconCommandName(command);
+  const normalized = commandName.replace(/^#/, '').toLowerCase();
+  return COMMAND_DESCRIPTIONS.get(normalized) || `执行 RCON 命令（${commandName}）`;
+}
+
+export function formatRconAccessMessage(command, status) {
+  const commandName = rconCommandName(command);
+  const result = status === 'success' ? '成功' : '失败';
+  return `${describeRconCommand(command)}${result} · ${commandName}`;
+}

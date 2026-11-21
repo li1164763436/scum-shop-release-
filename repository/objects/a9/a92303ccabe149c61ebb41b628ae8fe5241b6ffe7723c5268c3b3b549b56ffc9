@@ -1,0 +1,106 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
+
+function safeMessage(value, fallback) {
+  return String(value || fallback).replace(/[A-Za-z]:\\[^\r\n]*/g, '[路径已隐藏]').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 500) || fallback;
+}
+
+function validSteamId(value) {
+  return /^\d{17}$/.test(String(value || ''));
+}
+
+function validCoordinates(record) {
+  return ['worldX', 'worldY', 'worldZ'].every((key) => Number.isFinite(Number(record?.[key])) && Math.abs(Number(record[key])) <= 10_000_000);
+}
+
+export function validateScumTeleportSnapshot(result) {
+  if (result?.complete !== true || !Array.isArray(result?.players) || !Array.isArray(result?.squads) || !Array.isArray(result?.flags)) throw Object.assign(new Error('SCUM传送坐标快照不完整'), { code: 'SCUM_TELEPORT_READ_INCOMPLETE' });
+  const players = new Set();
+  for (const player of result.players) {
+    const steamId = String(player?.steamId || '');
+    if (!validSteamId(steamId) || players.has(steamId) || !validCoordinates(player)) throw Object.assign(new Error('SCUM人物坐标快照包含无效记录'), { code: 'SCUM_TELEPORT_PLAYER_INVALID' });
+    players.add(steamId);
+  }
+  const squadMembers = new Set();
+  for (const member of result.squads) {
+    const memberSteamId = String(member?.steamId || '');
+    const squadId = String(member?.squadId || '').trim();
+    const squadName = String(member?.squadName || '').trim();
+    if (!validSteamId(memberSteamId) || squadMembers.has(memberSteamId) || !squadId || squadId.length > 100 || !squadName || squadName.length > 100) throw Object.assign(new Error('SCUM小队成员快照包含无效记录'), { code: 'SCUM_TELEPORT_SQUAD_INVALID' });
+    squadMembers.add(memberSteamId);
+  }
+  const flags = new Set();
+  for (const flag of result.flags) {
+    const id = String(flag?.id || '');
+    const ownerSteamId = String(flag?.ownerSteamId || '');
+    if (!id || flags.has(id) || !validSteamId(ownerSteamId) || !validCoordinates(flag)) throw Object.assign(new Error('SCUM领地旗坐标快照包含无效记录'), { code: 'SCUM_TELEPORT_FLAG_INVALID' });
+    flags.add(id);
+  }
+  return result;
+}
+
+export class ScumTeleportEntityReader {
+  constructor({ root, timeoutMs = 20000, cacheMs = 5000, spawnProcess = spawn } = {}) {
+    this.root = root || path.resolve(import.meta.dirname, '..', '..');
+    this.timeoutMs = timeoutMs;
+    this.cacheMs = Math.max(0, Number(cacheMs) || 0);
+    this.spawnProcess = spawnProcess;
+    this.cached = null;
+    this.active = null;
+  }
+
+  async read(serverDirectory) {
+    const key = String(serverDirectory || '');
+    if (this.cached?.key === key && Date.now() - this.cached.at <= this.cacheMs) return this.cached.value;
+    if (this.active?.key === key) return this.active.promise;
+    const promise = this.readUncached(serverDirectory).then((value) => {
+      this.cached = { key, at: Date.now(), value };
+      return value;
+    }).finally(() => {
+      if (this.active?.promise === promise) this.active = null;
+    });
+    this.active = { key, promise };
+    return promise;
+  }
+
+  readUncached(serverDirectory) {
+    return new Promise((resolve, reject) => {
+      const script = path.join(this.root, 'scripts', 'read-scum-teleport-entities.py');
+      const bundledPython = path.join(this.root, 'scripts', 'python', 'python.exe');
+      const executable = fs.existsSync(bundledPython) ? bundledPython : (process.platform === 'win32' ? 'python.exe' : 'python3');
+      const child = this.spawnProcess(executable, ['-X', 'utf8', script], { env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, windowsHide: true });
+      const stdout = new StringDecoder('utf8');
+      const stderr = new StringDecoder('utf8');
+      let output = '';
+      let errorOutput = '';
+      let settled = false;
+      const finish = (callback) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        callback();
+      };
+      const timer = setTimeout(() => {
+        child.kill();
+        finish(() => reject(Object.assign(new Error('SCUM传送坐标读取超时'), { code: 'SCUM_TELEPORT_READ_TIMEOUT' })));
+      }, this.timeoutMs);
+      child.stdout.on('data', (data) => { output += stdout.write(data); });
+      child.stderr.on('data', (data) => { errorOutput += stderr.write(data); });
+      child.on('error', (error) => finish(() => reject(Object.assign(new Error(`无法启动SCUM传送坐标读取脚本：${safeMessage(error?.message, '启动失败')}`), { code: 'SCUM_TELEPORT_READ_START_FAILED' }))));
+      child.on('close', (code) => finish(() => {
+        output += stdout.end();
+        errorOutput += stderr.end();
+        try {
+          const result = JSON.parse(output.trim());
+          if (result.error || code) throw Object.assign(new Error(result.error || errorOutput.trim() || '读取SCUM传送坐标失败'), { code: 'SCUM_TELEPORT_READ_FAILED' });
+          resolve(validateScumTeleportSnapshot(result));
+        } catch (error) {
+          reject(Object.assign(new Error(safeMessage(error?.message || errorOutput, 'SCUM传送坐标读取结果无效')), { code: error?.code || 'SCUM_TELEPORT_READ_INVALID' }));
+        }
+      }));
+      child.stdin.end(JSON.stringify({ serverDirectory }));
+    });
+  }
+}

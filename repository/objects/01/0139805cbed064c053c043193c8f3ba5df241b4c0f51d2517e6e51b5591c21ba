@@ -1,0 +1,80 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const source = 'https://scumcode.scum8.cn';
+const outputRoot = path.join(root, 'data', 'imports', 'scum8-all');
+const failures = [];
+const mainCategories = [
+  ['武器弹药', '刺刀|单手武器|双手武器|发射器|导轨|弓|弹匣|弹药|手枪|手榴弹|机械瞄具|步枪|消音器|瞄准镜|箭矢|箭袋|起爆器|霰弹枪'],
+  ['服装护具', '上衣|伪装|内衣|头部护甲|帽子|手部|背包|胸部护甲|脚部|腰部|腿部|面具|颈部'],
+  ['食品饮品', '不可食用|包装食品|可食用|坚果和种子|水果|浆果|罐头食品|蔬菜|酒精饮品|非酒精饮品|鱼类'],
+  ['建造工具', '修理|基地建造|工具|组件|配方|防御工事|陷阱|零件'],
+  ['载具交通', '四轮摩托 / ATV|备件|皮卡|载具'],
+  ['医疗生存', '医疗用品|手电'],
+  ['钓鱼农耕', '农耕|浮漂|鱼竿|鱼线|鱼线轮|鱼钩|鱼饵'],
+  ['生物收藏', '动物|动物制品|圣诞|挂饰|涂装|音乐|手臂|眼部|耳朵|身体'],
+  ['其他', '其他']
+].map(([name, children]) => ({ name, children: new Set(children.split('|')) }));
+const mainCategory = (category) => mainCategories.find((group) => group.children.has(category))?.name || '其他';
+async function request(url) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw new Error('HTTP ' + response.status + ': ' + url);
+  return response;
+}
+const items = [];
+for (let page = 1; ; page++) {
+  const query = new URLSearchParams({ page: String(page), pageSize: '100' });
+  const data = await (await request(source + '/api/public/items?' + query)).json();
+  if (!Array.isArray(data.items)) throw new Error('物品接口返回格式错误');
+  items.push(...data.items);
+  if (page * data.pageSize >= data.total || !data.items.length) break;
+}
+const groups = new Map();
+for (const item of items) {
+  const main = mainCategory(item.category || '未分类');
+  const category = item.category || '未分类';
+  if (!groups.has(main)) groups.set(main, new Map());
+  if (!groups.get(main).has(category)) groups.get(main).set(category, []);
+  groups.get(main).get(category).push(item);
+}
+const columns = ['name', 'englishName', 'itemId', 'fulfillmentCodes', 'parentCategory', 'category', 'imagePath', 'sourceImageUrl', 'sourceUrl'];
+const quote = (value) => String.fromCharCode(34) + String(value ?? '').replaceAll(String.fromCharCode(34), String.fromCharCode(34, 34)) + String.fromCharCode(34);
+const results = [];
+let mainIndex = 0;
+for (const [main, categories] of groups) {
+  mainIndex += 1;
+  const mainFolder = String(mainIndex).padStart(2, '0') + '-' + main.replace(/[\\/:*?"<>|]/g, '_');
+  const mainOutput = path.join(outputRoot, mainFolder);
+  for (const [category, categoryItems] of categories) {
+  const folder = category.replace(/[\\/:*?"<>|]/g, '_');
+  const output = path.join(mainOutput, folder);
+  await fs.mkdir(path.join(output, 'images'), { recursive: true });
+  const records = [];
+  for (const item of categoryItems) {
+    let imagePath = '';
+    try {
+      if (!item.imageUrl) throw new Error('缺少图片地址');
+      const imageUrl = new URL(item.imageUrl);
+      if (imageUrl.origin !== source) throw new Error('图片地址来源不匹配');
+      const response = await request(imageUrl);
+      const mime = (response.headers.get('content-type') || '').split(';')[0];
+      const extension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }[mime];
+      if (!extension) throw new Error('不支持的图片格式：' + mime);
+      imagePath = 'images/' + String(records.length + 1).padStart(4, '0') + '.' + extension;
+      await fs.writeFile(path.join(output, imagePath), Buffer.from(await response.arrayBuffer()));
+    } catch (error) {
+      failures.push({ category, code: item.code, message: error.message });
+    }
+    records.push({ name: item.name, englishName: item.englishName, itemId: item.code, fulfillmentCodes: item.code, parentCategory: main, category: item.category, imagePath, sourceImageUrl: item.imageUrl, sourceUrl: item.detailUrl });
+  }
+  const result = { source, attribution: '数据来源：scumcode.scum8.cn', fetchedAt: new Date().toISOString(), count: records.length, imageCount: records.filter((record) => record.imagePath).length, failures: failures.filter((failure) => failure.category === category), items: records };
+  await fs.writeFile(path.join(output, 'items.json'), JSON.stringify(result, null, 2));
+  await fs.writeFile(path.join(output, 'items.csv'), '\uFEFF' + [columns.map(quote).join(','), ...records.map((record) => columns.map((column) => quote(record[column])).join(','))].join('\r\n'));
+  results.push({ mainCategory: main, category, count: result.count, imageCount: result.imageCount, folder: path.relative(outputRoot, output) });
+  }
+}
+await fs.writeFile(path.join(outputRoot, 'summary.json'), JSON.stringify({ source, fetchedAt: new Date().toISOString(), mainCategories: groups.size, categories: results.length, count: items.length, imageCount: results.reduce((sum, result) => sum + result.imageCount, 0), failures, results }, null, 2));
+console.log(JSON.stringify({ mainCategories: groups.size, categories: results.length, count: items.length, imageCount: results.reduce((sum, result) => sum + result.imageCount, 0), failures: failures.length, output: outputRoot }, null, 2));
+if (failures.length) process.exitCode = 1;

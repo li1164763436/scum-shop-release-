@@ -1,0 +1,27 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { scumPathsFromRoot } from './scum-rcon-config.js';
+
+export function parseAdminUsers(content) {
+  const ids = new Set();
+  for (const line of String(content).replace(/^\uFEFF/, '').split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d{17})(?=\s*(?:\[|$|;|#))/);
+    if (match) ids.add(match[1]);
+  }
+  return ids;
+}
+
+export async function readGameAdminUsers(directory) {
+  if (!directory) return new Set();
+  const root = scumPathsFromRoot(directory).root;
+  try {
+    const bytes = await fs.readFile(path.join(root, 'Saved', 'Config', 'WindowsServer', 'AdminUsers.ini'));
+    const content = bytes[0] === 255 && bytes[1] === 254
+      ? bytes.subarray(2).toString('utf16le')
+      : bytes.toString('utf8').replace(/^\uFEFF/, '');
+    return parseAdminUsers(content);
+  } catch (error) {
+    if (error.code === 'ENOENT') return new Set();
+    throw error;
+  }
+}

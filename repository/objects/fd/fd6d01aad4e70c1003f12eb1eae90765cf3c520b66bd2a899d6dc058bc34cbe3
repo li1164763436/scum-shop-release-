@@ -1,0 +1,287 @@
+import { ServiceError } from './commerce-service.js';
+import { fixedLocationTargetId, flagTargetId, playerTargetId } from './teleport-service.js';
+
+const GRID_ROWS = Object.freeze(['D', 'C', 'B', 'A', 'Z']);
+const GRID_COLUMNS = Object.freeze(['4', '3', '2', '1', '0']);
+
+export const DEFAULT_TELEPORT_MAP_PROFILE = Object.freeze({
+  id: 'scum-map-ultra-validated-fallback-v2',
+  mapVersion: 'scum-map-ultra-20261113',
+  imageWidth: 5120,
+  imageHeight: 5120,
+  worldLeftX: 619200,
+  worldRightX: -904800,
+  worldTopY: 619199.9375,
+  worldBottomY: -904800,
+  verified: false,
+  calibrationMethod: 'validated_bounds_fallback',
+  calibratedAt: null
+});
+
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function percent(value) {
+  return Number(value.toFixed(6));
+}
+
+function affineOf(value) {
+  if (!value || typeof value !== 'object') throw new ServiceError('传送地图仿射校准参数缺失', 503, 'TELEPORT_MAP_CALIBRATION_INVALID');
+  const result = {};
+  for (const key of ['a', 'b', 'c', 'd', 'e', 'f']) {
+    result[key] = finiteNumber(value[key]);
+    if (result[key] === null) throw new ServiceError('传送地图仿射校准参数无效', 503, 'TELEPORT_MAP_CALIBRATION_INVALID');
+  }
+  return result;
+}
+
+function profileOf(input = {}) {
+  const profile = { ...DEFAULT_TELEPORT_MAP_PROFILE, ...input };
+  for (const key of ['imageWidth', 'imageHeight', 'worldLeftX', 'worldRightX', 'worldTopY', 'worldBottomY']) {
+    if (!Number.isFinite(Number(profile[key]))) throw new ServiceError('传送地图校准参数无效', 503, 'TELEPORT_MAP_CALIBRATION_INVALID');
+    profile[key] = Number(profile[key]);
+  }
+  if (profile.imageWidth <= 0 || profile.imageHeight <= 0 || profile.worldLeftX === profile.worldRightX || profile.worldTopY === profile.worldBottomY) {
+    throw new ServiceError('传送地图校准范围无效', 503, 'TELEPORT_MAP_CALIBRATION_INVALID');
+  }
+  if (profile.calibrationMethod === 'affine') profile.affine = affineOf(profile.affine);
+  return profile;
+}
+
+function solveLinear3(matrix, values) {
+  const rows = matrix.map((row, index) => [...row, values[index]]);
+  for (let column = 0; column < 3; column++) {
+    let pivot = column;
+    for (let row = column + 1; row < 3; row++) if (Math.abs(rows[row][column]) > Math.abs(rows[pivot][column])) pivot = row;
+    if (Math.abs(rows[pivot][column]) < 1e-10) throw new ServiceError('传送地图校准点不能共线或重复', 422, 'TELEPORT_MAP_CALIBRATION_DEGENERATE');
+    [rows[column], rows[pivot]] = [rows[pivot], rows[column]];
+    const divisor = rows[column][column];
+    for (let index = column; index < 4; index++) rows[column][index] /= divisor;
+    for (let row = 0; row < 3; row++) {
+      if (row === column) continue;
+      const factor = rows[row][column];
+      for (let index = column; index < 4; index++) rows[row][index] -= factor * rows[column][index];
+    }
+  }
+  return rows.map((row) => row[3]);
+}
+
+function fitAffineAxis(points, outputKey, centerX, centerY, scaleX, scaleY) {
+  const matrix = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const values = [0, 0, 0];
+  for (const point of points) {
+    const row = [(point.worldX - centerX) / scaleX, (point.worldY - centerY) / scaleY, 1];
+    for (let i = 0; i < 3; i++) {
+      values[i] += row[i] * point[outputKey];
+      for (let j = 0; j < 3; j++) matrix[i][j] += row[i] * row[j];
+    }
+  }
+  const [xFactor, yFactor, intercept] = solveLinear3(matrix, values);
+  const xCoefficient = xFactor / scaleX;
+  const yCoefficient = yFactor / scaleY;
+  return [xCoefficient, yCoefficient, intercept - xCoefficient * centerX - yCoefficient * centerY];
+}
+
+function calibrationPoints(inputPoints, minimum = 1) {
+  if (!Array.isArray(inputPoints) || inputPoints.length < minimum) throw new ServiceError(`传送地图至少需要${minimum}个校准点`, 422, 'TELEPORT_MAP_CALIBRATION_POINTS_REQUIRED');
+  return inputPoints.map((point) => {
+    const result = {};
+    for (const key of ['worldX', 'worldY', 'pixelX', 'pixelY']) {
+      result[key] = finiteNumber(point?.[key]);
+      if (result[key] === null) throw new ServiceError('传送地图校准点包含无效坐标', 422, 'TELEPORT_MAP_CALIBRATION_POINT_INVALID');
+    }
+    return result;
+  });
+}
+
+export function evaluateTeleportAffineCalibration(inputAffine, inputPoints) {
+  const affine = affineOf(inputAffine);
+  const points = calibrationPoints(inputPoints);
+  const determinant = affine.a * affine.e - affine.b * affine.d;
+  if (Math.abs(determinant) < 1e-12) throw new ServiceError('传送地图仿射校准矩阵不可逆', 422, 'TELEPORT_MAP_CALIBRATION_DEGENERATE');
+  const measurements = points.map((point) => {
+    const pixelErrorX = affine.a * point.worldX + affine.b * point.worldY + affine.c - point.pixelX;
+    const pixelErrorY = affine.d * point.worldX + affine.e * point.worldY + affine.f - point.pixelY;
+    const worldErrorX = (affine.e * pixelErrorX - affine.b * pixelErrorY) / determinant;
+    const worldErrorY = (-affine.d * pixelErrorX + affine.a * pixelErrorY) / determinant;
+    return { pixel: Math.hypot(pixelErrorX, pixelErrorY), meters: Math.hypot(worldErrorX, worldErrorY) / 100 };
+  });
+  return {
+    pointCount: measurements.length,
+    averagePixelError: Number((measurements.reduce((sum, item) => sum + item.pixel, 0) / measurements.length).toFixed(4)),
+    maximumPixelError: Number(Math.max(...measurements.map((item) => item.pixel)).toFixed(4)),
+    averageMeterError: Number((measurements.reduce((sum, item) => sum + item.meters, 0) / measurements.length).toFixed(2)),
+    maximumMeterError: Number(Math.max(...measurements.map((item) => item.meters)).toFixed(2))
+  };
+}
+
+export function solveTeleportAffineCalibration(inputPoints) {
+  const points = calibrationPoints(inputPoints, 3);
+  const centerX = points.reduce((sum, point) => sum + point.worldX, 0) / points.length;
+  const centerY = points.reduce((sum, point) => sum + point.worldY, 0) / points.length;
+  const scaleX = Math.max(...points.map((point) => Math.abs(point.worldX - centerX)));
+  const scaleY = Math.max(...points.map((point) => Math.abs(point.worldY - centerY)));
+  if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || scaleX === 0 || scaleY === 0) throw new ServiceError('传送地图校准点不能共线或重复', 422, 'TELEPORT_MAP_CALIBRATION_DEGENERATE');
+  const [a, b, c] = fitAffineAxis(points, 'pixelX', centerX, centerY, scaleX, scaleY);
+  const [d, e, f] = fitAffineAxis(points, 'pixelY', centerX, centerY, scaleX, scaleY);
+  const affine = { a, b, c, d, e, f };
+  return { affine, ...evaluateTeleportAffineCalibration(affine, points) };
+}
+
+export function worldToTeleportMap(worldX, worldY, inputProfile = DEFAULT_TELEPORT_MAP_PROFILE) {
+  const x = finiteNumber(worldX);
+  const y = finiteNumber(worldY);
+  if (x === null || y === null) return null;
+  const profile = profileOf(inputProfile);
+  const affine = profile.calibrationMethod === 'affine' ? profile.affine : null;
+  const pixelX = affine ? affine.a * x + affine.b * y + affine.c : (profile.worldLeftX - x) / (profile.worldLeftX - profile.worldRightX) * profile.imageWidth;
+  const pixelY = affine ? affine.d * x + affine.e * y + affine.f : (profile.worldTopY - y) / (profile.worldTopY - profile.worldBottomY) * profile.imageHeight;
+  const rawX = pixelX / profile.imageWidth * 100;
+  const rawY = pixelY / profile.imageHeight * 100;
+  const inBounds = rawX >= 0 && rawX <= 100 && rawY >= 0 && rawY <= 100;
+  if (!inBounds) return { inBounds: false, xPercent: percent(rawX), yPercent: percent(rawY), gridCode: null };
+  const columnIndex = Math.min(GRID_COLUMNS.length - 1, Math.floor(rawX / 20));
+  const rowIndex = Math.min(GRID_ROWS.length - 1, Math.floor(rawY / 20));
+  return {
+    inBounds: true,
+    xPercent: percent(rawX),
+    yPercent: percent(rawY),
+    pixelX: Number(pixelX.toFixed(4)),
+    pixelY: Number(pixelY.toFixed(4)),
+    gridCode: `${GRID_ROWS[rowIndex]}${GRID_COLUMNS[columnIndex]}`
+  };
+}
+
+function sharedSnapshotMarker(row, type, id, profile, now) {
+  const position = worldToTeleportMap(row.worldX, row.worldY, profile);
+  if (!position?.inBounds) return null;
+  const observedAt = row.observedAt || null;
+  const observedTime = observedAt ? new Date(observedAt).getTime() : NaN;
+  const online = row.online === true || row.online === 1;
+  return {
+    id,
+    type,
+    name: row.name || (type === 'player' ? '本人角色' : type === 'teammate' ? '小队队友' : '领地旗'),
+    gridCode: position.gridCode,
+    xPercent: position.xPercent,
+    yPercent: position.yPercent,
+    observedAt,
+    online,
+    stale: !online || !Number.isFinite(observedTime) || now - observedTime > 5 * 60 * 1000
+  };
+}
+
+function vehicleMarker(row, profile, now) {
+  const position = worldToTeleportMap(row.worldX, row.worldY, profile);
+  if (!position?.inBounds) return null;
+  const observedAt = row.sourceSynchronizedAt || row.lastSeenAt || null;
+  const observedTime = observedAt ? new Date(observedAt).getTime() : NaN;
+  const online = row.sourceSyncState === 'present' && Number.isFinite(observedTime) && now - observedTime <= 5 * 60 * 1000;
+  return {
+    id: `vehicle:${row.vehicleId}`,
+    type: 'vehicle',
+    vehicleId: Number(row.vehicleId),
+    name: row.displayName || row.modelName || row.vehicleType || `上锁载具 #${row.vehicleId}`,
+    vehicleCode: row.sourceAssetId || row.vehicleCode || null,
+    ownership: row.ownership === 'teammate' ? 'teammate' : 'self',
+    gridCode: position.gridCode,
+    xPercent: position.xPercent,
+    yPercent: position.yPercent,
+    observedAt,
+    online,
+    stale: !online
+  };
+}
+
+export class TeleportMapService {
+  constructor({ db, profile = DEFAULT_TELEPORT_MAP_PROFILE, snapshotStore = null, now = () => Date.now() }) {
+    this.db = db;
+    this.profile = profileOf(profile);
+    this.snapshotStore = snapshotStore;
+    this.now = now;
+  }
+
+  async overview(steamId) {
+    const owner = String(steamId || '').trim();
+    if (!/^\d{17}$/.test(owner)) throw new ServiceError('商城账号未绑定有效SteamID', 409, 'STEAM_ID_REQUIRED');
+    const squadRows = await this.db.query("SELECT mate.`SteamID` AS steamId FROM `商城用户` self JOIN `商城用户` mate ON mate.`小队编号`=self.`小队编号` WHERE self.`SteamID`=? AND self.`小队编号`<>'' AND mate.`SteamID`<>self.`SteamID`", [owner]);
+    const squadMemberIds = [...new Set(squadRows.map((row) => String(row.steamId || '')).filter((id) => /^\d{17}$/.test(id)))];
+    const visibleSteamIds = [owner, ...squadMemberIds];
+    const placeholders = visibleSteamIds.map(() => '?').join(',');
+    const snapshotCapabilities = this.snapshotStore?.capabilities?.() || { playerLocation: false, flagLocation: false };
+    const [vehicleRows, persistedPlayerRows, persistedFlagRows, fixedLocationRows] = await Promise.all([
+      this.db.query(`SELECT \`载具档案编号\` AS vehicleId,\`载具档案编码\` AS vehicleCode,\`载具类型\` AS vehicleType,\`型号名称\` AS modelName,\`显示名称\` AS displayName,\`来源资产标识\` AS sourceAssetId,\`世界X坐标\` AS worldX,\`世界Y坐标\` AS worldY,\`最后观测时间\` AS lastSeenAt,\`来源同步时间\` AS sourceSynchronizedAt,\`来源同步状态\` AS sourceSyncState,CASE WHEN \`车主SteamID\`=? THEN 'self' ELSE 'teammate' END AS ownership FROM \`载具档案\` WHERE \`车主SteamID\` IN (${placeholders}) AND \`来源类型\`='scum_locked_vehicle' AND \`来源锁槽数量\`>0 AND \`档案状态\` NOT IN ('lost','destroyed','retired') AND \`世界X坐标\` IS NOT NULL AND \`世界Y坐标\` IS NOT NULL ORDER BY ownership,\`来源同步时间\` DESC,\`载具档案编号\` DESC`, [owner, ...visibleSteamIds]),
+      this.db.query(`SELECT \`SteamID\` AS entityId,\`SteamID\` AS ownerSteamId,\`游戏名称\` AS name,\`位置世界X坐标\` AS worldX,\`位置世界Y坐标\` AS worldY,\`位置观测时间\` AS observedAt,\`位置是否当前有效\` AS online FROM \`商城用户\` WHERE \`SteamID\` IN (${placeholders}) AND \`位置世界X坐标\` IS NOT NULL AND \`位置世界Y坐标\` IS NOT NULL`, visibleSteamIds),
+      this.db.query(`SELECT \`实体标识\` AS entityId,\`归属SteamID\` AS ownerSteamId,\`显示名称\` AS name,\`世界X坐标\` AS worldX,\`世界Y坐标\` AS worldY,\`观测时间\` AS observedAt,\`是否当前有效\` AS online FROM \`传送位置快照\` WHERE \`实体类型\`='flag' AND \`归属SteamID\` IN (${placeholders})`, visibleSteamIds),
+      this.db.query("SELECT `位置编号` AS id,`位置名称` AS name,`世界X坐标` AS worldX,`世界Y坐标` AS worldY FROM `传送固定位置` WHERE `是否启用`=1 AND `来源类型`='admin' AND (`可见范围`='public' OR (`可见范围`='private' AND `归属SteamID`=?)) ORDER BY `排序值`,`位置编号`", [owner])
+    ]);
+    const persistedPlayers = persistedPlayerRows.map((row) => ({ ...row, online: row.online === 1 && snapshotCapabilities.playerLocation === true }));
+    const persistedFlags = persistedFlagRows.map((row) => ({ ...row, online: row.online === 1 && snapshotCapabilities.flagLocation === true }));
+    const memorySnapshots = this.snapshotStore?.readForSteamId(owner) || { player: null, flags: [] };
+    const memoryPlayers = [memorySnapshots.player, ...(this.snapshotStore?.readPlayersForSteamIds?.(squadMemberIds) || [])].filter(Boolean).map((row) => ({ ...row, ownerSteamId: row.steamId, online: snapshotCapabilities.playerLocation === true }));
+    const playerRows = persistedPlayers.length ? persistedPlayers : memoryPlayers;
+    const flagRows = persistedFlags.length ? persistedFlags : (memorySnapshots.flags || []).map((row) => ({ ...row, online: snapshotCapabilities.flagLocation === true }));
+    const sampledAt = this.now();
+    const generatedAt = new Date(sampledAt).toISOString();
+    const selfRow = playerRows.find((row) => String(row.ownerSteamId || row.entityId || row.steamId) === owner);
+    const player = selfRow ? sharedSnapshotMarker(selfRow, 'player', 'player:self', this.profile, sampledAt) : null;
+    const teammates = squadMemberIds.map((steamId) => {
+      const row = playerRows.find((item) => String(item.ownerSteamId || item.entityId || item.steamId) === steamId);
+      return row ? sharedSnapshotMarker(row, 'teammate', playerTargetId(steamId), this.profile, sampledAt) : null;
+    }).filter(Boolean);
+    const flags = flagRows.map((flag) => sharedSnapshotMarker(flag, 'flag', flagTargetId(flag.entityId || flag.id), this.profile, sampledAt)).filter(Boolean);
+    const vehicles = vehicleRows.map((row) => vehicleMarker(row, this.profile, sampledAt)).filter(Boolean);
+    const fixedLocations = fixedLocationRows.map((row) => {
+      const position = worldToTeleportMap(row.worldX, row.worldY, this.profile);
+      return position?.inBounds ? { id: fixedLocationTargetId(row.id), type: 'fixed_location', name: row.name, gridCode: position.gridCode, xPercent: position.xPercent, yPercent: position.yPercent, online: true, stale: false } : null;
+    }).filter(Boolean);
+    return {
+      map: {
+        version: this.profile.mapVersion,
+        width: this.profile.imageWidth,
+        height: this.profile.imageHeight,
+        gridRows: GRID_ROWS,
+        gridColumns: GRID_COLUMNS
+      },
+      calibration: {
+        id: this.profile.id,
+        verified: this.profile.verified === true,
+        method: this.profile.calibrationMethod,
+        calibratedAt: this.profile.calibratedAt,
+        pointCount: Number.isInteger(this.profile.pointCount) ? this.profile.pointCount : null,
+        averagePixelError: finiteNumber(this.profile.averagePixelError),
+        maximumPixelError: finiteNumber(this.profile.maximumPixelError),
+        validationPointCount: Number.isInteger(this.profile.validation?.pointCount) ? this.profile.validation.pointCount : null,
+        averageMeterError: finiteNumber(this.profile.validation?.averageMeterError),
+        maximumMeterError: finiteNumber(this.profile.validation?.maximumMeterError),
+        warning: this.profile.verified === true ? null : '当前为初始坐标范围，完成服务器实测校准前仅供位置核对'
+      },
+      generatedAt,
+      refreshAfterSeconds: 10,
+      player,
+      teammates,
+      vehicles,
+      flags,
+      fixedLocations,
+      capabilities: {
+        playerLocation: snapshotCapabilities.playerLocation === true,
+        teammateLocation: snapshotCapabilities.playerLocation === true,
+        vehicleLocation: true,
+        flagLocation: snapshotCapabilities.flagLocation === true,
+        fixedLocation: true
+      },
+      layers: {
+        player: Boolean(player),
+        teammates: teammates.length > 0,
+        vehicles: vehicles.length > 0,
+        flags: flags.length > 0,
+        fixedLocations: fixedLocations.length > 0
+      }
+    };
+  }
+}
+
+export const teleportMapInternals = { GRID_ROWS, GRID_COLUMNS, profileOf, sharedSnapshotMarker, vehicleMarker };

@@ -1,0 +1,34 @@
+function searchable(instance) {
+  return [
+    instance?.game,
+    instance?.gameName,
+    instance?.type,
+    instance?.name,
+    instance?.displayName,
+    instance?.description,
+    instance?.workingDirectory,
+    instance?.startCommand,
+    instance?.executable,
+    instance?.programPath,
+    instance?.appId,
+    instance?.steamAppId
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+export function isScumInstance(instance) {
+  const text = searchable(instance);
+  // 513710 为 SCUM 客户端，3792580 为当前专用服务器 App ID。
+  return text.includes('scum') || /(?:^|\D)(?:513710|3792580)(?:\D|$)/.test(text);
+}
+
+export function normalizeScumInstance(instance, status = {}) {
+  const combined = status?.data && typeof status.data === 'object' ? status.data : status;
+  return {
+    id: String(instance.id ?? instance.instanceId ?? instance.uuid ?? ''),
+    name: instance.name ?? instance.displayName ?? '未命名 SCUM 实例',
+    status: combined.status ?? combined.state ?? instance.status ?? 'unknown',
+    pid: combined.pid ?? instance.pid ?? null,
+    workingDirectory: instance.workingDirectory ?? instance.path ?? instance.cwd ?? '',
+    startCommand: instance.startCommand ?? instance.command ?? ''
+  };
+}

@@ -1,0 +1,25 @@
+<section class="activity-panel vehicle-insurance-shop" id="page-insurance" hidden>
+  <div class="activity-guest-message" hidden><div class="empty-row"><strong>登录后可购买载具保险</strong><small>请先登录</small></div></div>
+  <header class="activity-panel-heading insurance-shop-heading">
+    <div><p class="overline"><span></span> 载具保险</p><h2>载具保险</h2><p>直接购买保险方案，无需拥有或选择载具；赔付次数与有效期以方案为准。</p></div>
+    <button class="icon-button" id="insuranceReload" type="button" aria-label="刷新保险" title="刷新保险">↻</button>
+  </header>
+  <section class="insurance-shop-summary" aria-label="保险概览">
+    <article><small>可用商城币</small><strong id="insuranceBalance">0</strong></article>
+    <article><small>载具数量</small><strong id="insuranceVehicleCount">0</strong></article>
+    <article><small>生效保单</small><strong id="insuranceActiveCount">0</strong></article>
+  </section>
+  <section class="insurance-shop-block">
+    <div class="insurance-shop-title"><div><span>我的载具</span><h3>我的载具</h3></div></div>
+    <div class="insurance-vehicle-grid" id="insuranceVehicleList"></div>
+    <nav class="insurance-pagination" id="insuranceVehiclePagination" aria-label="我的载具分页" hidden>
+      <button class="button ghost" id="insuranceVehiclePrevious" type="button">上一页</button>
+      <span id="insuranceVehiclePageStatus">第 1 / 1 页</span>
+      <button class="button ghost" id="insuranceVehicleNext" type="button">下一页</button>
+    </nav>
+  </section>
+  <section class="insurance-shop-block">
+    <div class="insurance-shop-title"><div><span>可购买保险</span><h3>可购买保险</h3></div><small>无需绑定载具 · 购买后立即生效</small></div>
+    <div class="insurance-strategy-grid" id="insuranceStrategyList"></div>
+  </section>
+</section>

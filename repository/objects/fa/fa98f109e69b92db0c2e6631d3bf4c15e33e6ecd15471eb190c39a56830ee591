@@ -1,0 +1,231 @@
+import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+
+const CONFIG_NAMES = ['ScumPrismBotConfig.json'];
+const RELATIVE_CANDIDATES = [
+  '',
+  'SCUM',
+  path.join('SCUM', 'Saved'),
+  path.join('SCUM', 'Saved', 'Config'),
+  path.join('SCUM', 'Saved', 'Config', 'WindowsServer'),
+  path.join('Saved', 'Config', 'WindowsServer'),
+  'ScumPrismBot'
+];
+
+function valueByAlias(object, aliases) {
+  if (!object || typeof object !== 'object') return undefined;
+  const wanted = new Set(aliases.map((name) => name.toLowerCase()));
+  const entry = Object.entries(object).find(([key]) => wanted.has(key.toLowerCase()));
+  return entry?.[1];
+}
+
+function inside(base, target) {
+  const relative = path.relative(path.resolve(base), path.resolve(target));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function existingFile(file) {
+  try { return (await fs.stat(file)).isFile(); } catch { return false; }
+}
+
+async function atomicWrite(filePath, content) {
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(temporary, content, 'utf8');
+    await fs.rename(temporary, filePath);
+  } catch (error) {
+    await fs.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function findScumRoot(directory) {
+  let current = path.resolve(directory);
+  while (true) {
+    if (path.basename(current).toLowerCase() === 'scum') return current;
+    const nested = path.join(current, 'SCUM');
+    if (existsSync(path.join(nested, 'Binaries', 'Win64'))) return nested;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  throw new Error('无法从日志目录定位 SCUM 根目录');
+}
+
+export function scumPathsFromRoot(directory) {
+  const root = findScumRoot(directory);
+  return {
+    root,
+    logsDirectory: path.join(root, 'Saved', 'SaveFiles', 'Logs'),
+    rconConfig: path.join(root, 'Binaries', 'Win64', 'SCUMRCON', 'config.ini')
+  };
+}
+
+export async function findScumGameRconConfig(...directories) {
+  const configured = directories.map((value) => String(value || '').trim()).filter(Boolean);
+  if (!configured.length) throw new Error('未配置 SCUM 游戏主目录，无法定位游戏端 RCON 配置');
+  const failures = [];
+  for (const directory of configured) {
+    try {
+      const root = findScumRoot(directory);
+      const candidate = path.join(root, 'Binaries', 'Win64', 'SCUMRCON', 'config.ini');
+      if (await existingFile(candidate)) return candidate;
+      throw new Error(`游戏端原生 RCON 配置文件不存在：${candidate}`);
+    } catch (error) { failures.push(error.message); }
+  }
+  throw new Error(failures.join('；'));
+}
+
+const VEHICLE_TELEPORT_FLAGS = {
+  experimental_teleport_owned_vehicle_in_territory: 'true',
+  experimental_teleport_owned_vehicle_long_distance: 'true'
+};
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function updateRconSection(content, values, required = []) {
+  const section = /^[\t ]*\[rcon\][\t ]*(?:[;#][^\r\n]*)?(?:\r\n|\n|\r|$)/gmi.exec(content);
+  if (!section) throw new Error('游戏端 RCON 配置缺少 [rcon] 节');
+  const sectionStart = section.index + section[0].length;
+  const remaining = content.slice(sectionStart);
+  const nextSection = /^[\t ]*\[[^\]\r\n]+\][^\r\n]*(?=\r?$)/mi.exec(remaining);
+  const sectionEnd = nextSection ? sectionStart + nextSection.index : content.length;
+  const newline = section[0].includes('\r\n') || (!section[0].includes('\n') && content.includes('\r\n')) ? '\r\n' : '\n';
+  let body = content.slice(sectionStart, sectionEnd);
+  for (const [name, value] of Object.entries(values)) {
+    const entry = new RegExp(`^([\\t ]*${escapeRegExp(name)}[\\t ]*=[\\t ]*)[^\\r\\n]*(?=\\r?$)`, 'mi');
+    if (entry.test(body)) {
+      body = body.replace(entry, `$1${value}`);
+      continue;
+    }
+    if (required.includes(name)) throw new Error(`游戏端 RCON 配置的 [rcon] 节缺少 ${name} 字段`);
+    const trailing = body.match(/(?:\r\n|\n|\r)*$/)?.[0] || '';
+    const core = body.slice(0, body.length - trailing.length);
+    body = `${core}${core && !/(?:\r\n|\n|\r)$/.test(core) ? newline : ''}${name} = ${value}${trailing || newline}`;
+  }
+  return `${content.slice(0, sectionStart)}${body}${content.slice(sectionEnd)}`;
+}
+
+export async function prepareScumGameRconPassword(filePath, password) {
+  let content;
+  try { content = await fs.readFile(filePath, 'utf8'); }
+  catch (error) { throw new Error(`游戏端 RCON 配置读取失败：${error.message}`); }
+  const newContent = updateRconSection(content, { password, ...VEHICLE_TELEPORT_FLAGS }, ['password']);
+  return { filePath, oldContent: content, newContent };
+}
+
+export async function prepareNativeScumRconConfig(filePath, { host = '127.0.0.1', port = 28015, password } = {}) {
+  if (Number(port) !== 28015) throw new Error('游戏端 RCON 端口必须固定为 28015');
+  if (!password || String(password).length > 500) throw new Error('游戏端 RCON 密码无效');
+  if (await existingFile(filePath)) return prepareScumGameRconPassword(filePath, String(password));
+  const bindAddress = ['127.0.0.1', 'localhost', '::1'].includes(String(host)) ? '127.0.0.1' : String(host);
+  return {
+    filePath,
+    oldContent: null,
+    newContent: `[rcon]\r\nbind_address = ${bindAddress}\r\nport = 28015\r\npassword = ${password}\r\nexperimental_teleport_owned_vehicle_in_territory = true\r\nexperimental_teleport_owned_vehicle_long_distance = true\r\n`
+  };
+}
+
+export async function writeScumGameRconConfig(change, restore = false) {
+  try {
+    if (restore && change.oldContent === null) await fs.rm(change.filePath, { force: true });
+    else await atomicWrite(change.filePath, restore ? change.oldContent : change.newContent);
+  } catch (error) { throw new Error(`${restore ? '游戏端 RCON 配置恢复' : '游戏端 RCON 配置写入'}失败：${error.message}`); }
+}
+
+export async function findScumRconConfig(serverDirectory, explicitPath = '') {
+  if (!serverDirectory) throw new Error('未配置服务器目录');
+  const root = path.resolve(serverDirectory);
+  if (explicitPath) {
+    const candidate = path.isAbsolute(explicitPath) ? path.resolve(explicitPath) : path.resolve(root, explicitPath);
+    if (!inside(root, candidate)) throw new Error('配置路径禁止跳出服务器目录');
+    if (!await existingFile(candidate)) throw new Error('RCON 配置文件未找到');
+    return candidate;
+  }
+  try {
+    const scumRoot = findScumRoot(root);
+    const nativeConfig = path.join(scumRoot, 'Binaries', 'Win64', 'SCUMRCON', 'config.ini');
+    if (await existingFile(nativeConfig)) return nativeConfig;
+  } catch {}
+  for (const relative of RELATIVE_CANDIDATES) {
+    for (const name of CONFIG_NAMES) {
+      const candidate = path.join(root, relative, name);
+      if (await existingFile(candidate)) return candidate;
+    }
+  }
+  throw new Error('RCON 配置文件未找到');
+}
+
+export async function readScumRconIni(filePath) {
+  let content;
+  try { content = await fs.readFile(filePath, 'utf8'); }
+  catch (error) { throw new Error(`游戏端 RCON 配置读取失败：${error.message}`); }
+  const lines = content.split(/\r\n|\n|\r/);
+  let active = false;
+  const values = new Map();
+  for (const line of lines) {
+    const section = /^\s*\[([^\]]+)\]/.exec(line);
+    if (section) { active = section[1].trim().toLowerCase() === 'rcon'; continue; }
+    if (!active) continue;
+    const entry = /^\s*([^=;#]+)\s*=\s*([^;#]*)/.exec(line);
+    if (entry) values.set(entry[1].trim().toLowerCase(), entry[2].trim());
+  }
+  const field = (name) => values.get(name);
+  const bindAddress = field('bind_address');
+  return { host: !bindAddress || bindAddress === '0.0.0.0' || bindAddress === '::' ? '127.0.0.1' : bindAddress, port: Number(field('port')), password: field('password') || '' };
+}
+
+export async function readScumRconConfig(filePath) {
+  let parsed;
+  try { parsed = JSON.parse(await fs.readFile(filePath, 'utf8')); }
+  catch (error) { throw new Error(`RCON 配置文件读取失败：${error.message}`); }
+  const settings = valueByAlias(parsed, ['Settings', 'Setting']) || parsed;
+  const rcon = valueByAlias(settings, ['RCON', 'Rcon', 'rcon']) || settings;
+  return {
+    host: valueByAlias(rcon, ['Host', 'Address', 'IP', 'RconHost']),
+    port: valueByAlias(rcon, ['Port', 'RconPort']),
+    password: valueByAlias(rcon, ['Password', 'RconPassword'])
+  };
+}
+
+async function autoDirectory(gsm3, instanceId) {
+  if (!instanceId) throw new Error('未配置发货实例 ID');
+  const instances = await gsm3.instances();
+  const wanted = String(instanceId).toLowerCase();
+  const instance = instances.find((item) => [item.id, item.instanceId, item.uuid, item.name].some((value) => String(value ?? '').toLowerCase() === wanted));
+  if (!instance) throw new Error('GSM3 中未找到指定 SCUM 实例');
+  if (!instance.workingDirectory) throw new Error('GSM3 实例未提供工作目录');
+  return instance.workingDirectory;
+}
+
+export async function resolveScumRconConfig(config, { gsm3, instanceId } = {}) {
+  if (config.mode === 'http-legacy') return { ...config };
+  const discoveryMode = config.discoveryMode || config.mode || 'manual';
+  let discovered = {};
+  if (discoveryMode === 'auto') {
+    const serverDirectory = await autoDirectory(gsm3, instanceId);
+    const file = await findScumRconConfig(serverDirectory, config.configPath);
+    discovered = path.extname(file).toLowerCase() === '.ini'
+      ? await readScumRconIni(file)
+      : await readScumRconConfig(file);
+  } else if (config.serverDirectory) {
+    const file = await findScumRconConfig(config.serverDirectory, config.configPath);
+    discovered = path.extname(file).toLowerCase() === '.ini'
+      ? await readScumRconIni(file)
+      : await readScumRconConfig(file);
+  }
+  const configuredHost = String(config.host || discovered.host || '127.0.0.1').trim();
+  const host = configuredHost === '0.0.0.0' || configuredHost === '::' ? '127.0.0.1' : configuredHost;
+  if (!['127.0.0.1', 'localhost', '::1'].includes(host)) throw new Error('RCON Host 仅允许本机地址');
+  const configuredPort = Number(config.port || 0);
+  const discoveredPort = Number(discovered.port || 0);
+  if ((configuredPort && configuredPort !== 28015) || (discoveredPort && discoveredPort !== 28015)) throw new Error('RCON 端口必须固定为 28015');
+  const port = 28015;
+  const password = String(config.password || discovered.password || '');
+  if (!password && !config.noPasswordAuth) throw new Error('RCON 密码未配置');
+  return { ...config, mode: 'source-tcp', discoveryMode, host, port, password };
+}

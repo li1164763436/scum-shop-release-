@@ -1,0 +1,164 @@
+async function loadGameChatPlayers() {
+  const select = $('#gameChatPlayer');
+  if (!select) return;
+  try {
+    const players = list(await api('/api/ggcon/players'), ['players', 'items']);
+    select.innerHTML = '<option value="">请选择在线玩家</option><option value="__global__">全球频道（所有玩家）</option>' + players.map((player) => `<option value="${esc(player.steamId)}">${esc(player.characterName || player.steamName || player.steamId)} (${esc(player.steamId)})</option>`).join('');
+  } catch (error) { select.innerHTML = '<option value="">无法读取在线玩家</option>'; }
+}
+
+function renderDeliveryNotificationConfig(config) {
+  const fulfillment = config?.fulfillment || {};
+  const form = $('#deliveryNotificationForm')?.elements;
+  if (!form) return;
+  state.gameClaimNotificationFulfillment = fulfillment;
+  form.notifyOnSuccess.checked = Boolean(fulfillment.notifyOnSuccess);
+  form.deliveryName.value = fulfillment.deliveryName || '';
+  form.notificationMessage.value = fulfillment.purchaseMessage || fulfillment.successMessage || '[玩家昵称]的【{orderName}】';
+}
+
+async function loadGameClaims() {
+  const [overview, settings, replies, config] = await Promise.allSettled([
+    api('/api/chat-logs/overview'),
+    api('/api/chat-logs/settings'),
+    api('/api/chat-logs/auto-replies'),
+    api('/api/config')
+  ]);
+  if (overview.status === 'fulfilled') renderChatOverview(overview.value);
+  else renderChatOverviewError(overview.reason.message);
+  if (settings.status === 'fulfilled') {
+    const value=settings.value,logForm=$('#gameLogSettingsForm').elements;
+    renderClaimPrefix(value.claimPrefix);
+    state.gameRecycleCommand=value.recycleCommand||'回收';
+    $('#gameQaEnabled').checked = value.autoReplyEnabled === true;
+    logForm.logsEnabled.checked = value.scumLogs?.enabled !== false && value.chatLogs?.enabled !== false;
+    logForm.logsPollSeconds.value = Math.round(Number(value.chatLogs?.pollIntervalMs || value.scumLogs?.pollIntervalMs || 5000) / 1000);
+    logForm.logsRetentionDays.value = value.chatLogs?.retentionDays || value.scumLogs?.retentionDays || 365;
+  }
+  if (replies.status === 'fulfilled') { state.gameQaRules = replies.value || []; renderGameQaRules(); }
+  else $('#gameQaRows').innerHTML = empty(8, replies.reason.message);
+  if (config.status === 'fulfilled') renderDeliveryNotificationConfig(config.value);
+  else toast(`发货通知读取失败：${config.reason.message}`, true);
+}
+function renderGameQaRules() {
+  const items = state.gameQaRules || [];
+  $('#gameQaRows').innerHTML = items.length ? items.map((item) => `<tr><td><code>${esc(item.triggerText)}</code></td><td><span class="game-qa-response" title="${esc(item.responseText)}">${esc(item.responseText)}</span></td><td><strong>${number(item.price || 0)}</strong> 商城币</td><td><span>总 ${number(item.totalLimit || 0)}</span><small>每日 ${number(item.dailyLimit || 0)} · 等级 ${number(item.minMemberLevel || 0)}</small></td><td><span>今日 ${number(item.todayExecutions || 0)} / 总计 ${number(item.totalExecutions || 0)}</span><small>成功 ${number(item.succeededExecutions || 0)} · 失败 ${number(item.failedExecutions || 0)}</small></td><td>${esc(date(item.lastExecutedAt))}</td><td><span class="game-qa-status ${item.enabled ? '' : 'off'}">${item.enabled ? '启用' : '禁用'}</span></td><td><div class="game-qa-actions"><button class="row-btn game-qa-edit-btn" type="button" data-game-qa-edit="${item.id}">编辑</button><button class="row-btn danger game-qa-delete-btn" type="button" data-game-qa-delete="${item.id}">删除</button></div></td></tr>`).join('') : empty(8, '暂无问答规则');
+}
+function openGameQaModal(item = {}) {
+  openModal({ title: item.id ? '编辑问答规则' : '添加问答规则', description: '配置触发条件、使用限制和商城币价格。0 表示不限制或免费。', submitText: item.id ? '保存规则' : '添加规则', body: `<section class="modal-section full game-qa-modal-section"><div class="modal-section-grid"><label>触发词<input name="triggerText" maxlength="50" value="${esc(item.triggerText || '')}" placeholder="例如：@帮助" required></label><label>问答价格<input name="price" type="number" min="0" step="1" value="${Number(item.price || 0)}" required><span class="field-hint">每次成功触发扣除的商城币</span></label><label>总次数<input name="totalLimit" type="number" min="0" step="1" value="${Number(item.totalLimit || 0)}" required><span class="field-hint">每名玩家累计可触发次数</span></label><label>每日次数<input name="dailyLimit" type="number" min="0" step="1" value="${Number(item.dailyLimit || 0)}" required><span class="field-hint">每名玩家每日可触发次数</span></label><label>等级要求<input name="minMemberLevel" type="number" min="0" max="100" step="1" value="${Number(item.minMemberLevel || 0)}" required><span class="field-hint">玩家有效会员最低等级</span></label><label class="full">商城回复词<textarea name="responseText" maxlength="500" placeholder="例如：玩家可发送@领取新手礼包" required>${esc(item.responseText || '')}</textarea></label></div></section>`, onSubmit: async (form) => { const body={triggerText:form.elements.triggerText.value.trim(),responseText:form.elements.responseText.value.trim(),totalLimit:Number(form.elements.totalLimit.value),dailyLimit:Number(form.elements.dailyLimit.value),minMemberLevel:Number(form.elements.minMemberLevel.value),price:Number(form.elements.price.value),enabled:$('#gameQaModalEnabled').checked};await api(item.id?`/api/chat-logs/auto-replies/${item.id}`:'/api/chat-logs/auto-replies',{method:item.id?'PUT':'POST',body:JSON.stringify(body)});toast(item.id?'问答规则已更新':'问答规则已添加');closeModal();await loadGameClaims(); } });
+  $('#modalBackdrop').classList.add('centered-modal', 'game-qa-modal');
+  const prefix=String(state.gameClaimPrefix||'@'),triggerInput=$('#modalForm').elements.triggerText;triggerInput.value=String(triggerInput.value||'').startsWith(prefix)?String(triggerInput.value).slice(prefix.length):triggerInput.value;triggerInput.placeholder='例如：帮助';$('#modalDescription').textContent=`只填写触发词正文，商城会自动添加前缀“${prefix}”。0 表示不限制或免费。`;
+  const head=$('#modalTitle').closest('.modal-head'),tools=document.createElement('div');tools.className='game-qa-title-tools';tools.innerHTML=`<label class="switch"><input id="gameQaModalEnabled" type="checkbox" ${item.enabled === false ? '' : 'checked'}><span></span>启用规则</label>`;head.insertBefore(tools,$('#closeModal'));$('#closeModal').hidden=true;
+}
+function renderClaimPrefix(value) {
+  const prefix = String(value || '@');
+  state.gameClaimPrefix = prefix;
+  const form = $('#claimPrefixForm');
+  if (form) form.elements.claimPrefix.value = prefix;
+  $('#claimPrefixPreview').textContent = `${prefix}领取1`;
+}
+function renderChatOverview(data) {
+  state.chatOverview = data || {};
+  const worker = data?.worker || data?.collector || {};
+  const enabled = worker.enabled === true;
+  const active = worker.running === true || worker.polling === true;
+  const directoryConfigured = worker.directoryConfigured === true || data?.directoryConfigured === true;
+  $('#chatCollectorState').textContent = !enabled ? '未启用' : !directoryConfigured ? '目录未配置' : worker.running ? '处理中' : worker.polling ? '运行中' : '已停止';
+  $('#chatCollectorState').className = enabled && active && directoryConfigured ? 'monitor-ok' : enabled ? 'monitor-bad' : '';
+  $('.game-claim-collector')?.classList.toggle('is-online', enabled && active && directoryConfigured);
+  $('.game-claim-collector')?.classList.toggle('is-error', !enabled || !active || !directoryConfigured);
+  $('#chatCollectorDetail').textContent = `启用 ${enabled ? '是' : '否'} / 运行 ${active ? '是' : '否'} / 目录 ${directoryConfigured ? '已配置' : '未配置'}`;
+  $('#chatLastProcessed').textContent = date(pick(data, ['lastProcessedAt', 'collection.lastProcessedAt'], worker.lastCompletedAt || worker.lastSuccessAt));
+  $('#chatFilesSeen').textContent = optionalNumber(pick(data, ['files', 'filesSeen', 'collection.filesSeen', 'collection.files'], worker.filesSeen));
+  $('#chatEventsStored').textContent = optionalNumber(pick(data, ['totalEvents', 'eventsStored', 'parsing.eventsStored', 'parsing.events', 'stats.eventsStored'], worker.eventsStored));
+  $('#chatCommandsSeen').textContent = optionalNumber(pick(data, ['claimCommands', 'commandsProcessed', 'commands.total', 'commands.recognized', 'stats.commands'], ''));
+  $('#chatClaimsSucceeded').textContent = optionalNumber(pick(data, ['succeeded', 'claimsSucceeded', 'claims.succeeded', 'claims.success', 'stats.claimsSucceeded'], ''));
+  $('#chatClaimsFailed').textContent = optionalNumber(pick(data, ['failed', 'claimsFailed', 'claims.failed', 'stats.claimsFailed'], ''));
+  $('#chatTriggerResultHint').textContent = `仅统计 ${pick(data, ['triggerPrefix'], '@')} 前缀`;
+}
+function renderChatOverviewError(message) {
+  $('#chatCollectorState').textContent = '读取失败';
+  $('#chatCollectorState').className = 'monitor-bad';
+  $('.game-claim-collector')?.classList.remove('is-online');
+  $('.game-claim-collector')?.classList.add('is-error');
+  $('#chatCollectorDetail').textContent = message;
+  for (const id of ['chatLastProcessed', 'chatFilesSeen', 'chatEventsStored', 'chatCommandsSeen', 'chatClaimsSucceeded', 'chatClaimsFailed']) $(`#${id}`).textContent = '--';
+}
+function chatEventStatus(value) {
+  const raw = String(value || 'unknown').toLowerCase();
+  const labels = { succeeded: '成功', success: '成功', completed: '成功', failed: '失败', rejected: '安全拒绝', ignored: '忽略', parsed: '已解析', pending: '待处理', unknown: '未知' };
+  const style = ['succeeded', 'success', 'completed'].includes(raw) ? 'success' : ['failed', 'rejected'].includes(raw) ? 'failed' : raw === 'ignored' ? 'inactive' : 'waiting';
+  return `<span class="badge ${esc(style)}">${esc(labels[raw] || value || '未知')}</span>`;
+}
+function renderChatEvents(data) {
+  state.chatEvents = list(data, ['items', 'events']);
+  $('#chatEventRows').innerHTML = state.chatEvents.length ? state.chatEvents.map((item) => {
+    const playerName = pick(item, ['playerName', 'name'], '未知玩家');
+    const steamId = pick(item, ['steamIdMasked', 'maskedSteamId', 'steamId'], '--');
+    const channel = pick(item, ['channel', 'chatChannel'], '未知');
+    const commandTarget = pick(item, ['commandTarget'], ''), commandType=pick(item,['commandType'],'');
+    const fallbackCommand=commandTarget===''?'--':commandType==='recycle'?`${state.gameClaimPrefix||'@'}${state.gameRecycleCommand||'回收'} ${commandTarget}`:`${state.gameClaimPrefix||'@'}领取${commandTarget}`;
+    const command = pick(item, ['command', 'claimCommand', 'commandName'], fallbackCommand);
+    const eventStatus = pick(item, ['result', 'status', 'resultStatus'], item.parseStatus === 'ignored_channel' ? 'ignored' : item.parseStatus === 'claim_command' ? 'pending' : 'parsed');
+    const gift = pick(item, ['giftName', 'gift.name'], '');
+    const giftId = pick(item, ['giftId', 'gift.id'], '');
+    const order = pick(item, ['orderNo', 'orderId', 'order.id'], '');
+    const relation = [gift || (giftId !== '' ? `礼包 #${giftId}` : ''), order !== '' ? `订单 ${order}` : ''].filter(Boolean).join(' / ') || '--';
+    const safeError = pick(item, ['securityError', 'errorCode', 'error.message', 'error'], '--');
+    return `<tr><td>${esc(date(pick(item, ['eventTime', 'createdAt', 'timestamp', 'time'])))}</td><td><strong>${esc(playerName)}</strong></td><td><code>${esc(steamId)}</code></td><td><span class="chat-channel ${String(channel).toLowerCase() === 'global' ? 'global' : 'ignored'}">${esc(channel)}</span></td><td><code>${esc(command)}</code></td><td>${chatEventStatus(eventStatus)}</td><td>${esc(relation)}</td><td><span class="chat-safe-error">${esc(safeError)}</span></td></tr>`;
+  }).join('') : empty(8, '暂无聊天领取安全审计');
+}
+
+const deliveryNotificationParameterGroups = {
+  '玩家资料': ['玩家昵称','SteamID','会员等级','会员称号','会员到期','触发词后的内容'],
+  '货币资产': ['商城币名','商城币','游戏美金','金条','声望点','复活币'],
+  '在线与战绩': ['游戏时间','在线人数','今日在线秒','今日在线时间','累计在线秒','累计在线时间','击杀数','死亡数','KD'],
+  '位置与任务': ['玩家坐标','玩家附近10米','玩家位置增高500Z','附近10米并增高500Z','领地旗坐标','最近领地旗','领地旗附近','预估在线奖励','回收进度'],
+  '领取次数': ['成功后剩余总次数','成功后剩余每日次数'],
+  '发货业务': ['{username}','{orderName}','{action}','{quantity}','{orderNo}']
+};
+const deliveryNotificationForm = $('#deliveryNotificationForm');
+const deliveryNotificationParameterHelper = $('#notificationParameterHelper');
+if (deliveryNotificationParameterHelper) {
+  deliveryNotificationParameterHelper.innerHTML = Object.entries(deliveryNotificationParameterGroups).map(([group, parameters]) => `<section><b>${group}</b><div>${parameters.map((parameter) => `<button type="button" data-notification-parameter="${parameter}">${parameter.startsWith('{') ? parameter : `[${parameter}]`}</button>`).join('')}</div></section>`).join('');
+  deliveryNotificationParameterHelper.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-notification-parameter]');
+    if (!button) return;
+    const textarea = deliveryNotificationForm.elements.notificationMessage;
+    const parameter = button.dataset.notificationParameter;
+    const value = parameter.startsWith('{') ? parameter : `[${parameter}]`;
+    const start = textarea.selectionStart ?? textarea.value.length;
+    textarea.setRangeText(value, start, textarea.selectionEnd ?? start, 'end');
+    textarea.focus();
+  });
+}
+deliveryNotificationForm?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const form = event.currentTarget.elements;
+  const current = state.gameClaimNotificationFulfillment || {};
+  const notificationMessage = form.notificationMessage.value.trim();
+  withBusy(event.submitter, async () => {
+    const saved = await api('/api/config', { method: 'PUT', body: JSON.stringify({ fulfillment: {
+      notifyOnSuccess: form.notifyOnSuccess.checked,
+      deliveryName: form.deliveryName.value.trim(),
+      successMessage: current.successMessage || '{username}，{orderName} {action}，数量 {quantity}。',
+      purchaseMessage: notificationMessage,
+      giftMessage: notificationMessage,
+      recycleMessage: notificationMessage,
+      withdrawMessage: notificationMessage,
+      bulkWithdrawMessage: notificationMessage
+    } }) });
+    renderDeliveryNotificationConfig(saved);
+    toast('发货通知已保存');
+  });
+});
+
+$('#reloadGameClaims').addEventListener('click', (event) => withBusy(event.currentTarget, loadGameClaims));
+$('#claimPrefixForm').addEventListener('input', (event) => { if (event.target.name === 'claimPrefix') renderClaimPrefix(event.target.value.trim() || '@'); });
+$('#claimPrefixForm').addEventListener('submit', (event) => { event.preventDefault(); const prefix=event.currentTarget.elements.claimPrefix.value.trim(); withBusy(event.submitter,async()=>{const saved=await api('/api/chat-logs/settings',{method:'PUT',body:JSON.stringify({claimPrefix:prefix})});renderClaimPrefix(saved.claimPrefix);toast('领取前缀已保存');await loadGameClaims();}); });
+$('#gameLogSettingsForm').addEventListener('submit',(event)=>{event.preventDefault();const form=event.currentTarget.elements,enabled=form.logsEnabled.checked,pollIntervalMs=Number(form.logsPollSeconds.value)*1000,retentionDays=Number(form.logsRetentionDays.value);withBusy(event.submitter,async()=>{await api('/api/chat-logs/settings',{method:'PUT',body:JSON.stringify({scumLogs:{enabled,pollIntervalMs,retentionDays},chatLogs:{enabled,pollIntervalMs,retentionDays}})});toast('日志采集设置已保存');await loadGameClaims();});});
+$('#gameQaEnabled').addEventListener('change', async (event) => { const enabled=event.currentTarget.checked;try{const saved=await api('/api/chat-logs/settings',{method:'PUT',body:JSON.stringify({autoReplyEnabled:enabled})});event.currentTarget.checked=saved.autoReplyEnabled;toast(saved.autoReplyEnabled?'问答模式已启用':'问答模式已停用');}catch(error){event.currentTarget.checked=!enabled;toast(error.message,true);} });
+$('#addGameQaRule').addEventListener('click', () => openGameQaModal());
+$('#gameQaRows').addEventListener('click', async (event) => { const edit=event.target.closest('[data-game-qa-edit]'),remove=event.target.closest('[data-game-qa-delete]');const id=Number(edit?.dataset.gameQaEdit||remove?.dataset.gameQaDelete);if(!id)return;const item=(state.gameQaRules||[]).find((rule)=>Number(rule.id)===id);if(edit){openGameQaModal(item);return;}if(remove&&!window.confirm('确认删除该问答规则？'))return;await withBusy(remove,async()=>{await api(`/api/chat-logs/auto-replies/${id}`,{method:'DELETE'});toast('问答规则已删除');await loadGameClaims();}); });
+
+

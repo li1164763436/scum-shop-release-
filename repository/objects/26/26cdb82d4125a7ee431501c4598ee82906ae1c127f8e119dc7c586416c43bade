@@ -1,0 +1,19 @@
+<div class="modal-backdrop" id="purchaseModal" hidden>
+    <section class="modal purchase-modal" role="dialog" aria-modal="true" aria-labelledby="purchaseTitle">
+      <button class="modal-close" type="button" data-modal-close aria-label="关闭">×</button>
+      <p class="overline"><span></span> 订单确认</p><h2 id="purchaseTitle">确认物资申请</h2>
+      <div class="purchase-summary"><div><span>物资</span><strong id="purchaseName">—</strong><code id="purchaseCategory">商城物资</code></div><div><span>数量</span><strong id="purchaseQuantity">1</strong></div><div><span>合计</span><strong><b id="purchaseTotal">0</b> 币</strong></div></div>
+      <p class="member-warning" id="purchaseMemberWarning" hidden></p>
+      <p class="warning-copy">确认后将立即扣除商城币并进入自动发货队列。会员资格以提交订单时的确认结果为准，请保持绑定角色信息正确。</p>
+      <div class="modal-actions"><button class="button ghost" type="button" data-modal-close>返回检查</button><button class="button primary" id="confirmPurchase" type="button">确认购买</button></div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="purchaseResultModal" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="purchaseResultTitle">
+      <button class="modal-close" type="button" data-modal-close aria-label="关闭">×</button>
+      <h2 id="purchaseResultTitle">申请结果</h2>
+      <p id="purchaseResultMessage" role="status"></p>
+      <div class="modal-actions"><button class="button primary" type="button" data-modal-close>确定</button></div>
+    </section>
+  </div>

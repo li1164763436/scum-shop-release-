@@ -1,0 +1,46 @@
+import crypto from 'node:crypto';
+import { safeMessage } from '../utils/redactor.js';
+
+export class TemporaryBanWorker {
+  constructor({ db, playerAdminService, capabilityService, logger, clock = () => Date.now(), pollIntervalMs = 30000, setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout }) {
+    this.db = db; this.playerAdminService = playerAdminService; this.capabilityService = capabilityService; this.logger = logger; this.clock = clock; this.pollIntervalMs = pollIntervalMs; this.setTimer = setTimer; this.clearTimer = clearTimer;
+    this.timer = null; this.activeTick = null; this.running = false; this.stopped = true; this.lastCompletedAt = null; this.lastError = null; this.processed = 0;
+  }
+  status() { return { enabled: !this.stopped, running: this.running, polling: Boolean(this.timer), pollIntervalMs: this.pollIntervalMs, lastCompletedAt: this.lastCompletedAt, lastError: this.lastError, processed: this.processed }; }
+  async start() { this.stopped = false; void this.tick(); return this.status(); }
+  async reconfigure({ pollIntervalMs } = {}) { if (pollIntervalMs !== undefined) this.pollIntervalMs = Math.min(Math.max(Number(pollIntervalMs) || 30000, 1000), 300000); this.stop(); this.stopped = false; void this.tick(); return this.status(); }
+  stop() { this.stopped = true; if (this.timer) this.clearTimer(this.timer); this.timer = null; }
+  async drain() { await this.activeTick; }
+  async stopAndDrain() { this.stop(); await this.drain(); }
+  schedule() { if (this.stopped || this.timer) return; this.timer = this.setTimer(() => { this.timer = null; void this.tick(); }, this.pollIntervalMs); this.timer?.unref?.(); }
+  async tick() { if (this.running || this.stopped) return false; this.activeTick = this.performTick(); try { return await this.activeTick; } finally { this.activeTick = null; this.schedule(); } }
+  async performTick() {
+    this.running = true;
+    try {
+      const probe = await this.capabilityService.latest();
+      if (!probe.available || probe.stale || !probe.capabilities.unban) { await this.db.query("UPDATE player_admin_actions SET status='unban_due',error_code='CAPABILITY_UNAVAILABLE' WHERE action_type='temp_ban' AND status='awaiting_expiry' AND temporary_ban_expires_at<=CURRENT_TIMESTAMP(3)"); return false; }
+      const claimed = await this.claimDue(probe.id); if (!claimed) return true;
+      await this.playerAdminService.dispatch(claimed.unbanActionId); this.processed += 1; this.lastError = null; return true;
+    } catch (error) { this.lastError = safeMessage(error, '临时封禁到期解封失败').slice(0, 500); this.logger?.error?.('临时封禁 Worker 执行失败', { component: 'temporary-ban', error: this.lastError }); return false; }
+    finally { this.lastCompletedAt = new Date(this.clock()).toISOString(); this.running = false; }
+  }
+  async claimDue(probeId) {
+    return this.db.transaction(async (tx) => {
+      const rows = await tx.query("SELECT id,target_steam_id AS targetSteamId,target_name_snapshot AS targetName FROM player_admin_actions WHERE action_type='temp_ban' AND status IN ('awaiting_expiry','unban_due') AND temporary_ban_expires_at<=CURRENT_TIMESTAMP(3) AND unban_action_id IS NULL ORDER BY temporary_ban_expires_at,id LIMIT 1 FOR UPDATE SKIP LOCKED");
+      const parent = rows[0]; if (!parent) return null;
+      const requestKey = `temp-unban-${parent.id}`; const hash = crypto.createHash('sha256').update(JSON.stringify({ parentId: Number(parent.id), action: 'unban', steamId: parent.targetSteamId })).digest('hex');
+      let unbanActionId;
+      try {
+        const inserted = await tx.query("INSERT INTO player_admin_actions (action_type,target_steam_id,target_name_snapshot,admin_user_id,admin_username_snapshot,reason,confirmation,request_key,request_fingerprint,status,renderer_version,capability_probe_id,parent_action_id) VALUES ('unban',?,?,NULL,'system-temp-ban-expiry',?,?,?,?,'pending','v1',?,?)", [parent.targetSteamId, parent.targetName, `临时封禁到期自动解封（父操作 #${parent.id}）`, `UNBAN ${parent.targetSteamId}`, requestKey, hash, probeId, parent.id]);
+        unbanActionId = Number(inserted.insertId);
+      } catch (error) {
+        if (error?.code !== 'ER_DUP_ENTRY' && error?.errno !== 1062) throw error;
+        const existing = await tx.query("SELECT id FROM player_admin_actions WHERE parent_action_id=? AND action_type='unban' LIMIT 1", [parent.id]);
+        if (!existing[0]) throw error;
+        unbanActionId = Number(existing[0].id);
+      }
+      await tx.query("UPDATE player_admin_actions SET status='unban_due',unban_action_id=? WHERE id=? AND unban_action_id IS NULL", [unbanActionId, parent.id]);
+      return { parentId: Number(parent.id), unbanActionId };
+    });
+  }
+}

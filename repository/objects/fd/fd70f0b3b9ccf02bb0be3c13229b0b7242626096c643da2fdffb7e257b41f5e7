@@ -1,0 +1,33 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ConfigStore } from '../src/services/config-store.js';
+import { createDatabase } from '../src/services/database.js';
+import { ensureSchema } from '../src/services/schema.js';
+
+export function parseMigrationArgs(argv) {
+  if (argv.length !== 2 || argv[0] !== '--confirm' || argv[1] !== 'MIGRATE_SCHEMA') {
+    throw new Error('拒绝执行：必须提供 --confirm MIGRATE_SCHEMA');
+  }
+  return { confirmed: true };
+}
+
+export async function runSchemaMigration(argv = process.argv.slice(2), dependencies = {}) {
+  parseMigrationArgs(argv);
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const store = dependencies.store || new ConfigStore(path.join(root, 'data', 'config.json'));
+  const config = await store.read();
+  const db = dependencies.db || await createDatabase(config.mysql);
+  try {
+    await ensureSchema(db);
+    return { migrated: true, database: config.mysql.database };
+  } finally {
+    if (!dependencies.db) await db.close();
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runSchemaMigration().then((result) => console.log(JSON.stringify(result, null, 2))).catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}

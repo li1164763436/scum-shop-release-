@@ -1,0 +1,138 @@
+import crypto from 'node:crypto';
+import fsPromises from 'node:fs/promises';
+import path from 'node:path';
+import { decodeScumLog } from './scum-log-parser.js';
+import { parseChatLogLine } from './chat-log-parser.js';
+import { safeError, safePreview } from './scum-log-worker.js';
+
+function rowsOf(result) { return Array.isArray(result) && Array.isArray(result[0]) ? result[0] : result; }
+function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+function iso(clock) { return new Date(clock()).toISOString(); }
+function fileIdentity(filePath, stat) { return hash(JSON.stringify({ sourceType: 'chat', path: path.resolve(filePath).toLowerCase(), birthtimeMs: stat.birthtimeMs, ctimeMs: stat.ctimeMs, firstMtimeMs: stat.mtimeMs, firstSize: stat.size })); }
+function encodingUnit(encoding) { return encoding.startsWith('utf16') ? 2 : 1; }
+function lineByteLength(text, encoding) { return Buffer.byteLength(text, encoding === 'utf16be' ? 'utf16le' : encoding); }
+const CURSOR_PROBE_BYTES = 4096;
+function cursorProbe(buffer, offset, unit = 1) {
+  const length = Math.min(offset, CURSOR_PROBE_BYTES) - (Math.min(offset, CURSOR_PROBE_BYTES) % unit);
+  return { hash: length ? hash(buffer.subarray(offset - length, offset)) : null, length };
+}
+function chatEventHash(event) {
+  return hash(`${event.eventTime.toISOString()}|${event.steamId}|${event.channel}|${event.characterNumber}|${event.command?.type || 'message'}|${event.command?.target || event.message}`);
+}
+
+export class ChatLogWorker {
+  constructor({ db, store, claimService, replyService = null, logger, fs = fsPromises, clock = () => Date.now(), setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout }) {
+    this.db = db; this.store = store; this.claimService = claimService; this.replyService = replyService; this.logger = logger; this.fs = fs; this.clock = clock; this.setTimer = setTimer; this.clearTimer = clearTimer;
+    this.timer = null; this.activeTick = null; this.running = false; this.stopped = true; this.enabled = false; this.directory = ''; this.pollIntervalMs = 5000; this.retentionDays = 365; this.claimPrefix = '@'; this.recycleCommand = '回收';
+    this.lastStartedAt = null; this.lastCompletedAt = null; this.lastSuccessAt = null; this.lastFile = null; this.lastError = null; this.filesSeen = 0; this.eventsStored = 0; this.failuresStored = 0; this.claimsProcessed = 0;
+  }
+  status() { return { enabled: this.enabled, running: this.running, polling: Boolean(this.timer), directoryConfigured: Boolean(this.directory), pollIntervalMs: this.pollIntervalMs, claimPrefix: this.claimPrefix, recycleCommand: this.recycleCommand, lastStartedAt: this.lastStartedAt, lastCompletedAt: this.lastCompletedAt, lastSuccessAt: this.lastSuccessAt, lastFile: this.lastFile, lastError: this.lastError, filesSeen: this.filesSeen, eventsStored: this.eventsStored, failuresStored: this.failuresStored, claimsProcessed: this.claimsProcessed }; }
+  async start() { this.stopped = false; return this.reconfigure(); }
+  async reconfigure() {
+    const config = await this.store.read();
+    const fallbackDirectory = config.scumLogs?.directory || '';
+    const value = { enabled: true, directory: fallbackDirectory, pollIntervalMs: 5000, retentionDays: 365, claimPrefix: '@', recycleCommand: '回收', ...config.chatLogs };
+    this.enabled = Boolean(value.enabled); this.directory = String(value.directory || fallbackDirectory); this.pollIntervalMs = value.pollIntervalMs; this.retentionDays = value.retentionDays; this.claimPrefix = String(value.claimPrefix || '@'); this.recycleCommand = String(value.recycleCommand || '回收');
+    this.clearSchedule();
+    if (!this.enabled || !this.directory) { this.stopped = true; await this.drain(); return this.status(); }
+    this.stopped = false; void this.tick(); return this.status();
+  }
+  clearSchedule() { if (this.timer) this.clearTimer(this.timer); this.timer = null; }
+  schedule() { if (this.stopped || !this.enabled || this.timer) return; this.timer = this.setTimer(() => { this.timer = null; void this.tick(); }, this.pollIntervalMs); this.timer?.unref?.(); }
+  stop() { this.stopped = true; this.clearSchedule(); }
+  async drain() { await this.activeTick; }
+  async stopAndDrain() { this.stop(); await this.drain(); }
+  async tick() { if (this.running || this.stopped || !this.enabled) return false; this.activeTick = this.performTick(); try { return await this.activeTick; } finally { this.activeTick = null; this.schedule(); } }
+  async performTick() {
+    this.running = true; this.lastStartedAt = iso(this.clock);
+    try {
+      const entries = await this.fs.readdir(this.directory, { withFileTypes: true });
+      const names = entries.filter((entry) => entry.isFile() && /^chat_.*\.log$/i.test(entry.name)).map((entry) => entry.name).sort();
+      this.filesSeen = names.length;
+      for (const basename of names) {
+        if (this.stopped) break;
+        const filePath = path.join(this.directory, basename); this.lastFile = basename;
+        try { await this.processFile(filePath, basename); }
+        catch (error) {
+          const message = safeError(error);
+          await this.db.query("UPDATE scum_log_files SET last_status='error',last_error=? WHERE source_type='chat' AND path_hash=? ORDER BY id DESC LIMIT 1", [message, hash(path.resolve(filePath).toLowerCase())]).catch(() => {});
+          this.logger?.warn?.('SCUM 聊天日志文件处理失败', { component: 'chat-log', file: basename, error: message });
+        }
+      }
+      await this.processPendingClaims();
+      if (this.replyService) await this.replyService.processPending();
+      await this.cleanup(); this.lastSuccessAt = iso(this.clock); this.lastError = null; return true;
+    } catch (error) { this.lastError = safeError(error); this.logger?.warn?.('SCUM 聊天日志采集失败', { component: 'chat-log', error: this.lastError }); return false; }
+    finally { this.lastCompletedAt = iso(this.clock); this.running = false; }
+  }
+  async processFile(filePath, basename) {
+    const stat = await this.fs.stat(filePath); const pathHash = hash(path.resolve(filePath).toLowerCase());
+    const existingRows = rowsOf(await this.db.query("SELECT * FROM scum_log_files WHERE source_type='chat' AND path_hash=? ORDER BY id DESC LIMIT 1", [pathHash]));
+    let record = existingRows[0] || null;
+    const replaced = record && Number(record.birthtime_ms) !== Math.round(stat.birthtimeMs);
+    const truncated = record && !replaced && stat.size < Number(record.offset_bytes);
+    if (!record || replaced) {
+      const inserted = await this.db.query("INSERT INTO scum_log_files (source_type,path_hash,basename,identity,birthtime_ms,ctime_ms,offset_bytes,pending_fragment,pending_position,size_bytes,mtime_ms,last_status) VALUES ('chat',?,?,?,?,?,0,'',0,?,?,'new')", [pathHash, basename.slice(0, 255), fileIdentity(filePath, stat), Math.round(stat.birthtimeMs), Math.round(stat.ctimeMs), stat.size, Math.round(stat.mtimeMs)]);
+      record = { id: inserted.insertId, offset_bytes: 0, pending_fragment: '', pending_position: 0, encoding: null };
+      if (replaced) await this.db.query('UPDATE scum_log_files SET rotation_count=rotation_count+1,last_status=? WHERE id=?', ['replaced', existingRows[0].id]);
+    } else if (truncated) {
+      await this.db.query("UPDATE scum_log_files SET offset_bytes=0,pending_fragment='',pending_position=0,truncation_count=truncation_count+1,last_status='truncated' WHERE id=?", [record.id]);
+      record = { ...record, offset_bytes: 0, pending_fragment: '', pending_position: 0 };
+    }
+    const all = await this.fs.readFile(filePath); let offset = Math.min(Number(record.offset_bytes) || 0, all.length); let encoding = record.encoding; let bomBytes = 0;
+    if (!encoding || offset === 0) { const detected = decodeScumLog(all.subarray(0, Math.min(all.length, 4096))); encoding = detected.encoding; bomBytes = detected.bomBytes; }
+    if (encoding !== 'utf16le' && encoding !== 'utf16be') throw Object.assign(new Error('聊天日志不是 UTF-16 编码'), { code: 'CHAT_ENCODING_UNSUPPORTED' });
+    const unit = encodingUnit(encoding);
+    const oldProbeLength = Number(record.cursor_probe_length) || 0;
+    if (offset > 0 && record.cursor_probe_hash && oldProbeLength > 0 && (offset < oldProbeLength || hash(all.subarray(offset - oldProbeLength, offset)) !== record.cursor_probe_hash)) {
+      await this.db.query("UPDATE scum_log_files SET offset_bytes=0,pending_fragment='',pending_position=0,cursor_probe_hash=NULL,cursor_probe_length=0,truncation_count=truncation_count+1,last_status='truncated' WHERE id=?", [record.id]);
+      record = { ...record, offset_bytes: 0, pending_fragment: '', pending_position: 0, cursor_probe_hash: null, cursor_probe_length: 0 };
+      offset = 0;
+      const detected = decodeScumLog(all.subarray(0, Math.min(all.length, 4096))); encoding = detected.encoding; bomBytes = detected.bomBytes;
+    }
+    const readableEnd = all.length - ((all.length - offset) % unit);
+    if (readableEnd <= offset && !record.pending_fragment) { const probe = cursorProbe(all, offset, unit); await this.db.query("UPDATE scum_log_files SET size_bytes=?,mtime_ms=?,encoding=?,cursor_probe_hash=?,cursor_probe_length=?,last_status='idle',last_error=NULL WHERE id=?", [stat.size, Math.round(stat.mtimeMs), encoding, probe.hash, probe.length, record.id]); return; }
+    const appended = all.subarray(offset, readableEnd);
+    let appendedText = encoding === 'utf16be' ? (() => { const copy = Buffer.from(appended); copy.swap16(); return copy.toString('utf16le'); })() : appended.toString('utf16le');
+    if (offset === 0) appendedText = appendedText.replace(/^\uFEFF/, '');
+    const pending = String(record.pending_fragment || ''); const combined = pending + appendedText; const startPosition = pending ? Number(record.pending_position) : offset + bomBytes;
+    let position = startPosition; let cursor = 0; const complete = [];
+    for (const match of combined.matchAll(/\r?\n/g)) { const raw = combined.slice(cursor, match.index); complete.push({ raw, position }); position += lineByteLength(raw + match[0], encoding); cursor = match.index + match[0].length; }
+    const fragment = combined.slice(cursor); const fragmentPosition = position;
+    if (Buffer.byteLength(fragment, 'utf8') > 16 * 1024 * 1024) throw Object.assign(new Error('聊天日志半行超过安全上限，拒绝推进游标'), { code: 'CHAT_FRAGMENT_TOO_LARGE' });
+    await this.db.transaction(async (tx) => {
+      for (const item of complete) {
+        const parsed = parseChatLogLine(item.raw, { claimPrefix: this.claimPrefix, recycleCommand: this.recycleCommand });
+        if (parsed.type === 'event') {
+          const event = parsed.event; const commandType = event.command?.type || null; const commandTarget = event.command?.target || null;
+          const result = await tx.query('INSERT IGNORE INTO scum_chat_events (event_time,steam_id,player_name,character_number,channel,message_text,parse_status,command_type,command_target,source_file_id,source_position,line_hash,event_hash,parser_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [event.eventTime, event.steamId, event.playerName, event.characterNumber, event.channel, event.message, event.parseStatus, commandType, commandTarget, record.id, String(item.position), hash(item.raw), chatEventHash(event), event.parserVersion]);
+          this.eventsStored += Number(result.affectedRows || 0);
+        } else if (parsed.type === 'unknown') {
+          const result = await tx.query('INSERT IGNORE INTO scum_log_parse_failures (source_file_id,source_position,line_hash,reason,preview) VALUES (?,?,?,?,?)', [record.id, String(item.position), hash(item.raw), String(parsed.reason).slice(0, 64), safePreview(item.raw)]);
+          this.failuresStored += Number(result.affectedRows || 0);
+        }
+      }
+      const probe = cursorProbe(all, readableEnd, unit);
+      await tx.query("UPDATE scum_log_files SET offset_bytes=?,pending_fragment=?,pending_position=?,size_bytes=?,mtime_ms=?,encoding=?,cursor_probe_hash=?,cursor_probe_length=?,last_status='ok',last_error=NULL,last_processed_at=CURRENT_TIMESTAMP(3) WHERE id=?", [readableEnd, fragment, fragmentPosition, stat.size, Math.round(stat.mtimeMs), encoding, probe.hash, probe.length, record.id]);
+    });
+  }
+  async processPendingClaims() {
+    if (!this.claimService) return;
+    const rows = rowsOf(await this.db.query("SELECT e.id,e.steam_id AS steamId,e.channel,e.command_type AS commandType,e.command_target AS commandTarget,e.event_hash AS eventHash FROM scum_chat_events e LEFT JOIN scum_chat_claim_audits a ON a.event_id=e.id WHERE e.parse_status='claim_command' AND e.channel IN ('Global','Local','Squad','Admin') AND a.id IS NULL ORDER BY e.id ASC LIMIT 200"));
+    for (const row of rows) {
+      if (this.stopped) break;
+      const command = row.commandType === 'recycle' ? { type: 'recycle', itemId: row.commandTarget, target: row.commandTarget } : row.commandType === 'id' ? { type: 'id', giftId: row.commandTarget, target: row.commandTarget } : { type: 'name', giftName: row.commandTarget, target: row.commandTarget };
+      try { const result = await this.claimService.process({ ...row, command }); if (result) this.claimsProcessed += result.idempotent ? 0 : 1; }
+      catch (error) { this.logger?.warn?.('聊天礼包领取系统错误，将保留待重试', { component: 'chat-log', eventId: Number(row.id), error: safeError(error) }); }
+    }
+  }
+  async cleanup() {
+    const microseconds = this.retentionDays * 86400 * 1000000;
+    await this.db.transaction(async (tx) => {
+      await tx.query("DELETE f FROM scum_log_parse_failures f JOIN scum_log_files l ON l.id=f.source_file_id WHERE l.source_type='chat' AND f.created_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)", [microseconds]);
+      await tx.query('DELETE e FROM scum_chat_events e LEFT JOIN scum_chat_claim_audits a ON a.event_id=e.id LEFT JOIN chat_auto_reply_audits r ON r.event_id=e.id WHERE a.id IS NULL AND r.id IS NULL AND e.event_time < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)', [microseconds]);
+    });
+  }
+}
+
+export { fileIdentity, rowsOf };

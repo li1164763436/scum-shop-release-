@@ -1,0 +1,75 @@
+async function loadOrders() {
+  $('#orderRows').innerHTML = empty(6, '正在加载订单...', true);
+  try {
+    const data = await api('/api/orders');
+    state.orders = list(data, ['orders', 'items']);
+    renderOrders();
+  } catch (error) { $('#orderRows').innerHTML = empty(6, error.message === '接口不存在' ? '订单接口尚未启用' : error.message); }
+}
+function renderOrders() {
+  const keyword = $('#orderSearch').value.trim().toLowerCase();
+  const filter = $('#orderStatusFilter').value;
+  const rows = state.orders.filter((order) => {
+    const text = `${order.orderNo || order.id} ${order.steamId || ''} ${order.externalOrderId || ''}`.toLowerCase();
+    return (!keyword || text.includes(keyword)) && (!filter || String(order.status).toLowerCase() === filter);
+  });
+  $('#orderRows').innerHTML = rows.length ? rows.map((order) => `<tr><td><code>${esc(order.orderNo || order.id)}</code></td><td><code>${esc(order.steamId || '--')}</code></td><td>${esc(order.source || '--')}${order.externalOrderId ? `<br><code>${esc(order.externalOrderId)}</code>` : ''}</td><td><span class="money">${number(order.totalAmount)}</span></td><td>${status(order.status)}</td><td>${esc(date(order.createdAt))}</td></tr>`).join('') : empty(6, '暂无符合条件的订单');
+}
+
+async function loadTasks() {
+  if (!$('#taskRows')) return;
+  $('#taskRows').innerHTML = empty(7, '正在加载任务...', true);
+  try {
+    const data = await api('/api/fulfillment/tasks');
+    state.tasks = list(data, ['tasks', 'items']);
+    $('#taskRows').innerHTML = state.tasks.length ? state.tasks.map((task) => {
+      const currentStatus = String(task.status || 'pending').toLowerCase();
+      const actions = [];
+      if (['failed', 'retry', 'waiting_offline'].includes(currentStatus)) actions.push(`<button class="row-btn" data-retry-task="${esc(task.id)}">重试</button>`);
+      if (['failed', 'manual_review', 'completed'].includes(currentStatus)) actions.push(`<button class="row-btn" data-replace-task="${esc(task.id)}">人工补单</button>`);
+      const replacementMeta = [task.generation ? `第 ${number(task.generation)} 代` : '', task.replacementOfTaskId ? `补单源任务 ${task.replacementOfTaskId}` : '', task.replacementReason ? `原因：${task.replacementReason}` : ''].filter(Boolean);
+      return `<tr><td><code>${esc(task.id)}</code>${replacementMeta.length ? `<span class="task-meta">${replacementMeta.map((item) => `<span class="muted">${esc(item)}</span>`).join('')}</span>` : ''}</td><td><code>${esc(task.orderId)}</code></td><td><code>${esc(task.steamId || '--')}</code></td><td><code>${esc(task.itemId || '--')}</code><br><span class="muted">数量 ${number(task.amount)}</span></td><td>${number(task.attempts)}</td><td>${status(currentStatus)}${task.lastError ? `<br><span class="muted">${esc(task.lastError)}</span>` : ''}${task.nextAttemptAt ? `<br><span class="muted">下次：${esc(date(task.nextAttemptAt))}</span>` : ''}</td><td>${actions.length ? `<div class="row-actions">${actions.join('')}</div>` : '--'}</td></tr>`;
+    }).join('') : empty(7, '暂无发货任务');
+  } catch (error) { $('#taskRows').innerHTML = empty(7, error.message === '接口不存在' ? '发货任务接口尚未启用' : error.message); }
+}
+
+function replacementModal(task) {
+  const currentStatus = String(task.status || '').toLowerCase();
+  const needsRiskConfirmation = currentStatus === 'manual_review';
+  const completed = currentStatus === 'completed';
+  const warning = needsRiskConfirmation
+    ? '原任务结果不确定，重复发放可能导致玩家收到双份物品。必须明确确认风险。'
+    : completed ? '原任务已完成，本次操作属于补偿发放，可能造成额外物品。请明确确认后继续。' : '补单请求仍可能被后端按业务规则拒绝。';
+  openModal({
+    title: '创建人工补单', description: `任务 ${task.id} · ${warning}`, submitText: '确认创建补单',
+    body: `<label class="full">补单原因<textarea name="reason" required maxlength="500" placeholder="请记录补单依据、核查结果或补偿原因"></textarea></label><p class="risk-note">${esc(warning)}</p>${needsRiskConfirmation ? '<label class="full"><span><input name="confirmRisk" type="checkbox" required style="width:auto;margin-right:8px">我已核查并确认未知送达导致的重复发放风险</span></label>' : ''}${completed ? '<label class="full"><span><input name="confirmCompensation" type="checkbox" required style="width:auto;margin-right:8px">我确认这是对已完成任务的补偿发放</span></label>' : ''}`,
+    onSubmit: async (form) => {
+      const values = Object.fromEntries(new FormData(form));
+      await api(`/api/fulfillment/tasks/${encodeURIComponent(task.id)}/replacements`, { method: 'POST', headers: { 'Idempotency-Key': uuid() }, body: JSON.stringify({ reason: values.reason.trim(), confirmUnknownDeliveryRisk: needsRiskConfirmation ? values.confirmRisk === 'on' : false }) });
+      toast('人工补单已创建'); closeModal(); await Promise.all([loadTasks(), loadOrders()]);
+    }
+  });
+}
+function orderModal(prefilledSteamId = '') {
+  const enabledProducts = state.products.filter((product) => product.enabled !== false);
+  const productOptions = enabledProducts.map((product) => `<option value="${esc(product.sku)}">${esc(product.name)} / ${esc(product.sku)}（${number(product.price)} 币）</option>`).join('');
+  openModal({
+    title: '创建手工订单', description: '订单将从玩家账户扣除商城币并进入自动发货队列。', submitText: '创建订单',
+    body: `<label class="full">玩家 SteamID<input name="steamId" required pattern="[0-9]{17}" value="${esc(prefilledSteamId)}"></label><label class="full">商品<select name="sku" required><option value="">请选择商品</option>${productOptions}</select></label><label>购买数量<input name="quantity" type="number" min="1" value="1" required></label>`,
+    onSubmit: async (form) => {
+      const values = Object.fromEntries(new FormData(form));
+      await api('/api/orders', { method: 'POST', body: JSON.stringify({ steamId: values.steamId, items: [{ sku: values.sku, quantity: Number(values.quantity) }] }) });
+      toast('手工订单已创建'); closeModal(); showPage('orders');
+    }
+  });
+}
+
+$('#reloadOrders').addEventListener('click', loadOrders);
+
+$('#orderSearch').addEventListener('input', renderOrders);
+
+$('#orderStatusFilter').addEventListener('change', renderOrders);
+
+
+
+$('#reloadTasks')?.addEventListener('click', loadTasks);

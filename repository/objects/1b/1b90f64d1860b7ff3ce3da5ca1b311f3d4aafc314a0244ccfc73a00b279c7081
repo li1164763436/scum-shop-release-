@@ -1,0 +1,114 @@
+import { isSteamId64 } from './command-policy.js';
+
+const ITEM_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,79}$/;
+const POSITIVE = /^[1-9]\d*$/;
+const LEGACY_SPAWN_FIELDS = new Set(['itemId', 'quantity', 'ammoCount', 'cashValue', 'extraQuantity']);
+const NEW_SPAWN_FIELDS = new Set(['itemId', 'quantity', 'arguments', 'actionType']);
+const ARGUMENT_TOKEN = /^[^\s;"'\u0000-\u001f\u007f-\u009f]+$/;
+const MAX_ARGUMENTS = 64;
+const MAX_ARGUMENT_LENGTH = 160;
+const MAX_RAW_LENGTH = 500;
+
+export class GiftCodeError extends Error {}
+
+function integer(token, name, max) {
+  if (!POSITIVE.test(String(token || ''))) throw new GiftCodeError(`${name}必须是正整数`);
+  const value = Number(token);
+  if (!Number.isSafeInteger(value) || value > max) throw new GiftCodeError(`${name}不能超过 ${max}`);
+  return value;
+}
+
+function validateArguments(value) {
+  if (!Array.isArray(value)) throw new GiftCodeError('arguments 必须是字符串数组');
+  if (value.length > MAX_ARGUMENTS) throw new GiftCodeError(`SpawnItem 参数不能超过 ${MAX_ARGUMENTS} 个`);
+  const tokens = value.map((argument) => {
+    if (typeof argument !== 'string' || !argument || argument.length > MAX_ARGUMENT_LENGTH || !ARGUMENT_TOKEN.test(argument)) throw new GiftCodeError(`每个 SpawnItem 参数必须是长度 1-${MAX_ARGUMENT_LENGTH} 的安全 token`);
+    if (argument.startsWith('#')) throw new GiftCodeError('SpawnItem 参数不能以 # 开头');
+    if (argument.toLowerCase() === 'location') throw new GiftCodeError('SpawnItem 参数不允许覆盖 Location');
+    return argument;
+  });
+  if (!tokens.length) return tokens;
+  if (tokens.length === 2 && tokens[0].toLowerCase() === 'ammocount') {
+    const uses = integer(tokens[1], 'AmmoCount', 10000);
+    return ['Uses', String(uses), 'Health', '100', 'Dirtiness', '0'];
+  }
+  if (tokens.length !== 6 || tokens[0].toLowerCase() !== 'uses' || tokens[2].toLowerCase() !== 'health' || tokens[4].toLowerCase() !== 'dirtiness') throw new GiftCodeError('自建 RCON 仅支持 Uses、Health、Dirtiness 三项完整参数');
+  const uses = Number(tokens[1]), health = Number(tokens[3]), dirtiness = Number(tokens[5]);
+  if (!Number.isInteger(uses) || uses < 0 || uses > 10000) throw new GiftCodeError('Uses 必须是 0-10000 的整数');
+  if (!Number.isFinite(health) || health < 0 || health > 100) throw new GiftCodeError('Health 必须是 0-100 的数字');
+  if (!Number.isFinite(dirtiness) || dirtiness < 0 || dirtiness > 100) throw new GiftCodeError('Dirtiness 必须是 0-100 的数字');
+  return ['Uses', String(uses), 'Health', String(health), 'Dirtiness', String(dirtiness)];
+}
+
+export function validateSpawnPayload(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new GiftCodeError('物品发放参数格式无效');
+  const keys = Object.keys(value);
+  const newFormat = Object.hasOwn(value, 'arguments');
+  const allowedFields = newFormat ? NEW_SPAWN_FIELDS : LEGACY_SPAWN_FIELDS;
+  if (keys.some((key) => !allowedFields.has(key))) throw new GiftCodeError(newFormat ? '新旧物品发放参数不可混合或包含未知字段' : '物品发放参数包含未知字段');
+  const itemId = String(value.itemId || '');
+  if (!ITEM_ID.test(itemId)) throw new GiftCodeError('物品 ID 格式无效');
+  const payload = { itemId, quantity: integer(value.quantity, '物品数量', 100) };
+  if (value.actionType) {
+    const actionType = String(value.actionType);
+    if (!['spawn_vehicle', 'spawn_animal', 'spawn_zombie', 'spawn_armed_npc'].includes(actionType)) throw new GiftCodeError('管理命令类型无效');
+    payload.actionType = actionType;
+  }
+  if (newFormat) {
+    payload.arguments = validateArguments(value.arguments);
+    return payload;
+  }
+  const argumentsList = [];
+  if (itemId.toLowerCase() === 'cash') {
+    throw new GiftCodeError('自建 RCON 不支持 CashValue 生成参数');
+  } else {
+    if (Object.hasOwn(value, 'cashValue') || Object.hasOwn(value, 'extraQuantity')) throw new GiftCodeError('普通物品仅允许 AmmoCount');
+    if (Object.hasOwn(value, 'ammoCount')) argumentsList.push('AmmoCount', String(integer(value.ammoCount, 'AmmoCount', 100000000)));
+  }
+  payload.arguments = validateArguments(argumentsList);
+  return payload;
+}
+
+export function parseGiftCode(input) {
+  const code = String(input || '').trim();
+  if (!code) throw new GiftCodeError('礼包代码不能为空');
+  if (code.length > MAX_RAW_LENGTH) throw new GiftCodeError(`礼包代码单行不能超过 ${MAX_RAW_LENGTH} 字符`);
+  if (/[;"'\u0000-\u001f\u007f]/.test(code)) throw new GiftCodeError('礼包代码包含禁止字符');
+  const coin = code.match(/^\[([1-9]\d*)(猫币|商城币)\]$/i);
+  if (coin) return { actionType: 'shop_coin', payload: { amount: integer(coin[1], '商城币数量', 100000000) }, displayCode: code };
+  if (/^#changecurrencybalance\b/i.test(code)) throw new GiftCodeError('该命令无法可靠绑定目标玩家，暂不支持自动发货');
+  const admin = code.match(/^#(SpawnVehicle|SpawnAnimal|spawnzombie|SpawnArmedNPC)\s+([A-Za-z0-9_][A-Za-z0-9_-]{0,79})(?:\s+([1-9]\d*))?$/i);
+  if (admin) {
+    const types = { spawnvehicle: 'spawn_vehicle', spawnanimal: 'spawn_animal', spawnzombie: 'spawn_zombie', spawnarmednpc: 'spawn_armed_npc' };
+    const payload = validateSpawnPayload({ itemId: admin[2], quantity: integer(admin[3] || '1', '生成数量', 100), arguments: [], actionType: types[admin[1].toLowerCase()] });
+    return { actionType: 'spawn_item', payload, displayCode: code };
+  }
+  const tokens = code.split(/\s+/);
+  if (String(tokens.shift()).toLowerCase() !== '#spawnitem') throw new GiftCodeError('仅支持刷物品、商城币、载具、动物、僵尸和武装 NPC 命令');
+  const itemId = tokens.shift();
+  if (!ITEM_ID.test(String(itemId || ''))) throw new GiftCodeError('物品 ID 格式无效');
+  const quantity = integer(tokens.shift(), '物品数量', 100);
+  const payload = validateSpawnPayload({ itemId, quantity, arguments: tokens });
+  return { actionType: 'spawn_item', payload, displayCode: code };
+}
+
+export function parseGiftCodes(value) {
+  const lines = (Array.isArray(value) ? value : String(value || '').split(/\r?\n/)).map((line) => String(line).trim()).filter(Boolean);
+  if (lines.length < 1 || lines.length > 50) throw new GiftCodeError('礼包代码必须为 1-50 行');
+  return lines.map(parseGiftCode);
+}
+
+export function renderGiftRconCommand(action, steamId) {
+  const actionTypes = [action?.actionType, action?.taskType].filter((value) => value !== undefined && value !== null);
+  if (!actionTypes.length || actionTypes.some((value) => value !== 'spawn_item')) throw new GiftCodeError('该礼包动作不是物品发放命令');
+  if (!isSteamId64(steamId)) throw new GiftCodeError('SteamID 格式无效');
+  let rawPayload;
+  try { rawPayload = typeof action?.payload === 'string' ? JSON.parse(action.payload) : (action?.payload ?? action?.payloadJson); }
+  catch { throw new GiftCodeError('物品发放参数 JSON 无效'); }
+  if (typeof rawPayload === 'string') {
+    try { rawPayload = JSON.parse(rawPayload); } catch { throw new GiftCodeError('物品发放参数 JSON 无效'); }
+  }
+  const payload = validateSpawnPayload(rawPayload);
+  const parts = ['SpawnItemForPlayer', String(steamId), payload.itemId, String(payload.quantity), ...payload.arguments, 'CONFIRM'];
+  return parts.join(' ');
+}

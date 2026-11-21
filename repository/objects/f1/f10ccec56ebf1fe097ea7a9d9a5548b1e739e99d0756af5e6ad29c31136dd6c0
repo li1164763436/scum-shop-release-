@@ -1,0 +1,64 @@
+import http from 'node:http';
+import { LicenseClient, formatLicenseStartupError } from './license-client.js';
+
+export const LICENSE_CENTER_URL = 'https://sq.scum0.cn';
+const MAX_BODY_BYTES = 16 * 1024;
+const RATE_WINDOW_MS = 60_000;
+const RATE_LIMIT = 5;
+const PENDING_AUTHORIZATION_TTL_MS = 5 * 60_000;
+
+const GUIDE_HTML = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SCUM 商城首装向导</title><style>body{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;background:#f4f6f8;margin:0;display:grid;place-items:center;min-height:100vh;color:#17202a}.card{background:#fff;width:min(460px,calc(100% - 40px));padding:32px;border-radius:12px;box-shadow:0 8px 30px #0001}h1{margin-top:0}label{display:block;margin:16px 0 6px}input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #ccd3da;border-radius:6px;font-size:16px}button{width:100%;margin-top:22px;padding:11px;border:0;border-radius:6px;background:#1769aa;color:#fff;font-size:16px;cursor:pointer}button:disabled{opacity:.6}.tabs{display:flex;gap:8px}.tabs button{margin-top:0;background:#dfe8ef;color:#17202a}.tabs button.active{background:#1769aa;color:#fff}.hint{color:#59636e;font-size:14px}.error{color:#b42318;white-space:pre-wrap;min-height:22px}.hidden{display:none}.fixed{background:#f3f5f7;color:#475467}</style></head><body><main class="card"><h1>SCUM商城登录 / 首装向导</h1><section id="licenseStep"><p class="hint">第一步：使用授权中心账号登录；没有账号可先注册。授权中心：https://sq.scum0.cn</p><div class="tabs"><button id="loginTab" class="active" type="button">登录</button><button id="registerTab" type="button">注册</button></div><form id="licenseForm"><label for="username">授权账号</label><input id="username" autocomplete="username" required minlength="3" maxlength="80"><label for="licensePassword">授权密码</label><input id="licensePassword" type="password" autocomplete="current-password" required minlength="8" maxlength="28"><button id="licenseSubmit">登录授权中心</button></form></section><section id="bindStep" class="hidden"><p class="hint">第二步：绑定本机唯一初始超级管理员。人物名将在监控识别玩家后自动关联。</p><form id="bindForm">
+<label>商城用户名</label><input id="authorizedUsername" class="fixed" readonly><label for="steamId">SteamID</label><input id="steamId" inputmode="numeric" pattern="7656119[0-9]{10}" maxlength="17" required><p class="hint">商城登录密码将使用第一步已验证的授权密码，无需再次输入。</p><button id="bindSubmit">完成初始化并登录</button></form></section><div id="message" class="error"></div></main><script>const $=id=>document.getElementById(id),msg=$('message');let mode='connect';function showBind(username){$('licenseStep').classList.add('hidden');$('bindStep').classList.remove('hidden');$('authorizedUsername').value=username||'';msg.textContent=''}async function status(){const r=await fetch('/api/license/status',{cache:'no-store'}),b=await r.json();if(b.step==='bind')showBind(b.username);else if(b.ready)location.href='/'}$('loginTab').onclick=()=>{mode='connect';$('loginTab').classList.add('active');$('registerTab').classList.remove('active');$('licenseSubmit').textContent='登录授权中心'};$('registerTab').onclick=()=>{mode='register';$('registerTab').classList.add('active');$('loginTab').classList.remove('active');$('licenseSubmit').textContent='注册授权账号'};$('licenseForm').onsubmit=async e=>{e.preventDefault();msg.textContent='';$('licenseSubmit').disabled=true;try{const r=await fetch('/api/license/'+mode,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:$('username').value,password:$('licensePassword').value})}),b=await r.json();if(!r.ok||!b.success)throw Error(b.message||'操作失败');$('licensePassword').value='';if(mode==='register'){msg.textContent='注册成功，请切换登录';$('loginTab').click()}else if(b.requiresInitialAdmin)showBind(b.username);else location.href='/'}catch(x){msg.textContent=x.message}finally{$('licenseSubmit').disabled=false}};
+$('bindForm').onsubmit=async e=>{e.preventDefault();msg.textContent='';$('bindSubmit').disabled=true;try{const r=await fetch('/api/license/bind-admin',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({steamId:$('steamId').value})}),b=await r.json();if(!r.ok||!b.success)throw Error(b.message||'初始化失败');msg.textContent='初始化完成，正在启动商城…';for(let i=0;i<120;i++){await new Promise(resolve=>setTimeout(resolve,500));try{const s=await fetch('/api/runtime/status',{cache:'no-store'}),j=await s.json();if(j.data?.business==='ready'||j.data?.business==='degraded'){location.href=b.redirect||'/';return}}catch{}}location.href=b.redirect||'/'}catch(x){msg.textContent=x.message;$('bindSubmit').disabled=false}};status().catch(()=>{});</script></body></html>`;
+
+function isLocalRequest(req, port, requireOrigin = false) {
+  const actualPort = req.socket.localPort || port;
+  const host = String(req.headers.host || '');
+  if (host !== `127.0.0.1:${actualPort}` && host !== `localhost:${actualPort}`) return false;
+  const origin = req.headers.origin;
+  if (!origin) return !requireOrigin;
+  return origin === `http://127.0.0.1:${actualPort}` || origin === `http://localhost:${actualPort}`;
+}
+function json(res, status, body, headers = {}) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers }); res.end(JSON.stringify(body)); }
+function readJson(req) { return new Promise((resolve, reject) => { let size=0;const chunks=[];req.on('data',chunk=>{size+=chunk.length;if(size>MAX_BODY_BYTES){reject(Object.assign(new Error('请求体过大'),{code:'BODY_TOO_LARGE'}));req.destroy();return;}chunks.push(chunk);});req.on('end',()=>{try{resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))}catch{reject(Object.assign(new Error('请求格式无效'),{code:'INVALID_JSON'}))}});req.on('error',reject);}); }
+
+export function createLicenseGuide({ port = 3090, licenseStore, clientFactory = baseUrl => new LicenseClient({ baseUrl }), initialIdentity = null, initialAdmin = null, onAuthorized }) {
+  let ready = false, closed = false, pendingAuthorization = null, pendingAuthorizationTimer = null;
+  const attempts = new Map();
+  const clearPendingAuthorization = () => { pendingAuthorization = null; if (pendingAuthorizationTimer) clearTimeout(pendingAuthorizationTimer); pendingAuthorizationTimer = null; };
+  const activePendingAuthorization = () => {
+    if (pendingAuthorization && pendingAuthorization.expiresAt > Date.now()) return pendingAuthorization;
+    clearPendingAuthorization();
+    return null;
+  };
+  const finish = async () => { if (closed) return; closed=true;clearPendingAuthorization();await new Promise(resolve=>server.close(resolve));await onAuthorized?.(); };
+  const server = http.createServer(async (req,res)=>{
+    if(!isLocalRequest(req,port))return json(res,403,{success:false,message:'仅允许本机访问',code:'LOCAL_ONLY'});
+    if(req.method==='GET'&&req.url==='/'){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});return res.end(GUIDE_HTML);}
+    if(req.method==='GET'&&req.url==='/api/license/status'){const pending=activePendingAuthorization();return json(res,200,{success:true,ready,step:pending?'bind':'license',username:pending?.username});}
+    if(req.method!=='POST'||!['/api/license/connect','/api/license/register','/api/license/bind-admin'].includes(req.url))return json(res,404,{success:false,message:'未找到',code:'NOT_FOUND'});
+    if(!isLocalRequest(req,port,true))return json(res,403,{success:false,message:'请求来源无效',code:'INVALID_ORIGIN'});
+    if(String(req.headers['content-type']||'').split(';')[0].trim().toLowerCase()!=='application/json')return json(res,415,{success:false,message:'只接受 JSON',code:'JSON_REQUIRED'});
+    const now=Date.now(),item=attempts.get('local')||{count:0,until:now+RATE_WINDOW_MS};if(item.until<=now){item.count=0;item.until=now+RATE_WINDOW_MS;}if(++item.count>RATE_LIMIT){attempts.set('local',item);return json(res,429,{success:false,message:'请求过于频繁，请稍后再试',code:'RATE_LIMITED'});}attempts.set('local',item);
+    try{
+      const body=await readJson(req);
+      if(req.url==='/api/license/bind-admin'){
+        const pending=activePendingAuthorization();
+        if(!pending||!initialAdmin?.create) return json(res,409,{success:false,message:'授权登录已失效，请重新登录授权中心',code:'LICENSE_LOGIN_REQUIRED'});
+        const result=await initialAdmin.create({identity:{username:pending.username,licenseId:pending.licenseId},steamId:body?.steamId,password:pending.password,metadata:{ip:req.socket.remoteAddress,userAgent:req.headers['user-agent']}});
+        ready=true;clearPendingAuthorization();
+        const cookie=result?.session?.token?`shop_session=${encodeURIComponent(result.session.token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7*24*60*60}`:null;
+        json(res,200,{success:true,redirect:'/'},cookie?{'set-cookie':cookie}:{});setImmediate(()=>void finish());return;
+      }
+      if(!body||typeof body.username!=='string'||typeof body.password!=='string'||body.username.length<3||body.username.length>80||body.password.length<8||body.password.length>28)return json(res,400,{success:false,message:'账号或密码格式无效',code:'INVALID_INPUT'});
+      const client=clientFactory(LICENSE_CENTER_URL);
+      if(req.url==='/api/license/register'){await client.register({username:body.username,password:body.password});return json(res,200,{success:true});}
+      const issued=await client.connect({username:body.username,password:body.password});
+      await licenseStore.save({baseUrl:LICENSE_CENTER_URL,...(issued.licenseId ? {licenseId:issued.licenseId} : {}),licenseToken:issued.licenseToken,username:issued.username,expiresAt:issued.expiresAt,lastVerifiedAt:issued.serverTime});
+      const required=initialAdmin?.required?await initialAdmin.required({identity:{username:issued.username}}):false;
+      if(required){clearPendingAuthorization();pendingAuthorization={username:issued.username,licenseId:issued.licenseId,password:body.password,expiresAt:Date.now()+PENDING_AUTHORIZATION_TTL_MS};pendingAuthorizationTimer=setTimeout(clearPendingAuthorization,PENDING_AUTHORIZATION_TTL_MS);pendingAuthorizationTimer.unref?.();return json(res,200,{success:true,requiresInitialAdmin:true,username:issued.username});}
+      ready=true;json(res,200,{success:true,requiresInitialAdmin:false});setImmediate(()=>void finish());
+    }catch(error){if(req.url==='/api/license/bind-admin')clearPendingAuthorization();json(res,400,{success:false,message:error?.code?.startsWith?.('LICENSE_')?formatLicenseStartupError(error):error?.message||'操作失败',code:error?.code||'GUIDE_ERROR'});}
+  });
+  return {server,listen:()=>new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);}),close:()=>{closed=true;clearPendingAuthorization();return new Promise(resolve=>server.close(resolve));}};
+}

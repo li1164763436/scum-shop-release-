@@ -1,0 +1,103 @@
+function cloudInventoryImage(item) {
+  return item.imagePath ? '<img loading="lazy" src="'+esc(item.imagePath)+'" alt="'+esc(item.itemName)+'">' : '暂无图片';
+}
+function renderCloudInventoryCards() {
+  const items=state.cloudWarehouseInventory||[], pages=Math.max(1,Math.ceil(items.length/12));
+  state.cloudInventoryPage=Math.min(pages,Math.max(1,state.cloudInventoryPage||1));
+  const start=(state.cloudInventoryPage-1)*12;
+  $('#cloudInventoryAdminRows').innerHTML=state.cloudWarehouseInventory.length?items.slice(start,start+12).map((item,index)=>'<button class="warehouse-inventory-card" type="button" data-cloud-inventory="'+(start+index)+'"><span class="warehouse-inventory-media">'+cloudInventoryImage(item)+'</span><strong title="'+esc(item.itemName)+'">'+esc(item.itemName)+'</strong><small>数量：'+number(item.quantity)+'</small><span class="warehouse-inventory-details">查看明细</span></button>').join(''):'<div class="warehouse-inventory-empty">暂无库存数据</div>';
+  $('#cloudInventoryPageInfo').textContent='第 '+state.cloudInventoryPage+' / '+pages+' 页，共 '+items.length+' 种物品';
+  $('#cloudInventoryPrev').disabled=state.cloudInventoryPage<=1;
+  $('#cloudInventoryNext').disabled=state.cloudInventoryPage>=pages;
+}
+$('#cloudInventoryPrev').addEventListener('click',()=>{state.cloudInventoryPage--;renderCloudInventoryCards()});
+$('#cloudInventoryNext').addEventListener('click',()=>{state.cloudInventoryPage++;renderCloudInventoryCards()});
+function renderCloudListingCards() {
+  const query=String($('#cloudListingSearch').value||'').trim().toLowerCase();
+  const filtered=(state.cloudWarehouseListings||[]).filter(item=>!query||[item.itemName,item.itemCode,item.sellerName,item.sellerSteamId].some(v=>String(v||'').toLowerCase().includes(query)));
+  const groups=new Map();for(const item of filtered){const key=item.itemCode||item.itemName;let group=groups.get(key);if(!group){group={...item,details:[],remainingQuantity:0};groups.set(key,group)}group.details.push(item);group.remainingQuantity+=Number(item.remainingQuantity)||0}state.cloudWarehouseListingGroups=[...groups.values()];
+  const items=state.cloudWarehouseListingGroups||[], pages=Math.max(1,Math.ceil(items.length/12));
+  state.cloudListingPage=Math.min(pages,Math.max(1,state.cloudListingPage||1));
+  const start=(state.cloudListingPage-1)*12;
+  $('#cloudListingAdminRows').innerHTML=items.slice(start,start+12).map((item,index)=>'<article class="warehouse-inventory-card warehouse-listing-card" tabindex="0" role="button" data-cloud-listing="'+(start+index)+'"><span class="warehouse-inventory-media">'+cloudInventoryImage(item)+'</span><strong title="'+esc(item.itemName)+'">'+esc(item.itemName)+'</strong><small>数量：'+number(item.remainingQuantity)+'</small><span class="warehouse-inventory-details">查看明细</span></article>').join('')||'<div class="warehouse-inventory-empty">暂无市场挂单</div>';
+  $('#cloudListingPageInfo').textContent='第 '+state.cloudListingPage+' / '+pages+' 页，共 '+items.length+' 笔挂单';
+  $('#cloudListingPrev').disabled=state.cloudListingPage<=1;
+  $('#cloudListingNext').disabled=state.cloudListingPage>=pages;
+}
+$('#cloudListingPrev').addEventListener('click',()=>{state.cloudListingPage--;renderCloudListingCards()});
+$('#cloudListingNext').addEventListener('click',()=>{state.cloudListingPage++;renderCloudListingCards()});
+$('#cloudListingAdminRows').addEventListener('keydown',event=>{if(event.target.matches('[data-cloud-listing]')&&(event.key==='Enter'||event.key===' ')){event.preventDefault();event.target.click()}});
+$('#cloudListingAdminRows').addEventListener('click',event=>{
+  if(event.target.closest('[data-admin-cloud-cancel]'))return;
+  const card=event.target.closest('[data-cloud-listing]'), item=card&&state.cloudWarehouseListingGroups?.[Number(card.dataset.cloudListing)];
+  if(!item)return;
+  const rows=item.details.map(detail=>'<tr><td>'+esc(detail.sellerName||detail.sellerSteamId)+'</td><td>'+esc(detail.sellerSteamId)+'</td><td>'+number(detail.remainingQuantity)+'</td><td>'+number(detail.unitPrice)+' 商城币</td><td>'+date(detail.updatedAt)+'</td><td><button class="btn danger small" type="button" data-admin-cloud-cancel="'+esc(detail.id)+'">撤单</button></td></tr>').join('');
+  openModal({title:'挂单明细',description:item.itemName,body:'<div class="warehouse-inventory-detail-table"><table><thead><tr><th>卖家昵称</th><th>SteamID</th><th>剩余数量</th><th>单价</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'+rows+'</tbody></table></div>',submitText:'关闭',onSubmit:closeModal});
+  $('#modalBackdrop').classList.add('centered-modal');$('#cancelModal').hidden=true;
+});
+function renderCloudWarehouseAdmin() {
+  const data = state.cloudWarehouse || {}, stats = data.stats || {}, settings = data.settings || {};
+  for (const [id,key] of [['cloudStatWarehouses','warehouses'],['cloudStatInventory','inventory'],['cloudStatListings','listings'],['cloudStatMarketOrders','marketOrders'],['cloudStatTrades','trades']]) $(`#${id}`).textContent=number(stats[key]);
+  const form=$('#cloudWarehouseSettingsForm'); form.elements.marketEnabled.checked=Boolean(settings.marketEnabled); form.elements.feeBps.value=Number(settings.feeBps||0); form.elements.minimumFee.value=Number(settings.minimumFee||0); form.elements.withdrawFee.value=Number(settings.withdrawFee||0); form.elements.dailyBaseQuota.value=Number(settings.dailyBaseQuota||0); form.elements.destroyRefundPercent.value=Number(settings.destroyRefundPercent??20); form.elements.destroyFallbackRefund.value=Number(settings.destroyFallbackRefund??2);
+  const inventory=list(data,['inventory']); const groups=new Map(); for(const item of inventory){const key=item.itemCode||item.itemName;let group=groups.get(key);if(!group){group={...item,details:[],quantity:0};groups.set(key,group)}group.details.push(item);group.quantity=group.details.length} state.cloudWarehouseInventory=[...groups.values()]; renderCloudInventoryCards();
+  state.cloudWarehouseListings=list(data,['listings']); renderCloudListingCards();
+  const trades=list(data,['trades']); $('#cloudTradeAdminRows').innerHTML=trades.length?trades.map(item=>`<tr><td>${esc(item.buyerSteamId)}</td><td>${esc(item.sellerSteamId)}</td><td>${esc(item.itemName)}</td><td>${number(item.quantity)}</td><td>${number(item.grossAmount)}</td><td>${number(item.fee)}</td><td>${date(item.createdAt)}</td></tr>`).join(''):'<tr><td colspan="7" class="empty">暂无成交记录</td></tr>';
+}
+
+$('#cloudInventoryAdminRows').addEventListener('click', (event) => {
+  const card=event.target.closest('[data-cloud-inventory]');
+  if(!card)return;
+  const item=state.cloudWarehouseInventory?.[Number(card.dataset.cloudInventory)];
+  if(!item)return;
+  const rows=item.details.map(detail=>{const attrs=[];if(detail.itemHealth!=null){const h=Number(detail.itemHealth);attrs.push('耐久 '+(Math.round(h)===100?'100':h.toFixed(1))+'%')}if(detail.itemUses!=null)attrs.push('使用次数 '+number(detail.itemUses)+(detail.itemMaxUses==null?'':' / '+number(detail.itemMaxUses)));if(detail.itemDirtiness!=null)attrs.push('脏度 '+number(detail.itemDirtiness));const taken=detail.status==='empty',sold=detail.tradeStatus==='sold',listed=(detail.tradeStatus==='active'||Number(detail.reservedQuantity)>0)&&!taken,trade=listed?'已上架':'-';const inventory=taken?'已取出':sold?'已卖出':listed?'-':'未取出';return '<tr><td>'+esc(detail.playerName||detail.steamId)+'</td><td>'+esc(detail.steamId)+'</td><td>'+esc(attrs.join('；')||'未记录')+'</td><td><span class="warehouse-status-pill '+(trade==='-'?'muted':trade==='已上架'?'listed':'sold')+'">'+trade+'</span></td><td><span class="warehouse-status-pill '+(inventory==='已取出'?'withdrawn':inventory==='已卖出'?'sold':inventory==='未取出'?'available':'muted')+'">'+inventory+'</span></td><td>'+date(detail.updatedAt)+'</td></tr>'}).join('');
+  openModal({title:'库存明细',description:item.itemName,body:'<div class="warehouse-inventory-detail-table"><table><thead><tr><th>玩家昵称</th><th>SteamID</th><th>物品属性</th><th>交易状态</th><th>库存状态</th><th>更新时间</th></tr></thead><tbody>'+rows+'</tbody></table></div>',submitText:'关闭',onSubmit:closeModal});
+  $('#modalBackdrop').classList.add('centered-modal');
+  $('#cancelModal').hidden=true;
+});
+async function loadCloudWarehouseAdmin() {
+  const query=state.cloudWarehouseSteamId?`?search=${encodeURIComponent(state.cloudWarehouseSteamId)}`:'';
+  state.cloudWarehouse=await api(`/api/cloud-warehouse${query}`); renderCloudWarehouseAdmin();
+  const [plans,commands] = await Promise.all([api('/api/cloud-warehouse/pass-plans'),api('/api/chat-logs/settings')]), form = $('#cloudPassPlansForm');
+  const recycleForm=$('#cloudRecycleCommandForm');
+  recycleForm.elements.recycleCommand.value=commands.recycleCommand||'回收';
+  const renderRecyclePreview=()=>{$('#cloudRecycleCommandPreview').textContent=`${commands.claimPrefix||'@'}${recycleForm.elements.recycleCommand.value.trim()||'回收'} <物品ID>`;};
+  renderRecyclePreview();
+  recycleForm.elements.recycleCommand.oninput=renderRecyclePreview;
+  for (const plan of plans) {
+    form.elements[`${plan.passType}Enabled`].checked = plan.enabled;
+    for (const [suffix,key] of [['Price','price'],['DurationDays','durationDays'],['DailyQuota','dailyQuota']]) form.elements[`${plan.passType}${suffix}`].value = plan[key];
+  }
+}
+
+$('#cloudRecycleCommandForm').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;await withBusy(event.submitter,async()=>{await api('/api/chat-logs/settings',{method:'PUT',body:JSON.stringify({recycleCommand:form.elements.recycleCommand.value.trim()})});toast('内置回收命令已保存');await loadCloudWarehouseAdmin();});});
+
+$('#cloudPassPlansForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const plans = ['normal','premium'].map((passType) => ({ passType, enabled: form.elements[`${passType}Enabled`].checked, price: Number(form.elements[`${passType}Price`].value), durationDays: Number(form.elements[`${passType}DurationDays`].value), dailyQuota: Number(form.elements[`${passType}DailyQuota`].value) }));
+  await withBusy(event.submitter, async () => { await api('/api/cloud-warehouse/pass-plans', { method: 'PUT', body: JSON.stringify(plans) }); toast('云储证设置已保存'); await loadCloudWarehouseAdmin(); });
+});
+$('#reloadCloudWarehouseAdmin').addEventListener('click', (event) => withBusy(event.currentTarget, loadCloudWarehouseAdmin));
+async function openCloudRecycleRestrictions() {
+  const [restrictions,settings]=await Promise.all([api('/api/cloud-warehouse/recycle-restrictions'),api('/api/cloud-warehouse/recycle-restrictions/settings')]);
+  const rows=restrictions.map((item,index)=>{return '<tr><td>'+(index+1)+'</td><td>'+esc(item.itemCode)+'</td><td>'+esc(item.itemName)+'</td><td>'+esc(item.reason||'-')+'</td><td><label class="switch warehouse-recycle-row-switch"><input type="checkbox" data-cloud-recycle-enabled="'+esc(item.itemCode)+'" '+(item.enabled?'checked':'')+'><span></span>'+(item.enabled?'启用':'停用')+'</label></td><td><button class="btn danger small" type="button" data-cloud-recycle-remove="'+esc(item.itemCode)+'">移除</button></td></tr>'}).join('')||'<tr><td colspan="6" class="empty">暂无管制物品</td></tr>';
+  openModal({title:'云储回收管制',description:'按物品代码控制玩家回收权限。',body:'<div class="warehouse-recycle-control"><div class="warehouse-recycle-control-actions"><button class="btn primary" type="button" id="cloudRecycleRestrictionAdd">添加管制</button></div><div class="warehouse-recycle-control-table"><table><thead><tr><th>序号</th><th>物品代码</th><th>物品名称</th><th>原因</th><th>状态</th><th>操作</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>',submitText:'关闭',onSubmit:closeModal});
+  $('#modalTitle').textContent='云储回收管制';
+  const head=$('#modalTitle').closest('.modal-head');let tools=$('.warehouse-recycle-title-tools',head);if(!tools){tools=document.createElement('div');tools.className='warehouse-recycle-title-tools';head.insertBefore(tools,$('#closeModal'))}tools.innerHTML='<label class="switch warehouse-recycle-title-switch"><input id="cloudRecycleControlEnabled" type="checkbox" '+(settings.enabled?'checked':'')+'><span></span>启用</label>';
+  $('#modalBackdrop').classList.add('centered-modal');$('#cancelModal').hidden=true;
+}
+$('#openCloudRecycleRestrictions').addEventListener('click',async event=>{await withBusy(event.currentTarget,openCloudRecycleRestrictions)});
+function openCloudRecycleRestrictionAdd(){openModal({title:'添加回收管制',body:'<div class="warehouse-recycle-add-form"><label class="switch warehouse-recycle-add-switch"><input id="cloudRecycleRestrictionEnabled" type="checkbox" checked><span></span>启用</label><label>物品代码<input id="cloudRecycleRestrictionCode" maxlength="80" pattern="[A-Za-z0-9_]+" placeholder="例如：Bandage_ES" required></label><label>物品名称<input id="cloudRecycleRestrictionName" maxlength="100" placeholder="用于表格展示"></label><label>原因<textarea id="cloudRecycleRestrictionReason" maxlength="500" required></textarea></label></div>',submitText:'添加管制',onSubmit:async()=>{const itemCode=$('#cloudRecycleRestrictionCode').value.trim(),itemName=$('#cloudRecycleRestrictionName').value.trim(),reason=$('#cloudRecycleRestrictionReason').value.trim(),enabled=$('#cloudRecycleRestrictionEnabled').checked;await api('/api/cloud-warehouse/recycle-restrictions',{method:'POST',body:JSON.stringify({itemCode,itemName,reason,enabled})});toast('已添加回收管制');await openCloudRecycleRestrictions()}});$('#modalBackdrop').classList.add('centered-modal')}
+$('#modalBackdrop').addEventListener('change',async event=>{if(event.target.id!=='cloudRecycleControlEnabled')return;const enabled=event.target.checked;await withBusy(event.target,async()=>{await api('/api/cloud-warehouse/recycle-restrictions/settings',{method:'PUT',body:JSON.stringify({enabled})});toast(enabled?'回收管制已启用':'回收管制已停用');await openCloudRecycleRestrictions()})});
+$('#modalBackdrop').addEventListener('change',async event=>{const input=event.target.closest('[data-cloud-recycle-enabled]');if(!input)return;const enabled=input.checked;await withBusy(input,async()=>{await api('/api/cloud-warehouse/recycle-restrictions/'+encodeURIComponent(input.dataset.cloudRecycleEnabled),{method:'PUT',body:JSON.stringify({enabled})});toast(enabled?'单项管制已启用':'单项管制已停用');await openCloudRecycleRestrictions()})});
+$('#modalBody').addEventListener('click',async event=>{const add=event.target.closest('#cloudRecycleRestrictionAdd');if(add){openCloudRecycleRestrictionAdd();return}const remove=event.target.closest('[data-cloud-recycle-remove]');if(!remove)return;await withBusy(remove,async()=>{await api('/api/cloud-warehouse/recycle-restrictions/'+encodeURIComponent(remove.dataset.cloudRecycleRemove),{method:'DELETE'});toast('已移除回收管制');await openCloudRecycleRestrictions()})});
+
+$('#cloudWarehouseSettingsForm').addEventListener('submit', async(event)=>{event.preventDefault();const form=event.currentTarget;await withBusy(event.submitter,async()=>{await api('/api/cloud-warehouse/settings',{method:'PUT',body:JSON.stringify({marketEnabled:form.elements.marketEnabled.checked,feeBps:Number(form.elements.feeBps.value),minimumFee:Number(form.elements.minimumFee.value),withdrawFee:Number(form.elements.withdrawFee.value),dailyBaseQuota:Number(form.elements.dailyBaseQuota.value),destroyRefundPercent:Number(form.elements.destroyRefundPercent.value),destroyFallbackRefund:Number(form.elements.destroyFallbackRefund.value)})});toast('云储设置已保存');await loadCloudWarehouseAdmin();});});
+
+$('#cloudInventoryQueryForm').addEventListener('submit',async(event)=>{event.preventDefault();state.cloudInventoryPage=1;state.cloudWarehouseSteamId=event.currentTarget.elements.steamId.value.trim();await withBusy(event.submitter,loadCloudWarehouseAdmin);});
+
+
+$('#modalBody').addEventListener('click',async(event)=>{const button=event.target.closest('[data-admin-cloud-cancel]');if(!button)return;if(!window.confirm('确认撤销该市场挂单？'))return;await withBusy(button,async()=>{await api(`/api/cloud-warehouse/listings/${button.dataset.adminCloudCancel}/cancel`,{method:'POST',body:'{}'});toast('挂单已撤销');closeModal();await loadCloudWarehouseAdmin();});});
+$('#cloudListingSearchForm').addEventListener('submit',event=>{event.preventDefault();state.cloudListingPage=1;renderCloudListingCards()});
+
+

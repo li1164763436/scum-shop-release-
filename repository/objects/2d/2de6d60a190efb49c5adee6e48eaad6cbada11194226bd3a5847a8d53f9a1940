@@ -1,0 +1,36 @@
+<div class="modal-backdrop" id="authModal" hidden>
+    <section class="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <button class="modal-close" type="button" data-modal-close aria-label="关闭">×</button>
+      <div class="modal-mark">身份<br>验证</div>
+      <div class="auth-tabs" id="authTabs"><button type="button" data-auth-tab="login" class="active">登录档案</button><button type="button" data-auth-tab="register">建立档案</button><button class="auth-only" type="button" data-auth-tab="change" hidden>修改密码</button></div>
+      <div class="auth-intro"><p class="overline"><span></span> 安全访问</p><h2 id="authTitle">幸存者登录</h2><p id="authDescription">输入档案凭据以访问账户与订单。</p></div>
+      <form id="loginForm" class="auth-form">
+        <label>用户名<input name="username" required autocomplete="username" maxlength="64" placeholder="输入用户名"></label>
+        <label>密码<input name="password" type="password" required autocomplete="current-password" minlength="8" maxlength="28" placeholder="8-28 位密码"></label>
+        <button class="button primary full" type="submit">进入补给站</button>
+        <button class="button ghost full" type="button" data-auth-tab="reset">忘记密码</button>
+      </form>
+      <form id="resetPasswordForm" class="auth-form" hidden>
+        <label>用户名<input name="username" required autocomplete="username" maxlength="32"></label>
+        <label>绑定 SteamID<input name="steamId" required inputmode="numeric" pattern="[0-9]{17}" minlength="17" maxlength="17"></label>
+        <div class="verification-row"><label>游戏内验证码<input name="verificationCode" required autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label><button class="button line" id="resetChallengeButton" type="button">请求验证码</button></div>
+        <label>新密码<input name="password" type="password" required autocomplete="new-password" minlength="8" maxlength="28" placeholder="8-28 位，含大小写字母和数字"></label>
+        <label>确认新密码<input name="confirmPassword" type="password" required autocomplete="new-password" minlength="8" maxlength="28"></label>
+        <button class="button primary full" type="submit">重置密码</button>
+      </form>
+      <form id="changePasswordForm" class="auth-form" hidden>
+        <label>原密码<input name="currentPassword" type="password" required autocomplete="current-password" minlength="8" maxlength="28"></label>
+        <label>新密码<input name="password" type="password" required autocomplete="new-password" minlength="8" maxlength="28" placeholder="8-28 位，含大小写字母和数字"></label>
+        <label>确认新密码<input name="confirmPassword" type="password" required autocomplete="new-password" minlength="8" maxlength="28"></label>
+        <button class="button primary full" type="submit">修改密码</button>
+      </form>
+      <form id="registerForm" class="auth-form" hidden>
+        <label>用户名<input name="username" required autocomplete="username" maxlength="64" placeholder="设置登录用户名"></label>
+        <label>SteamID<input name="steamId" required inputmode="numeric" pattern="[0-9]{17}" minlength="17" maxlength="17" placeholder="17 位 SteamID"></label>
+        <div class="form-columns"><label>密码<input name="password" type="password" required autocomplete="new-password" minlength="8" maxlength="28" pattern="(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9]).{8,28}" title="密码须为 8-28 位，并包含大写字母、小写字母和数字" placeholder="8-28 位，含大小写字母和数字"></label><label>确认密码<input name="confirmPassword" type="password" required autocomplete="new-password" minlength="8" maxlength="28" pattern="(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9]).{8,28}" title="密码须为 8-28 位，并包含大写字母、小写字母和数字" placeholder="再次输入相同密码"></label></div>
+        <div class="verification-row"><label>游戏内验证码<input name="verificationCode" required autocomplete="one-time-code" placeholder="收到后填写验证码"></label><button class="button line" id="challengeButton" type="button">请求验证码</button></div>
+        <p class="field-note">密码须为 8-28 位，并包含大写字母、小写字母和数字。验证码会发送至该 SteamID 对应的在线游戏角色。商城账号默认为普通玩家账号；管理员权限由运营人员另行设置。</p>
+        <button class="button primary full" type="submit">完成身份验证</button>
+      </form>
+    </section>
+  </div>

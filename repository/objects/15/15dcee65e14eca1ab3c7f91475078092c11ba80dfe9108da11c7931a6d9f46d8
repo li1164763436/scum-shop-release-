@@ -1,0 +1,126 @@
+import Joi from 'joi';
+import { LICENSE_PRODUCT_CODE } from './license-client.js';
+
+const DEFAULT_GATEWAY_URL = 'https://domains.scum0.cn/connect';
+
+const upstreamSchema = Joi.object({
+  success: Joi.boolean().valid(true).required(),
+  data: Joi.object({
+    handoffCode: Joi.string().pattern(/^[A-Za-z0-9_-]{43}$/).required(),
+    expiresAt: Joi.string().isoDate().required()
+  }).unknown(false).required()
+}).unknown(false).required();
+
+export class DomainAccessError extends Error {
+  constructor(message, status = 502, code = 'DOMAIN_ACCESS_FAILED', options) {
+    super(message, options);
+    this.name = 'DomainAccessError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function parseConfiguredUrl(value, name) {
+  let url;
+  try { url = new URL(String(value || '')); }
+  catch (error) { throw new DomainAccessError(`${name}配置无效`, 503, 'DOMAIN_ACCESS_CONFIG_INVALID', { cause: error }); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+    throw new DomainAccessError(`${name}必须使用 HTTPS`, 503, 'DOMAIN_ACCESS_CONFIG_INVALID');
+  }
+  return url;
+}
+
+function timeoutFrom(value) {
+  if (value === undefined || value === '') return 5000;
+  const timeoutMs = Number(value);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 500 || timeoutMs > 10000) {
+    throw new DomainAccessError('域名接入超时配置无效', 503, 'DOMAIN_ACCESS_CONFIG_INVALID');
+  }
+  return timeoutMs;
+}
+
+function allowedHosts(value, fallbackHosts = []) {
+  const configured = String(value || '').split(',').map((host) => host.trim().toLowerCase()).filter(Boolean);
+  const hosts = configured.length ? configured : fallbackHosts.map((host) => String(host).toLowerCase());
+  if (!hosts.length || hosts.some((host) => !/^(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?|\[[0-9a-f:]+\])(?::\d{1,5})?$/i.test(host))) {
+    throw new DomainAccessError('域名接入主机白名单配置无效', 503, 'DOMAIN_ACCESS_CONFIG_INVALID');
+  }
+  return new Set(hosts);
+}
+
+function assertAllowed(url, hosts) {
+  if (!hosts.has(url.host.toLowerCase())) throw new DomainAccessError('域名接入目标不在白名单中', 503, 'DOMAIN_ACCESS_CONFIG_INVALID');
+}
+
+export class DomainAccessService {
+  constructor({ licenseStore, fetchImpl = globalThis.fetch, env = process.env } = {}) {
+    this.licenseStore = licenseStore;
+    this.fetchImpl = fetchImpl;
+    this.env = env;
+  }
+
+  configuration(license) {
+    if (typeof this.fetchImpl !== 'function') throw new DomainAccessError('当前运行环境不支持域名接入', 503, 'DOMAIN_ACCESS_UNAVAILABLE');
+    let handoffValue = this.env.DOMAIN_ACCESS_HANDOFF_URL;
+    if (!handoffValue) {
+      try { handoffValue = new URL('/api/v1/client/gateway-handoff', license?.baseUrl).toString(); }
+      catch (error) { throw new DomainAccessError('授权中心 handoff 地址配置无效', 503, 'DOMAIN_ACCESS_CONFIG_INVALID', { cause: error }); }
+    }
+    const handoffUrl = parseConfiguredUrl(handoffValue, '授权中心 handoff 地址');
+    const gatewayUrl = parseConfiguredUrl(this.env.DOMAIN_ACCESS_GATEWAY_URL || DEFAULT_GATEWAY_URL, '域名接入中心地址');
+    const hosts = allowedHosts(this.env.DOMAIN_ACCESS_ALLOWED_HOSTS, [handoffUrl.host, gatewayUrl.host]);
+    assertAllowed(handoffUrl, hosts);
+    assertAllowed(gatewayUrl, hosts);
+    return { handoffUrl, gatewayUrl, timeoutMs: timeoutFrom(this.env.DOMAIN_ACCESS_TIMEOUT_MS) };
+  }
+
+  async handoff(shopAdminUsername) {
+    const username = String(shopAdminUsername || '').normalize('NFKC').trim();
+    if (!/^[\p{L}\p{N}_.-]{3,32}$/u.test(username)) throw new DomainAccessError('商城超级管理员用户名无效', 400, 'DOMAIN_ACCESS_ADMIN_INVALID');
+    if (!this.licenseStore?.read) throw new DomainAccessError('商城授权信息不可用', 503, 'DOMAIN_ACCESS_UNAVAILABLE');
+    let license;
+    try { license = await this.licenseStore.read(); }
+    catch (error) { throw new DomainAccessError('商城授权信息不可用', 503, 'DOMAIN_ACCESS_UNAVAILABLE', { cause: error }); }
+    const { handoffUrl, gatewayUrl, timeoutMs } = this.configuration(license);
+    const licenseId = String(license?.licenseId || '').trim();
+    const licenseToken = String(license?.licenseToken || '');
+    if (!licenseId || licenseId.length > 255 || !licenseToken || licenseToken.length > 8192) {
+      throw new DomainAccessError('当前授权不支持域名接入，请重新连接授权中心', 409, 'DOMAIN_ACCESS_LICENSE_INCOMPLETE');
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await this.fetchImpl(handoffUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ licenseToken, productCode: LICENSE_PRODUCT_CODE, shopAdminUsername: username }),
+        redirect: 'error',
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new DomainAccessError('域名接入中心请求超时', 504, 'DOMAIN_ACCESS_TIMEOUT', { cause: error });
+      throw new DomainAccessError('暂时无法连接域名接入中心', 502, 'DOMAIN_ACCESS_NETWORK_ERROR', { cause: error });
+    } finally { clearTimeout(timer); }
+
+    let body;
+    try { body = await response.json(); }
+    catch (error) { throw new DomainAccessError('域名接入中心响应无效', 502, 'DOMAIN_ACCESS_RESPONSE_INVALID', { cause: error }); }
+    if (!response.ok) throw new DomainAccessError('域名接入中心暂时无法签发访问凭证', 502, 'DOMAIN_ACCESS_UPSTREAM_REJECTED');
+
+    const { value, error } = upstreamSchema.validate(body, { abortEarly: true, convert: false });
+    if (error) throw new DomainAccessError('域名接入中心响应无效', 502, 'DOMAIN_ACCESS_RESPONSE_INVALID', { cause: error });
+    const expiresAt = Date.parse(value.data.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() || expiresAt > Date.now() + 10 * 60 * 1000) {
+      throw new DomainAccessError('域名接入凭证有效期无效', 502, 'DOMAIN_ACCESS_RESPONSE_INVALID');
+    }
+    return {
+      launchUrl: gatewayUrl.toString(),
+      code: value.data.handoffCode,
+      expiresAt: value.data.expiresAt
+    };
+  }
+}
+
+export const domainAccessInternals = { upstreamSchema, parseConfiguredUrl, timeoutFrom, allowedHosts };

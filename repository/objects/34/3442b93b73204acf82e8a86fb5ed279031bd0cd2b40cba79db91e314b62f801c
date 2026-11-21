@@ -1,0 +1,318 @@
+#page-domain-access .domain-access-refresh {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  font-size: 20px;
+}
+
+#page-domain-access .domain-access-refresh:disabled {
+  cursor: wait;
+  opacity: .55;
+}
+
+#page-domain-access .domain-access-summary {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 22px;
+  padding: 14px 18px;
+  border: 1px solid #dce3e7;
+  border-left: 3px solid #4a7061;
+  border-radius: 6px;
+  background: #f8faf9;
+}
+
+#page-domain-access .domain-access-summary-dot {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #c7d0d5;
+  background: #8b98a5;
+}
+
+#page-domain-access .domain-access-summary-dot.is-success {
+  background: #2f7a58;
+  box-shadow: 0 0 0 1px #9fc6b5;
+}
+
+#page-domain-access .domain-access-summary-dot.is-warning,
+#page-domain-access .domain-access-summary-dot.is-loading {
+  background: #b9832e;
+  box-shadow: 0 0 0 1px #dcc394;
+}
+
+#page-domain-access .domain-access-summary-dot.is-error {
+  background: #b33f4b;
+  box-shadow: 0 0 0 1px #deb1b6;
+}
+
+#page-domain-access .domain-access-summary strong {
+  display: block;
+  color: #27313f;
+  font-size: 14px;
+}
+
+#page-domain-access .domain-access-summary p {
+  margin: 2px 0 0;
+  color: #71808e;
+  font-size: 12px;
+}
+
+#page-domain-access .domain-access-summary time {
+  color: #7f8b96;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+#page-domain-access .domain-access-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: start;
+  gap: 22px;
+}
+
+#page-domain-access .domain-access-main {
+  min-width: 0;
+}
+
+#page-domain-access .domain-access-section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+#page-domain-access .domain-access-kicker {
+  color: #547063;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+#page-domain-access .domain-access-section-head h3,
+#page-domain-access .domain-access-action h3 {
+  margin: 4px 0 0;
+  color: #252f3d;
+  font-size: 17px;
+  letter-spacing: 0;
+}
+
+#page-domain-access .domain-access-count {
+  color: #697785;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+#page-domain-access .domain-access-grid {
+  display: grid;
+  gap: 12px;
+  min-height: 116px;
+}
+
+#page-domain-access .domain-access-record {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 15px;
+  min-height: 104px;
+  padding: 18px;
+  border-left: 3px solid #477565;
+}
+
+#page-domain-access .domain-access-record.is-loading {
+  border-left-color: #a9b3bb;
+}
+
+#page-domain-access .domain-access-record-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid #d4dfda;
+  border-radius: 6px;
+  color: #365f51;
+  background: #eef4f1;
+  font-size: 21px;
+  font-weight: 700;
+}
+
+#page-domain-access .domain-access-record-body {
+  min-width: 0;
+}
+
+#page-domain-access .domain-access-record-body > span {
+  display: block;
+  margin-bottom: 4px;
+  color: #7a8793;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+#page-domain-access .domain-access-record-body > a,
+#page-domain-access .domain-access-record-body > strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #243348;
+  font-size: 16px;
+  font-weight: 750;
+  line-height: 1.35;
+  text-decoration: none;
+}
+
+#page-domain-access .domain-access-record-body > a:hover {
+  color: #28654f;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+#page-domain-access .domain-access-record-body p {
+  margin: 5px 0 0;
+  color: #74818d;
+  font-size: 12px;
+}
+
+#page-domain-access .domain-access-badge {
+  min-width: 64px;
+  padding: 5px 8px;
+  border: 1px solid #d4dce1;
+  border-radius: 5px;
+  color: #5e6b77;
+  background: #f5f7f8;
+  font-size: 11px;
+  font-weight: 750;
+  text-align: center;
+  white-space: nowrap;
+}
+
+#page-domain-access .domain-access-badge.is-success {
+  border-color: #b9d8c9;
+  color: #266648;
+  background: #edf7f1;
+}
+
+#page-domain-access .domain-access-badge.is-warning {
+  border-color: #e4ceaa;
+  color: #845b1d;
+  background: #fff8eb;
+}
+
+#page-domain-access .domain-access-badge.is-error {
+  border-color: #e0b9be;
+  color: #9d3440;
+  background: #fff1f2;
+}
+
+#page-domain-access .domain-access-empty {
+  min-height: 116px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  border: 1px dashed #cfd8dd;
+  border-radius: 6px;
+  color: #667481;
+  background: #fafbfb;
+  text-align: center;
+}
+
+#page-domain-access .domain-access-empty strong {
+  color: #374351;
+  font-size: 14px;
+}
+
+#page-domain-access .domain-access-empty p {
+  margin: 5px 0 0;
+  font-size: 12px;
+}
+
+#page-domain-access .domain-access-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-height: 246px;
+  padding: 24px;
+  border-top: 3px solid #33495d;
+}
+
+#page-domain-access .domain-access-mark {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 20px;
+  border-radius: 6px;
+  color: #fff;
+  background: #33495d;
+  font-size: 21px;
+  font-weight: 700;
+}
+
+#page-domain-access .domain-access-action p {
+  min-height: 40px;
+  margin: 8px 0 18px;
+  color: #6f7d8a;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+#page-domain-access .domain-access-action p.is-error {
+  color: #a53743;
+}
+
+#page-domain-access .domain-access-action p.is-success {
+  color: #2b6e50;
+}
+
+#page-domain-access .domain-access-action p.is-busy {
+  color: #825c24;
+}
+
+#page-domain-access .domain-access-action .btn {
+  width: 100%;
+}
+
+#page-domain-access .domain-access-action small {
+  align-self: center;
+  margin-top: 10px;
+  color: #8a959f;
+  font-size: 11px;
+}
+
+@media (max-width: 860px) {
+  #page-domain-access .domain-access-layout {
+    grid-template-columns: 1fr;
+  }
+
+  #page-domain-access .domain-access-action {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  #page-domain-access .domain-access-summary {
+    grid-template-columns: 12px minmax(0, 1fr);
+  }
+
+  #page-domain-access .domain-access-summary time {
+    grid-column: 2;
+  }
+
+  #page-domain-access .domain-access-record {
+    grid-template-columns: 38px minmax(0, 1fr);
+    padding: 15px;
+  }
+
+  #page-domain-access .domain-access-record-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  #page-domain-access .domain-access-badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+}

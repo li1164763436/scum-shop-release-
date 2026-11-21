@@ -1,0 +1,11 @@
+<section class="page page-announcements" id="page-announcements">
+  <div class="page-toolbar"><div><p class="breadcrumb-inline">履约 / 定时公告</p><h2>公告调度</h2><p>按执行时间、星期和可选间隔向游戏内发送公告。</p></div></div>
+  <form id="announcementsForm" class="config-stack">
+    <section class="card form-card">
+      <div class="card-head"><div><h3>公告列表</h3><p>调度巡查间隔仅控制后台检查到期公告的频率，不是公告发送间隔。</p></div><div class="announcement-head-actions"><label class="switch"><input name="enabled" type="checkbox"><span></span>启用公告</label><button class="btn primary" id="addAnnouncement" type="button">＋ 添加公告</button></div></div>
+      <div class="announcement-poll-setting"><label>调度巡查间隔（毫秒）<input name="pollIntervalMs" type="number" min="1000" max="3600000" required><span class="field-hint">建议保持 5000；数值越小，任务到点后被发现得越快。</span></label></div>
+      <div class="announcement-table-wrap"><table><thead><tr><th>公告名称</th><th>公告代码/内容</th><th>执行时间</th><th>执行星期</th><th>间隔</th><th>状态</th><th>操作</th></tr></thead><tbody id="announcementRows"><tr><td colspan="7" class="empty loading">正在加载公告...</td></tr></tbody></table></div>
+      <div class="form-actions"><button class="btn primary" type="submit">保存公告调度</button></div>
+    </section>
+  </form>
+</section>

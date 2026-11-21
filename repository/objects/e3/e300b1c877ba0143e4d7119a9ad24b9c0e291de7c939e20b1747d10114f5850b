@@ -1,0 +1,26 @@
+const ACTION_COMMANDS = Object.freeze({ kick: 'Kick', ban: 'Ban', temp_ban: 'Ban', unban: 'Unban' });
+const STEAM_ID_PATTERN = /^7656119\d{10}$/;
+const FORBIDDEN_PATTERN = /[\s#;"'`\\\r\n\0]/;
+
+export function validateSteamId(value) {
+  const steamId = String(value ?? '');
+  if (!STEAM_ID_PATTERN.test(steamId) || FORBIDDEN_PATTERN.test(steamId)) throw new Error('SteamID 无效');
+  return steamId;
+}
+
+export function buildPlayerAdminCommand(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('管理命令参数无效');
+  const keys = Object.keys(input);
+  if (keys.some((key) => !['action', 'steamId'].includes(key))) throw new Error('管理命令包含未知字段');
+  if (keys.length !== 2 || !Object.hasOwn(input, 'action') || !Object.hasOwn(input, 'steamId')) throw new Error('管理命令参数不完整');
+  const action = String(input.action || '');
+  const command = ACTION_COMMANDS[action];
+  if (!command) throw new Error('玩家管理动作无效');
+  return `#${command} ${validateSteamId(input.steamId)}`;
+}
+
+export function capabilityForAction(action) {
+  return ({ kick: 'kick', ban: 'banPermanent', temp_ban: 'banTemporary', unban: 'unban' })[action] || null;
+}
+
+export { ACTION_COMMANDS, STEAM_ID_PATTERN };

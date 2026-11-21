@@ -1,0 +1,14 @@
+import axios from 'axios';
+import { withRetry } from '../utils/retry.js';
+
+export function joinUrl(baseUrl, pathname) {
+  return `${String(baseUrl).replace(/\/+$/, '')}/${String(pathname).replace(/^\/+/, '')}`;
+}
+
+export async function requestWithPolicy(config, reconnect) {
+  return withRetry(() => axios({
+    ...config,
+    timeout: config.timeout,
+    validateStatus: (status) => status >= 200 && status < 300
+  }), reconnect);
+}

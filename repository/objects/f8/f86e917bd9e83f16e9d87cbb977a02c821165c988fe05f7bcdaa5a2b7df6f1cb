@@ -1,0 +1,76 @@
+const EMPTY = '--';
+
+const definitions = [
+  ['玩家资料', ['玩家昵称','SteamID','会员等级','会员称号','会员到期','触发词后的内容']],
+  ['货币资产', ['商城币名','商城币','游戏美金','金条','声望点','复活币']],
+  ['在线与战绩', ['游戏时间','在线人数','今日在线秒','今日在线时间','累计在线秒','累计在线时间','击杀数','死亡数','KD']],
+  ['位置与任务', ['玩家坐标','玩家附近10米','玩家位置增高500Z','附近10米并增高500Z','领地旗坐标','最近领地旗','领地旗附近','预估在线奖励','回收进度']],
+  ['领取次数', ['成功后剩余总次数','成功后剩余每日次数']]
+];
+
+export const notificationParameterGroups = definitions.map(([name, parameters]) => ({ name, parameters }));
+
+function duration(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor(value % 3600 / 60);
+  const remaining = Math.floor(value % 60);
+  return [hours, minutes, remaining].map((part) => String(part).padStart(2, '0')).join(':');
+}
+
+function dateText(value) {
+  if (!value) return EMPTY;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+}
+
+async function safeQuery(db, sql, params = []) {
+  try { return await db.query(sql, params); } catch { return []; }
+}
+
+export async function resolveNotificationParameters({ db, steamId, text = '', context = {} }) {
+  const requested = new Set([...String(text).matchAll(/\[([^\]\r\n]+)\]/g)].map((match) => match[1]));
+  const values = Object.fromEntries(definitions.flatMap(([, items]) => items).map((name) => [name, EMPTY]));
+  if (!requested.size) return values;
+  values.SteamID = String(steamId || EMPTY);
+  values.商城币名 = '商城币';
+  values['触发词后的内容'] = context.triggerContent || EMPTY;
+  values.游戏时间 = '--:--:--';
+
+  const accountNames = ['玩家昵称','商城币','游戏美金','金条','会员等级','会员称号','会员到期'];
+  if (accountNames.some((name) => requested.has(name))) {
+    const rows = await safeQuery(db, `SELECT COALESCE(NULLIF(a.\`游戏名称\`,''),NULLIF(a.\`登录账号\`,''),a.\`SteamID\`) AS playerName,a.\`商城币余额\` AS balance,a.\`游戏币\` AS gameMoney,a.\`游戏金条\` AS gameGold,CASE WHEN COALESCE(a.\`会员等级\`,0)>0 AND (a.\`会员到期时间\` IS NULL OR a.\`会员到期时间\`>CURRENT_TIMESTAMP(3)) THEN a.\`会员等级\` ELSE 0 END AS memberLevel,a.\`会员到期时间\` AS memberExpiresAt,s.title AS memberTitle FROM \`商城用户\` a LEFT JOIN membership_strategies s ON s.level=CASE WHEN COALESCE(a.\`会员等级\`,0)>0 AND (a.\`会员到期时间\` IS NULL OR a.\`会员到期时间\`>CURRENT_TIMESTAMP(3)) THEN a.\`会员等级\` ELSE 0 END WHERE a.\`SteamID\`=? LIMIT 1`, [steamId]);
+    const row = rows[0] || {};
+    values.玩家昵称 = row.playerName || EMPTY;
+    values.商城币 = row.balance ?? EMPTY;
+    values.游戏美金 = row.gameMoney ?? EMPTY;
+    values.金条 = row.gameGold ?? EMPTY;
+    values.会员等级 = row.memberLevel ?? EMPTY;
+    values.会员称号 = row.memberTitle || EMPTY;
+    values.会员到期 = dateText(row.memberExpiresAt);
+  }
+  if (requested.has('在线人数')) {
+    const rows = await safeQuery(db, "SELECT online_count AS onlineCount FROM server_monitor_samples WHERE status='ok' AND player_query_ok=1 ORDER BY sampled_at DESC,id DESC LIMIT 1");
+    values.在线人数 = rows[0]?.onlineCount ?? EMPTY;
+  }
+  if (['今日在线秒','今日在线时间'].some((name) => requested.has(name))) {
+    const rows = await safeQuery(db, 'SELECT COALESCE(SUM(credited_seconds),0) AS seconds FROM player_online_accruals WHERE steam_id=? AND created_at>=UTC_DATE()', [steamId]);
+    values.今日在线秒 = rows[0]?.seconds ?? 0;
+    values.今日在线时间 = duration(values.今日在线秒);
+  }
+  if (['累计在线秒','累计在线时间'].some((name) => requested.has(name))) {
+    const rows = await safeQuery(db, 'SELECT total_seconds AS seconds FROM player_online_totals WHERE steam_id=? LIMIT 1', [steamId]);
+    values.累计在线秒 = rows[0]?.seconds ?? 0;
+    values.累计在线时间 = duration(values.累计在线秒);
+  }
+  if (['击杀数','死亡数','KD'].some((name) => requested.has(name))) {
+    const rows = await safeQuery(db, "SELECT SUM(killer_steam_id=? AND event_type='kill') AS kills,SUM(victim_steam_id=?) AS deaths FROM scum_kill_events WHERE killer_steam_id=? OR victim_steam_id=?", [steamId, steamId, steamId, steamId]);
+    const kills = Number(rows[0]?.kills || 0), deaths = Number(rows[0]?.deaths || 0);
+    values.击杀数 = kills; values.死亡数 = deaths; values.KD = deaths ? (kills / deaths).toFixed(2) : kills.toFixed(2);
+  }
+  return values;
+}
+
+export function replaceNotificationParameters(text, values) {
+  return String(text).replace(/\[([^\]\r\n]+)\]/g, (placeholder, name) => Object.hasOwn(values, name) ? String(values[name]) : placeholder);
+}

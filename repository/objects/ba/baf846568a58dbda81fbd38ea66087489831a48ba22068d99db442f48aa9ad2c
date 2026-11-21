@@ -1,0 +1,238 @@
+import crypto from 'node:crypto';
+import fsSync, { createReadStream } from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { ServiceError } from './commerce-service.js';
+import {
+  downloadVerifiedFile,
+  fetchJsonFromMirrors,
+  requireUpdateUrl,
+  splitUrlList,
+  updateTransportOptions,
+  verifyReleaseManifestSignature
+} from './update-transport.js';
+
+const PLUGIN_NAMES = ['version.dll', 'SCUMRCON.dll', 'SCUMRCONAdapter.dll'];
+
+async function fileSha256(file) {
+  const hash = crypto.createHash('sha256');
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+function requireDirectory(value) {
+  const directory = String(value || '').trim();
+  if (!directory || directory.includes('\0')) throw new ServiceError('请先填写有效的 SCUM 游戏主目录', 400, 'INVALID_GAME_DIRECTORY');
+  return path.resolve(directory);
+}
+
+function targetDirectory(value) {
+  const directory = requireDirectory(value);
+  const parts = directory.split(path.sep).map((item) => item.toLowerCase());
+  return parts.at(-1) === 'win64' && parts.at(-2) === 'binaries' ? directory : path.join(directory, 'Binaries', 'Win64');
+}
+
+export class RconPluginService {
+  constructor({ root, store, sourceRoot, cacheRoot, manifestUrls, transportOptions } = {}) {
+    this.store = store;
+    this.manifestUrls = splitUrlList(manifestUrls || process.env.VERSION_UPDATE_MANIFEST_URLS || process.env.VERSION_UPDATE_MANIFEST_URL || [
+      'https://update.scum0.cn/release-v1/version.json',
+      'https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/version.json'
+    ]);
+    this.manifestUrl = this.manifestUrls[0] || '';
+    this.transport = { ...updateTransportOptions(), ...transportOptions };
+    this.validateUpdateUrl = value => requireUpdateUrl(value, {
+      allowHttp: this.transport.allowHttp,
+      allowedHosts: this.transport.allowedHosts,
+      name: '插件更新地址'
+    });
+    const bundledRoot = path.join(root, 'resources', 'scum-rcon');
+    this.sourceRoot = sourceRoot || (fsSync.existsSync(bundledRoot) ? bundledRoot : path.join(root, 'src', 'resources', 'scum-rcon'));
+    this.cacheRoot = cacheRoot || path.join(root, 'data', 'updates', 'repository', 'objects');
+  }
+
+  async resolveTarget(input) {
+    const config = await this.store.read();
+    return targetDirectory(input || config.ggcon?.serverDirectory);
+  }
+
+  async fileInfo(file) {
+    try {
+      const stat = await fs.stat(file);
+      if (!stat.isFile()) return { exists: false, size: 0, modifiedAt: null, sha256: null };
+      return { exists: true, size: stat.size, modifiedAt: stat.mtime.toISOString(), sha256: await fileSha256(file) };
+    } catch (error) {
+      if (['ENOENT', 'ENOTDIR'].includes(error.code)) return { exists: false, size: 0, modifiedAt: null, sha256: null };
+      throw error;
+    }
+  }
+
+  cacheFile(sha256) {
+    return path.join(this.cacheRoot, sha256.slice(0, 2), sha256);
+  }
+
+  async inspect(input) {
+    const directory = await this.resolveTarget(input);
+    let manifest;
+    let manifestSource;
+    try {
+      const result = await fetchJsonFromMirrors(splitUrlList([this.manifestUrl, ...this.manifestUrls]), {
+        label: '插件版本清单读取',
+        retries: this.transport.retries,
+        retryDelayMs: this.transport.retryDelayMs,
+        timeoutMs: Math.min(this.transport.requestTimeoutMs, 30000),
+        validateUrl: this.validateUpdateUrl
+      });
+      manifest = result.value;
+      manifestSource = result.url;
+    } catch (error) {
+      throw new ServiceError(error.message || '插件版本清单读取失败', 502, 'PLUGIN_MANIFEST_FAILED');
+    }
+    const remoteFiles = manifest.plugins?.files;
+    if (!Array.isArray(remoteFiles)) throw new ServiceError('版本更新清单尚未发布插件明细，无法比较插件版本', 409, 'PLUGIN_MANIFEST_MISSING');
+    const contractEntry = Array.isArray(manifest.files) ? manifest.files.find(file => file.path === '.scum-release-manifest.json') : null;
+    if (!contractEntry || !/^[a-f0-9]{64}$/i.test(contractEntry.sha256) || !Number.isSafeInteger(contractEntry.size) || contractEntry.size <= 0 || contractEntry.size > 64 * 1024 * 1024) {
+      throw new ServiceError('插件发布缺少签名完整性清单', 502, 'PLUGIN_SIGNATURE_INVALID');
+    }
+    const contractUrls = splitUrlList([contractEntry.url, ...(Array.isArray(contractEntry.urls) ? contractEntry.urls : [])]).map(value => new URL(value, manifestSource).href);
+    const contractPath = this.cacheFile(contractEntry.sha256.toLowerCase());
+    try {
+      await downloadVerifiedFile({
+        urls: contractUrls,
+        destination: contractPath,
+        expectedSize: contractEntry.size,
+        expectedSha256: contractEntry.sha256.toLowerCase(),
+        label: '插件发布完整性清单',
+        retries: this.transport.retries,
+        retryDelayMs: this.transport.retryDelayMs,
+        timeoutMs: this.transport.requestTimeoutMs,
+        validateUrl: this.validateUpdateUrl
+      });
+      const contract = JSON.parse(await fs.readFile(contractPath, 'utf8'));
+      verifyReleaseManifestSignature(contract, { publicKeys: this.transport.publicKeys, requireSignature: true });
+      if (contract.version !== manifest.version || Number(contract.releaseRevision || 0) !== Number(manifest.releaseRevision || 0)) throw new Error('发布身份不匹配');
+      const contractFiles = new Map(contract.files.map(file => [file.path, file]));
+      for (const remote of remoteFiles) {
+        const entry = contractFiles.get(remote.path);
+        if (!entry || entry.sha256 !== remote.sha256 || entry.size !== remote.size) throw new Error(`插件文件不在签名契约中：${remote.name || remote.path}`);
+      }
+    } catch (error) {
+      throw new ServiceError(`插件发布签名验证失败：${error.message}`, 502, 'PLUGIN_SIGNATURE_INVALID');
+    }
+    const files = [];
+    for (const name of PLUGIN_NAMES) {
+      const remote = remoteFiles.find(file => file.name === name);
+      if (!remote || !/^[a-f0-9]{64}$/i.test(remote.sha256) || !Number.isSafeInteger(remote.size) || remote.size <= 0 || remote.size > 64 * 1024 * 1024) throw new ServiceError('插件版本清单无效', 502, 'PLUGIN_MANIFEST_INVALID');
+      const urls = splitUrlList([remote.url, ...(Array.isArray(remote.urls) ? remote.urls : [])]).map(value => {
+        try { return new URL(value, manifestSource).href; } catch { throw new ServiceError('插件下载地址无效', 502, 'PLUGIN_MANIFEST_INVALID'); }
+      });
+      if (!urls.length) throw new ServiceError('插件下载地址无效', 502, 'PLUGIN_MANIFEST_INVALID');
+      for (const url of urls) {
+        try { this.validateUpdateUrl(url); } catch { throw new ServiceError('插件下载地址无效', 502, 'PLUGIN_MANIFEST_INVALID'); }
+      }
+      const expectedSha256 = remote.sha256.toLowerCase();
+      const applicationEntry = Array.isArray(manifest.files) ? manifest.files.find(file => file.path === `resources/scum-rcon/${name}`) : null;
+      if (!applicationEntry || applicationEntry.sha256?.toLowerCase() !== expectedSha256 || applicationEntry.size !== remote.size) throw new ServiceError('插件未使用统一内容仓库', 502, 'PLUGIN_REPOSITORY_MISMATCH');
+      const applicationUrls = splitUrlList([applicationEntry.url, ...(Array.isArray(applicationEntry.urls) ? applicationEntry.urls : [])]).map(value => new URL(value, manifestSource).href);
+      const [installed, cached] = await Promise.all([
+        this.fileInfo(path.join(directory, name)),
+        this.fileInfo(this.cacheFile(expectedSha256))
+      ]);
+      files.push({
+        name,
+        installed: installed.exists,
+        size: installed.size,
+        modifiedAt: installed.modifiedAt,
+        sha256: installed.sha256,
+        available: true,
+        url: urls[0],
+        urls: splitUrlList([...urls, ...applicationUrls]),
+        downloaded: Boolean(cached.exists && cached.size === remote.size && expectedSha256 && cached.sha256 === expectedSha256),
+        matches: Boolean(installed.exists && expectedSha256 && installed.sha256 === expectedSha256),
+        expectedSize: remote.size,
+        expectedSha256
+      });
+    }
+    return { directory, files, version: manifest.plugins.version || manifest.version };
+  }
+
+  async download(input) {
+    const before = await this.inspect(input);
+    const directory = before.directory;
+    await fs.mkdir(this.cacheRoot, { recursive: true });
+    for (const file of before.files) {
+      if (file.downloaded) continue;
+      const cached = this.cacheFile(file.expectedSha256);
+      await fs.mkdir(path.dirname(cached), { recursive: true });
+      if (file.matches) {
+        const temporary = `${cached}.${process.pid}.${Date.now()}.tmp`;
+        try {
+          await fs.copyFile(path.join(directory, file.name), temporary);
+          await fs.rename(temporary, cached).catch(async error => {
+            const existing = await this.fileInfo(cached);
+            if (existing.size !== file.expectedSize || existing.sha256 !== file.expectedSha256) throw error;
+          });
+        } finally {
+          await fs.rm(temporary, { force: true }).catch(() => {});
+        }
+      } else {
+        await this.downloadFile(file, cached);
+      }
+      const verified = await this.fileInfo(cached);
+      if (verified.size !== file.expectedSize || verified.sha256 !== file.expectedSha256) throw new ServiceError(`插件校验失败：${file.name}`, 502, 'PLUGIN_HASH_MISMATCH');
+    }
+    return this.inspect(directory);
+  }
+
+  async downloadFile(file, destination = this.cacheFile(file.expectedSha256)) {
+    try {
+      return await downloadVerifiedFile({
+        urls: file.urls || [file.url],
+        destination,
+        expectedSize: file.expectedSize,
+        expectedSha256: file.expectedSha256,
+        label: `插件 ${file.name}`,
+        retries: this.transport.retries,
+        retryDelayMs: this.transport.retryDelayMs,
+        timeoutMs: this.transport.requestTimeoutMs,
+        validateUrl: this.validateUpdateUrl
+      });
+    } catch (error) {
+      throw new ServiceError(error.message || `插件下载失败：${file.name}`, 502, 'PLUGIN_DOWNLOAD_FAILED');
+    }
+  }
+
+  async replace(input) {
+    const before = await this.inspect(input);
+    const directory = before.directory;
+    const invalid = before.files.find((file) => !file.downloaded);
+    if (invalid) throw new ServiceError(`请先下载插件文件：${invalid.name}`, 409, 'PLUGIN_NOT_DOWNLOADED');
+    await fs.mkdir(directory, { recursive: true });
+    const backupSuffix = new Date().toISOString().replace(/[-:.TZ]/g, '');
+    const replacements = [];
+    try {
+      for (const name of PLUGIN_NAMES) {
+        const target = path.join(directory, name);
+        const backup = `${target}.bak.${backupSuffix}`;
+        const existed = (await this.fileInfo(target)).exists;
+        if (existed) await fs.copyFile(target, backup);
+        replacements.push({ target, backup, existed });
+        const file = before.files.find(item => item.name === name);
+        const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+        try {
+          await fs.copyFile(this.cacheFile(file.expectedSha256), temporary);
+          await fs.rename(temporary, target);
+        } finally {
+          await fs.rm(temporary, { force: true }).catch(() => {});
+        }
+      }
+    } catch (error) {
+      for (const { target, backup, existed } of replacements.reverse()) {
+        if (existed && (await this.fileInfo(backup)).exists) await fs.copyFile(backup, target).catch(() => {});
+        else if (!existed) await fs.rm(target, { force: true }).catch(() => {});
+      }
+      throw error;
+    }
+    return this.inspect(directory);
+  }
+}

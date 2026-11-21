@@ -1,0 +1,49 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const category = process.argv[2] || '全部分类';
+const folders = { '单手武器': 'scum8-one-handed', '双手武器': 'scum8-two-handed', '刺刀': 'scum8-bayonets', '发射器': 'scum8-launchers', '导轨': 'scum8-rails', '弓': 'scum8-bows', '弹匣': 'scum8-magazines', '弹药': 'scum8-ammunition', '手枪': 'scum8-handguns', '手榴弹': 'scum8-grenades', '机械瞄具': 'scum8-sights', '步枪': 'scum8-rifles', '消音器': 'scum8-suppressors', '瞄准镜': 'scum8-scopes' };
+if (category !== '全部分类' && !folders[category]) throw new Error('不支持的抓取分类');
+const source = 'https://scumcode.scum8.cn';
+const items = new Map();
+const failures = [];
+async function request(url) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
+  return response;
+}
+for (let page = 1; ; page++) {
+  const query = new URLSearchParams({ page: String(page), pageSize: '100' });
+  if (category !== '全部分类') query.set('category', category);
+  const data = await (await request(`${source}/api/public/items?${query}`)).json();
+  if (!Array.isArray(data.items)) throw new Error('物品接口返回格式错误');
+  for (const item of data.items) if (category === '全部分类' || item.category === category) items.set(item.code, item);
+  if (page * data.pageSize >= data.total || !data.items.length) break;
+}
+await fs.mkdir(path.join(output, 'images'), { recursive: true });
+const records = [];
+for (const item of items.values()) {
+  let imagePath = '';
+  try {
+    if (!item.imageUrl) throw new Error('缺少图片地址');
+    const url = new URL(item.imageUrl);
+    if (url.origin !== source) throw new Error('图片地址来源不匹配');
+    const response = await request(url);
+    const mime = (response.headers.get('content-type') || '').split(';')[0];
+    const extensions = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+    const extension = extensions[mime];
+    if (!extension) throw new Error(`不支持的图片格式：${mime}`);
+    imagePath = `images/${String(records.length + 1).padStart(4, '0')}.${extension}`;
+    await fs.writeFile(path.join(output, imagePath), Buffer.from(await response.arrayBuffer()));
+  } catch (error) { failures.push({ code: item.code, message: error.message }); imagePath = ''; }
+  records.push({ name: item.name, englishName: item.englishName, itemId: item.code, fulfillmentCodes: item.code, parentCategory: '武器弹药', category: item.category, imagePath, sourceImageUrl: item.imageUrl, sourceUrl: item.detailUrl });
+}
+const result = { source, attribution: '数据来源：scumcode.scum8.cn', fetchedAt: new Date().toISOString(), count: records.length, imageCount: records.filter((record) => record.imagePath).length, failures, items: records };
+await fs.writeFile(path.join(output, 'items.json'), JSON.stringify(result, null, 2));
+const columns = ['name', 'englishName', 'itemId', 'fulfillmentCodes', 'parentCategory', 'category', 'imagePath', 'sourceImageUrl', 'sourceUrl'];
+const quote = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`;
+await fs.writeFile(path.join(output, 'items.csv'), '\uFEFF' + [columns.map(quote).join(','), ...records.map((record) => columns.map((column) => quote(record[column])).join(','))].join('\r\n'));
+console.log(JSON.stringify({ output, count: result.count, imageCount: result.imageCount, failures }, null, 2));
+if (failures.length) process.exitCode = 1;

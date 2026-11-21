@@ -1,0 +1,22 @@
+import path from 'node:path';
+import mysql from 'mysql2/promise';
+import { ConfigStore } from '../src/services/config-store.js';
+
+const root = path.resolve(import.meta.dirname, '..');
+const config = (await new ConfigStore(path.join(root, 'data', 'config.json')).read()).mysql;
+const db = await mysql.createConnection({ ...config, charset:'utf8mb4' });
+const insuranceTables = ['载具档案','载具保险销售策略','载具保险','载具保险购买记录','载具保险索赔记录','载具操作审计'];
+try {
+  await db.beginTransaction();
+  await db.query("UPDATE `数据表目录` SET category_name='保险管理',purpose=CONCAT('保险管理：',chinese_name) WHERE physical_name IN (?)", [insuranceTables]);
+  await db.query("UPDATE `数据表目录` SET category_name='历史兼容数据',purpose=CONCAT('历史兼容数据：',chinese_name) WHERE physical_name='玩家传送同意请求'");
+  const [rows] = await db.query('SELECT physical_name AS physicalName,category_name AS categoryName FROM `数据表目录` WHERE physical_name IN (?) ORDER BY physical_name', [[...insuranceTables, '玩家传送同意请求']]);
+  if (rows.length !== insuranceTables.length + 1) throw new Error(`目录记录不完整：${rows.length}`);
+  await db.commit();
+  console.log(JSON.stringify(rows));
+} catch (error) {
+  await db.rollback();
+  throw error;
+} finally {
+  await db.end();
+}

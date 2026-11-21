@@ -1,0 +1,92 @@
+import { sendMessageToOnlinePlayers } from './announcement-worker.js';
+import { safeMessage } from '../utils/redactor.js';
+
+function errorMessage(error) { return safeMessage(error, '维护公告发送失败').slice(0, 500); }
+
+export class MaintenanceWorker {
+  constructor({ db, store, service, clients, logger, clock = () => Date.now(), setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout }) {
+    this.db = db; this.store = store; this.service = service; this.clients = clients; this.logger = logger; this.clock = clock; this.setTimer = setTimer; this.clearTimer = clearTimer;
+    this.timer = null; this.activeTick = null; this.enabled = false; this.running = false; this.stopped = true; this.pollIntervalMs = null;
+    this.lastError = null; this.lastCompletedAt = null; this.ticks = 0; this.announcementsClaimed = 0; this.announcementsSent = 0; this.announcementsFailed = 0; this.recoveryEvaluations = 0;
+  }
+  status() { return { enabled: this.enabled, running: this.running, polling: Boolean(this.timer), pollIntervalMs: this.pollIntervalMs, lastCompletedAt: this.lastCompletedAt, lastError: this.lastError, ticks: this.ticks, announcementsClaimed: this.announcementsClaimed, announcementsSent: this.announcementsSent, announcementsFailed: this.announcementsFailed, recoveryEvaluations: this.recoveryEvaluations }; }
+  async start() { this.stopped = false; return this.reconfigure(); }
+  async reconfigure() {
+    const config = await this.store.read();
+    this.enabled = Boolean(config.maintenance.enabled); this.pollIntervalMs = config.maintenance.pollIntervalMs;
+    this.clearSchedule();
+    if (!this.enabled) { this.stopped = true; await this.drain(); return this.status(); }
+    this.stopped = false; void this.tick(); return this.status();
+  }
+  clearSchedule() { if (this.timer) this.clearTimer(this.timer); this.timer = null; }
+  schedule() {
+    if (!this.enabled || this.stopped || this.timer) return;
+    this.timer = this.setTimer(() => { this.timer = null; void this.tick(); }, this.pollIntervalMs); this.timer?.unref?.();
+  }
+  stop() { this.stopped = true; this.clearSchedule(); }
+  async drain() { await this.activeTick; }
+  async stopAndDrain() { this.stop(); await this.drain(); }
+  async tick() {
+    if (this.running || !this.enabled || this.stopped) return false;
+    this.activeTick = this.performTick();
+    try { return await this.activeTick; } finally { this.activeTick = null; this.schedule(); }
+  }
+  async performTick() {
+    this.running = true; this.ticks += 1;
+    try {
+      const config = await this.store.read();
+      const current = await this.service.current();
+      const active = current.active;
+      if (!active) return true;
+      if (['scheduled', 'countdown'].includes(active.state)) {
+        const scheduledAt = new Date(active.scheduledAt).getTime();
+        const remainingMs = scheduledAt - this.clock();
+        for (const mark of this.dueMarks(config.maintenance.countdownMinutes, current.runs, remainingMs)) {
+          await this.sendRun(active.id, mark, new Date(scheduledAt - mark * 60000), config.maintenance.countdownMessage.replaceAll('{minutes}', String(mark)));
+          if (active.state === 'scheduled') await this.service.markCountdown(active.id);
+        }
+        if (remainingMs <= 0) {
+          await this.service.beginMaintenance(active.id, 'system');
+          await this.sendRun(active.id, 0, new Date(scheduledAt), config.maintenance.maintenanceMessage);
+        }
+      } else if (active.state === 'awaiting_recovery') {
+        this.recoveryEvaluations += 1;
+        const before = active.state;
+        const evaluated = await this.service.evaluateRecovery(active.id, config.maintenance.recoverySuccessThreshold, config.monitoring.pollIntervalMs);
+        if (before !== evaluated.state && evaluated.state === 'awaiting_manual_confirmation') await this.sendRun(active.id, -1, new Date(this.clock()), config.maintenance.recoveryMessage);
+      }
+      this.lastError = null; return true;
+    } catch (error) {
+      this.lastError = errorMessage(error); this.logger.error('维护 Worker 执行失败', { component: 'maintenance', error: this.lastError }); return false;
+    } finally { this.lastCompletedAt = new Date(this.clock()).toISOString(); this.running = false; }
+  }
+  dueMarks(marks, runs, remainingMs) {
+    const sent = new Set(runs.map((run) => run.minuteMark));
+    return marks.filter((mark) => remainingMs <= mark * 60000 && !sent.has(mark)).sort((a, b) => b - a);
+  }
+  async claimRun(maintenanceId, minuteMark, scheduledFor) {
+    try {
+      const result = await this.db.query("INSERT INTO maintenance_announcement_runs (maintenance_id,minute_mark,scheduled_for,status) VALUES (?,?,?,'claimed')", [maintenanceId, minuteMark, scheduledFor]);
+      this.announcementsClaimed += 1; return result.insertId;
+    } catch (error) { if (error?.code === 'ER_DUP_ENTRY' || error?.errno === 1062) return null; throw error; }
+  }
+  async sendRun(maintenanceId, minuteMark, scheduledFor, message) {
+    const runId = await this.claimRun(maintenanceId, minuteMark, scheduledFor);
+    if (!runId) return null;
+    try {
+      const config = await this.store.read();
+      const stats = await sendMessageToOnlinePlayers({ clients: this.clients, config, logger: this.logger, message, context: { component: 'maintenance', maintenanceId, minuteMark } });
+      const status = stats.failed === 0 ? 'success' : stats.sent > 0 ? 'partial' : 'failed';
+      await this.db.query('UPDATE maintenance_announcement_runs SET status=?,sent_count=?,failed_count=?,last_error=?,completed_at=CURRENT_TIMESTAMP(3) WHERE id=?', [status, stats.sent, stats.failed, stats.lastError, runId]);
+      this.announcementsSent += stats.sent; this.announcementsFailed += stats.failed; return stats;
+    } catch (error) {
+      const clean = errorMessage(error);
+      await this.db.query("UPDATE maintenance_announcement_runs SET status='failed',failed_count=1,last_error=?,completed_at=CURRENT_TIMESTAMP(3) WHERE id=?", [clean, runId]);
+      this.announcementsFailed += 1; return { sent: 0, failed: 1, total: 0, lastError: clean };
+    }
+  }
+  async sendRecovery(maintenanceId) {
+    const config = await this.store.read();
+    return sendMessageToOnlinePlayers({ clients: this.clients, config, logger: this.logger, message: config.maintenance.recoveryMessage, context: { component: 'maintenance', maintenanceId, event: 'recovered' } });
+  }
+}

@@ -1,0 +1,114 @@
+import crypto from 'node:crypto';
+import { ServiceError } from './commerce-service.js';
+import { buildPlayerAdminCommand, capabilityForAction, validateSteamId } from './player-admin-command-policy.js';
+import { summarizeCapabilityResponse } from './player-admin-capability-service.js';
+import { safeMessage } from '../utils/redactor.js';
+
+const ACTIONS = new Set(['kick', 'ban', 'temp_ban', 'unban']);
+const STATUSES = new Set(['pending', 'dispatching', 'succeeded', 'failed', 'uncertain_delivery', 'awaiting_manual_review', 'awaiting_expiry', 'unban_due']);
+const VERIFY_STATES = new Set(['awaiting_manual_review', 'uncertain_delivery']);
+const FAILURE_PATTERN = /unknown\s+command|command\s+not\s+found|unauthorized|not\s+authorized|access\s+denied|player\s+not\s+found|authentication\s+failed|\berror\b|failed|执行失败|命令失败|未授权|没有权限/i;
+const SUCCESS_PATTERNS = {
+  kick: /(?:command\s+executed|successfully\s+kicked|player\s+(?:was\s+)?kicked|kick\s+successful)/i,
+  ban: /(?:command\s+executed|successfully\s+banned|player\s+(?:was\s+)?banned|ban\s+successful)/i,
+  temp_ban: /(?:command\s+executed|successfully\s+banned|player\s+(?:was\s+)?banned|ban\s+successful)/i,
+  unban: /(?:command\s+executed|successfully\s+unbanned|player\s+(?:was\s+)?unbanned|unban\s+successful)/i
+};
+const CONTROL_PATTERN = /[\u0000-\u001f\u007f]/;
+
+function requiredText(value, name, min, max) { const text = String(value ?? '').trim(); if (text.length < min || text.length > max) throw new ServiceError(`${name}长度必须为 ${min}-${max} 字符`, 400, 'INVALID_INPUT'); return text; }
+function requestKeyOf(value) { return requiredText(value, 'Idempotency-Key', 1, 100); }
+function adminOf(admin) { const id = Number(admin?.id); if (!Number.isSafeInteger(id) || id < 1 || !admin?.username) throw new ServiceError('管理员身份无效', 401, 'UNAUTHORIZED'); return { id, username: String(admin.username).slice(0, 100) }; }
+function actionId(value) { const id = Number(value); if (!Number.isSafeInteger(id) || id < 1) throw new ServiceError('操作编号无效', 400, 'INVALID_ID'); return id; }
+function fingerprint(payload) { return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex'); }
+function actionValue(row) { if (!row) return null; return { id: Number(row.id), actionType: row.actionType, targetSteamId: row.targetSteamId, targetName: row.targetName || null, adminUserId: row.adminUserId === null ? null : Number(row.adminUserId), adminUsername: row.adminUsername, reason: row.reason, durationMinutes: row.durationMinutes === null ? null : Number(row.durationMinutes), status: row.status, capabilityProbeId: Number(row.capabilityProbeId), parentActionId: row.parentActionId ? Number(row.parentActionId) : null, expiresAt: row.expiresAt || null, dispatchedAt: row.dispatchedAt || null, completedAt: row.completedAt || null, resultCode: row.resultCode || null, errorCode: row.errorCode || null, responseSummary: row.responseSummary || null, createdAt: row.createdAt, updatedAt: row.updatedAt }; }
+const FIELDS = 'id,action_type AS actionType,target_steam_id AS targetSteamId,target_name_snapshot AS targetName,admin_user_id AS adminUserId,admin_username_snapshot AS adminUsername,reason,duration_minutes AS durationMinutes,status,capability_probe_id AS capabilityProbeId,parent_action_id AS parentActionId,temporary_ban_expires_at AS expiresAt,dispatched_at AS dispatchedAt,completed_at AS completedAt,result_code AS resultCode,error_code AS errorCode,response_summary AS responseSummary,created_at AS createdAt,updated_at AS updatedAt';
+
+export class PlayerAdminService {
+  constructor({ db, clients, capabilityService, clock = () => Date.now() }) { this.db = db; this.clients = clients; this.capabilityService = capabilityService; this.clock = clock; }
+
+  async capabilities() { return this.capabilityService.latest(); }
+  async probeCapabilities() { return this.capabilityService.probe(); }
+  async execute(input, requestKey, admin) { return this.create(input, requestKey, admin); }
+  async get(id, query = this.db, lock = false) { const rows = await query.query(`SELECT ${FIELDS} FROM player_admin_actions WHERE id=?${lock ? ' FOR UPDATE' : ''}`, [actionId(id)]); if (!rows[0]) throw new ServiceError('玩家管理操作不存在', 404, 'NOT_FOUND'); return actionValue(rows[0]); }
+  async list({ page = 1, limit = 50, steamId, action, status } = {}) {
+    page = Number(page); limit = Number(limit); if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new ServiceError('分页参数无效', 400, 'INVALID_PAGINATION');
+    const where = []; const params = [];
+    if (steamId) { where.push('target_steam_id=?'); params.push(validateSteamId(steamId)); }
+    if (action) { if (!ACTIONS.has(action)) throw new ServiceError('动作筛选无效', 400, 'INVALID_ACTION'); where.push('action_type=?'); params.push(action); }
+    if (status) { if (!STATUSES.has(status)) throw new ServiceError('状态筛选无效', 400, 'INVALID_STATUS'); where.push('status=?'); params.push(status); }
+    const clause = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+    const total = await this.db.query(`SELECT COUNT(*) AS count FROM player_admin_actions${clause}`, params);
+    const items = (await this.db.query(`SELECT ${FIELDS} FROM player_admin_actions${clause} ORDER BY id DESC LIMIT ${limit} OFFSET ${(page - 1) * limit}`, params)).map(actionValue);
+    return { items, page, limit, total: Number(total[0]?.count || 0) };
+  }
+
+  validateCreate(input, requestKey, admin) {
+    const allowed = new Set(['action', 'steamId', 'targetName', 'reason', 'durationMinutes', 'confirmAction', 'confirmSteamId']);
+    if (Object.keys(input || {}).some((key) => !allowed.has(key))) throw new ServiceError('玩家管理请求包含未知字段', 400, 'INVALID_INPUT');
+    const actor = adminOf(admin); const action = String(input?.action || ''); if (!ACTIONS.has(action)) throw new ServiceError('玩家管理动作无效', 400, 'INVALID_ACTION');
+    let steamId; try { steamId = validateSteamId(input?.steamId); } catch { throw new ServiceError('SteamID 无效', 400, 'INVALID_STEAM_ID'); }
+    const reason = requiredText(input?.reason, '原因', 2, 500); if (CONTROL_PATTERN.test(reason)) throw new ServiceError('原因不能包含控制字符', 400, 'INVALID_INPUT');
+    if (input?.confirmAction !== true || String(input?.confirmSteamId || '') !== steamId) throw new ServiceError('二次确认不匹配', 400, 'CONFIRMATION_MISMATCH');
+    let durationMinutes = null; if (action === 'temp_ban') { durationMinutes = Number(input?.durationMinutes); if (!Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 43200) throw new ServiceError('临时封禁分钟数必须为 1-43200 的整数', 400, 'INVALID_DURATION'); }
+    else if (input?.durationMinutes !== undefined && input.durationMinutes !== null && input.durationMinutes !== '') throw new ServiceError('该动作不接受封禁时长', 400, 'INVALID_DURATION');
+    return { actor, action, steamId, targetName: String(input?.targetName || '').trim().slice(0, 255) || null, reason, durationMinutes, confirmation: `${action.toUpperCase()} ${steamId}`, requestKey: requestKeyOf(requestKey) };
+  }
+
+  async create(input, requestKey, admin) {
+    const data = this.validateCreate(input, requestKey, admin);
+    const hash = fingerprint({ adminId: data.actor.id, action: data.action, steamId: data.steamId, reason: data.reason, durationMinutes: data.durationMinutes });
+    const existing = await this.db.query('SELECT id,request_fingerprint AS requestFingerprint,admin_user_id AS adminUserId FROM player_admin_actions WHERE request_key=?', [data.requestKey]);
+    if (existing[0]) {
+      if (existing[0].requestFingerprint !== hash || Number(existing[0].adminUserId) !== data.actor.id) throw new ServiceError('Idempotency-Key 已被其他请求使用', 409, 'IDEMPOTENCY_CONFLICT');
+      return { ...(await this.get(existing[0].id)), idempotent: true };
+    }
+    if (data.action === 'kick') {
+      let players; try { const client = await this.clients(); players = await client.ggcon.players(); } catch (error) { throw new ServiceError(`无法确认玩家在线状态：${safeMessage(error)}`, 409, 'PLAYER_QUERY_FAILED'); }
+      const player = players.find((item) => item.steamId === data.steamId); if (!player) throw new ServiceError('目标玩家当前不在线', 409, 'PLAYER_OFFLINE'); data.targetName ||= player.characterName || player.steamName || null;
+    }
+    const probe = await this.capabilityService.latest(); const capability = capabilityForAction(data.action);
+    if (!probe.available || probe.stale || !probe.capabilities[capability]) throw new ServiceError('当前服务器未通过新鲜只读探测确认该管理能力', 409, 'CAPABILITY_UNAVAILABLE');
+    const expiresAt = data.action === 'temp_ban' ? new Date(this.clock() + data.durationMinutes * 60000) : null;
+    let id;
+    try { id = await this.db.transaction(async (tx) => { const again = await tx.query('SELECT id,request_fingerprint AS requestFingerprint,admin_user_id AS adminUserId FROM player_admin_actions WHERE request_key=? FOR UPDATE', [data.requestKey]); if (again[0]) { if (again[0].requestFingerprint !== hash || Number(again[0].adminUserId) !== data.actor.id) throw new ServiceError('Idempotency-Key 已被其他请求使用', 409, 'IDEMPOTENCY_CONFLICT'); return Number(again[0].id); } const result = await tx.query("INSERT INTO player_admin_actions (action_type,target_steam_id,target_name_snapshot,admin_user_id,admin_username_snapshot,reason,duration_minutes,confirmation,request_key,request_fingerprint,status,renderer_version,capability_probe_id,temporary_ban_expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,'pending','v1',?,?)", [data.action, data.steamId, data.targetName, data.actor.id, data.actor.username, data.reason, data.durationMinutes, data.confirmation, data.requestKey, hash, probe.id, expiresAt]); return result.insertId; }); }
+    catch (error) { if (error?.code === 'ER_DUP_ENTRY' || error?.errno === 1062) throw new ServiceError('Idempotency-Key 冲突', 409, 'IDEMPOTENCY_CONFLICT'); throw error; }
+    return { ...(await this.dispatch(id)), idempotent: false };
+  }
+
+  async dispatch(id) {
+    const action = await this.get(id); const command = buildPlayerAdminCommand({ action: action.actionType, steamId: action.targetSteamId });
+    await this.db.transaction(async (tx) => { const locked = await this.get(id, tx, true); if (locked.status !== 'pending') throw new ServiceError('操作状态不允许投递', 409, 'INVALID_STATE'); await tx.query("UPDATE player_admin_actions SET status='dispatching',delivery_token=UUID(),dispatched_at=CURRENT_TIMESTAMP(3) WHERE id=? AND status='pending'", [id]); });
+    try {
+      const { config, ggcon } = await this.clients();
+      if (config?.ggcon?.mode !== 'source-tcp') throw Object.assign(new Error('当前连接模式不支持玩家管理'), { code: 'PROBE_UNSUPPORTED_MODE' });
+      const response = await ggcon.command(command, { retry: false }); const summary = summarizeCapabilityResponse(response?.response ?? response);
+      let status = 'awaiting_manual_review'; let code = 'UNKNOWN_RESPONSE'; let errorCode = null;
+      if (!summary) { status = 'uncertain_delivery'; code = 'EMPTY_RESPONSE'; errorCode = 'DELIVERY_UNCERTAIN'; }
+      else if (FAILURE_PATTERN.test(summary)) { status = 'failed'; code = 'RCON_COMMAND_REJECTED'; errorCode = code; }
+      else if (SUCCESS_PATTERNS[action.actionType].test(summary)) { status = action.actionType === 'temp_ban' ? 'awaiting_expiry' : 'succeeded'; code = 'EXPLICIT_SUCCESS'; }
+      await this.finishDispatch(id, status, code, errorCode, summary);
+    } catch (error) {
+      const uncertain = error?.uncertainDelivery === true;
+      await this.finishDispatch(id, uncertain ? 'uncertain_delivery' : 'failed', uncertain ? 'DELIVERY_UNCERTAIN' : 'FAILED_BEFORE_WRITE', String(error?.code || (uncertain ? 'DELIVERY_UNCERTAIN' : 'DISPATCH_FAILED')).slice(0, 64), safeMessage(error).slice(0, 500));
+    }
+    return this.get(id);
+  }
+
+  async finishDispatch(id, status, resultCode, errorCode, summary) {
+    const complete = ['succeeded', 'failed'].includes(status); const uncertain = status === 'uncertain_delivery';
+    await this.db.transaction(async (tx) => { await tx.query(`UPDATE player_admin_actions SET status=?,result_code=?,error_code=?,response_summary=?,completed_at=${complete ? 'CURRENT_TIMESTAMP(3)' : 'NULL'} WHERE id=? AND status='dispatching'`, [status, resultCode, errorCode, summary || null, id]); await tx.query("INSERT INTO player_admin_action_attempts (action_id,attempt_no,event_type,status,uncertain_delivery,response_summary,error_summary) VALUES (?,1,'dispatch',?,?,?,?)", [id, status, uncertain ? 1 : 0, errorCode ? null : (summary || resultCode).slice(0, 500), errorCode ? (summary || errorCode).slice(0, 500) : null]); });
+  }
+
+  async verify(id, input, requestKey, admin) {
+    const actor = adminOf(admin); const result = String(input?.result || ''); if (!['succeeded', 'failed'].includes(result)) throw new ServiceError('人工核查结果无效', 400, 'INVALID_RESULT');
+    const note = requiredText(input?.note, '核查说明', 2, 500); if (CONTROL_PATTERN.test(note)) throw new ServiceError('核查说明不能包含控制字符', 400, 'INVALID_INPUT'); if (input?.confirmResult !== result || Number(input?.confirmActionId) !== actionId(id)) throw new ServiceError('人工核查二次确认不匹配', 400, 'CONFIRMATION_MISMATCH'); const key = requestKeyOf(requestKey);
+    return this.db.transaction(async (tx) => {
+      const prior = await tx.query('SELECT action_id AS actionId,result FROM player_admin_verifications WHERE request_key=? FOR UPDATE', [key]); if (prior[0]) { if (Number(prior[0].actionId) !== actionId(id) || prior[0].result !== result) throw new ServiceError('Idempotency-Key 已被其他核查使用', 409, 'IDEMPOTENCY_CONFLICT'); return { ...(await this.get(id, tx)), idempotent: true }; }
+      const current = await this.get(id, tx, true); if (!VERIFY_STATES.has(current.status)) throw new ServiceError('当前状态不允许人工核查', 409, 'INVALID_STATE'); const next = result === 'succeeded' && current.actionType === 'temp_ban' ? 'awaiting_expiry' : result;
+      await tx.query('INSERT INTO player_admin_verifications (action_id,admin_user_id,admin_username_snapshot,result,note,request_key) VALUES (?,?,?,?,?,?)', [current.id, actor.id, actor.username, result, note, key]); await tx.query('UPDATE player_admin_actions SET status=?,result_code=?,error_code=?,completed_at=? WHERE id=?', [next, 'MANUALLY_VERIFIED', result === 'failed' ? 'MANUALLY_REJECTED' : null, result === 'failed' || next === 'succeeded' ? new Date(this.clock()) : null, current.id]); await tx.query("INSERT INTO player_admin_action_attempts (action_id,attempt_no,event_type,status,uncertain_delivery,response_summary,actor_user_id,actor_username_snapshot) SELECT ?,COALESCE(MAX(attempt_no),0)+1,'manual_verification',?,0,?,?,? FROM player_admin_action_attempts WHERE action_id=?", [current.id, result, note, actor.id, actor.username, current.id]); return { ...(await this.get(id, tx)), idempotent: false };
+    });
+  }
+}
+
+export { actionValue as playerAdminActionValue, FAILURE_PATTERN, SUCCESS_PATTERNS };

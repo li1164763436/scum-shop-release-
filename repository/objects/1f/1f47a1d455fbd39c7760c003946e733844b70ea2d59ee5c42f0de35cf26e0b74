@@ -1,0 +1,61 @@
+import { buildMessageCommand } from './command-policy.js';
+import { ServiceError } from './commerce-service.js';
+import { formatGameMessage } from './game-message.js';
+
+function id(value) { const number = Number(value); if (!Number.isSafeInteger(number) || number < 1) throw new ServiceError('规则 ID 无效'); return number; }
+function text(value, name, max) { const result = String(value || '').trim(); if (!result || result.length > max || /[\r\n\u0000-\u001f\u007f]/.test(result)) throw new ServiceError(`${name}长度必须为 1-${max} 且不能包含控制字符`); return result; }
+function natural(value, name, max = Number.MAX_SAFE_INTEGER) { const number = Number(value ?? 0); if (!Number.isSafeInteger(number) || number < 0 || number > max) throw new ServiceError(`${name}必须是 0-${max} 的整数`); return number; }
+function row(value) { return { id: Number(value.id), triggerText: value.triggerText, responseText: value.responseText, totalLimit: Number(value.totalLimit || 0), dailyLimit: Number(value.dailyLimit || 0), minMemberLevel: Number(value.minMemberLevel || 0), price: Number(value.price || 0), todayExecutions: Number(value.todayExecutions || 0), totalExecutions: Number(value.totalExecutions || 0), succeededExecutions: Number(value.succeededExecutions || 0), failedExecutions: Number(value.failedExecutions || 0), lastExecutedAt: value.lastExecutedAt || null, enabled: Boolean(value.enabled), createdAt: value.createdAt || null, updatedAt: value.updatedAt || null }; }
+function safeError(error) { return String(error?.message || '回复失败').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 500); }
+
+export class ChatAutoReplyService {
+  constructor({ db, store, clients, logger }) { this.db = db; this.store = store; this.clients = clients; this.logger = logger; }
+  async list() { return (await this.db.query("SELECT r.id,r.trigger_text AS triggerText,r.response_text AS responseText,r.total_limit AS totalLimit,r.daily_limit AS dailyLimit,r.min_member_level AS minMemberLevel,r.price,r.enabled,r.created_at AS createdAt,r.updated_at AS updatedAt,COUNT(a.id) AS totalExecutions,SUM(DATE(DATE_ADD(a.processed_at,INTERVAL 8 HOUR))=DATE(DATE_ADD(UTC_TIMESTAMP(),INTERVAL 8 HOUR))) AS todayExecutions,SUM(a.result='succeeded') AS succeededExecutions,SUM(a.result='failed') AS failedExecutions,MAX(a.processed_at) AS lastExecutedAt FROM chat_auto_reply_rules r LEFT JOIN chat_auto_reply_audits a ON a.rule_id=r.id GROUP BY r.id ORDER BY r.id")).map(row); }
+  values(input) { return { triggerText: text(input?.triggerText, '触发词', 50), responseText: text(input?.responseText, '回复词', 500), totalLimit: natural(input?.totalLimit, '总次数', 1000000000), dailyLimit: natural(input?.dailyLimit, '每日次数', 1000000000), minMemberLevel: natural(input?.minMemberLevel, '等级要求', 100), price: natural(input?.price, '问答价格'), enabled: input?.enabled !== false }; }
+  async save(input, currentId = null) {
+    const value = this.values(input), config = await this.store.read(), prefix = String(config.chatLogs?.claimPrefix || '@');
+    const triggerBody = value.triggerText.startsWith(prefix) ? value.triggerText.slice(prefix.length).trim() : value.triggerText;
+    if (!triggerBody) throw new ServiceError('触发词不能为空');
+    value.triggerText = prefix + triggerBody;
+    try { buildMessageCommand({ steamId: '76561198000000000', message: formatGameMessage(config, value.responseText) }, config.commandPolicy); } catch (error) { throw new ServiceError(`回复词不符合消息安全规则：${error.message}`); }
+    const params = [value.triggerText, value.responseText, value.totalLimit, value.dailyLimit, value.minMemberLevel, value.price, value.enabled];
+    if (currentId === null) {
+      try { const result = await this.db.query('INSERT INTO chat_auto_reply_rules (trigger_text,response_text,total_limit,daily_limit,min_member_level,price,enabled) VALUES (?,?,?,?,?,?,?)', params); return { id: Number(result.insertId), ...value }; }
+      catch (error) { if (error?.code === 'ER_DUP_ENTRY' || error?.errno === 1062) throw new ServiceError('触发词已存在', 409, 'DUPLICATE_TRIGGER'); throw error; }
+    }
+    const ruleId = id(currentId), result = await this.db.query('UPDATE chat_auto_reply_rules SET trigger_text=?,response_text=?,total_limit=?,daily_limit=?,min_member_level=?,price=?,enabled=? WHERE id=?', [...params, ruleId]);
+    if (!result.affectedRows) throw new ServiceError('回复规则不存在', 404, 'NOT_FOUND');
+    return { id: ruleId, ...value };
+  }
+  async delete(value) { const result = await this.db.query('DELETE FROM chat_auto_reply_rules WHERE id=?', [id(value)]); if (!result.affectedRows) throw new ServiceError('回复规则不存在', 404, 'NOT_FOUND'); }
+  async prepare(event) {
+    return this.db.transaction(async (tx) => {
+      const rules = await tx.query('SELECT id,response_text AS responseText,total_limit AS totalLimit,daily_limit AS dailyLimit,min_member_level AS minMemberLevel,price FROM chat_auto_reply_rules WHERE id=? AND enabled=1 FOR UPDATE', [event.ruleId]);
+      const rule = rules[0]; if (!rule) throw new ServiceError('问答规则已停用', 409, 'RULE_DISABLED');
+      const counts = (await tx.query("SELECT COUNT(*) AS totalCount,SUM(DATE(processed_at)=UTC_DATE()) AS dailyCount FROM chat_auto_reply_audits a JOIN scum_chat_events e ON e.id=a.event_id WHERE a.rule_id=? AND e.steam_id=? AND a.result='succeeded'", [rule.id, event.steamId]))[0] || {};
+      if (Number(rule.totalLimit) > 0 && Number(counts.totalCount || 0) >= Number(rule.totalLimit)) throw new ServiceError('该问答已达到总次数限制', 409, 'TOTAL_LIMIT_REACHED');
+      if (Number(rule.dailyLimit) > 0 && Number(counts.dailyCount || 0) >= Number(rule.dailyLimit)) throw new ServiceError('今日问答次数已用完', 409, 'DAILY_LIMIT_REACHED');
+      const account = (await tx.query('SELECT \`商城币余额\` AS balance,\`会员等级\` AS memberLevel,\`会员到期时间\` AS memberExpiresAt FROM \`商城用户\` WHERE \`SteamID\`=? FOR UPDATE', [event.steamId]))[0];
+      if (!account && (Number(rule.price || 0) > 0 || Number(rule.minMemberLevel || 0) > 0)) throw new ServiceError('玩家商城账户不存在', 404, 'ACCOUNT_NOT_FOUND');
+      const activeLevel = Number(account?.memberLevel || 0) > 0 && (!account.memberExpiresAt || new Date(account.memberExpiresAt) > new Date()) ? Number(account.memberLevel) : 0;
+      if (activeLevel < Number(rule.minMemberLevel || 0)) throw new ServiceError(`会员等级需达到 ${rule.minMemberLevel}`, 403, 'MEMBER_LEVEL_REQUIRED');
+      const price = Number(rule.price || 0), balance = Number(account?.balance || 0);
+      if (balance < price) throw new ServiceError('商城币余额不足', 409, 'INSUFFICIENT_BALANCE');
+      if (price > 0) await tx.query('UPDATE \`商城用户\` SET \`商城币余额\`=? WHERE \`SteamID\`=?', [balance - price, event.steamId]);
+      return { ...rule, price, balanceAfter: balance - price };
+    });
+  }
+  async refund(event, prepared) {
+    if (!prepared.price) return;
+    await this.db.transaction(async (tx) => { const account = (await tx.query('SELECT \`商城币余额\` AS balance FROM \`商城用户\` WHERE \`SteamID\`=? FOR UPDATE', [event.steamId]))[0]; const balance = Number(account?.balance || 0) + prepared.price; await tx.query('UPDATE \`商城用户\` SET \`商城币余额\`=? WHERE \`SteamID\`=?', [balance, event.steamId]); await tx.query("INSERT INTO coin_ledger (steam_id,amount,balance_after,type,reference_type,reference_id,note) VALUES (?,?,?,'chat_reply_refund','chat_auto_reply',?,'问答回复失败退款')", [event.steamId, prepared.price, balance, String(event.id)]); });
+  }
+  async auditFailure(event, error) { try { await this.db.query("INSERT INTO chat_auto_reply_audits (event_id,rule_id,result,response_text,error_message,processed_at) VALUES (?,?,'failed',?,?,CURRENT_TIMESTAMP(3))", [event.id, event.ruleId, event.responseText || '', safeError(error)]); } catch (auditError) { if (auditError?.code !== 'ER_DUP_ENTRY' && auditError?.errno !== 1062) throw auditError; } }
+  async processPending(limit = 200) {
+    const config = await this.store.read(); if (config.chatLogs?.autoReplyEnabled !== true) return { processed: 0, succeeded: 0, failed: 0 };
+    const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 200);
+    const events = await this.db.query(`SELECT e.id,e.steam_id AS steamId,e.message_text AS messageText,r.id AS ruleId,r.response_text AS responseText FROM scum_chat_events e JOIN chat_auto_reply_rules r ON r.enabled=1 AND r.trigger_text=e.message_text LEFT JOIN chat_auto_reply_audits a ON a.event_id=e.id WHERE e.channel IN ('Global','Local','Squad','Admin') AND a.id IS NULL ORDER BY e.id LIMIT ${safeLimit}`);
+    let succeeded = 0, failed = 0;
+    for (const event of events) { let prepared = null; try { prepared = await this.prepare(event); const { ggcon } = await this.clients(); const command = buildMessageCommand({ global: true, message: formatGameMessage(config, prepared.responseText) }, config.commandPolicy); await ggcon.command(command, { retry: false, priority: 'normal' }); await this.db.transaction(async (tx) => { await tx.query("INSERT INTO chat_auto_reply_audits (event_id,rule_id,result,response_text,processed_at) VALUES (?,?,'succeeded',?,CURRENT_TIMESTAMP(3))", [event.id, event.ruleId, prepared.responseText]); if (prepared.price > 0) await tx.query("INSERT INTO coin_ledger (steam_id,amount,balance_after,type,reference_type,reference_id,note) VALUES (?,?,?,'chat_reply_purchase','chat_auto_reply',?,'游戏内问答消费')", [event.steamId, -prepared.price, prepared.balanceAfter, String(event.id)]); }); succeeded++; } catch (error) { if (prepared) await this.refund(event, prepared); await this.auditFailure(event, error); failed++; } }
+    return { processed: events.length, succeeded, failed };
+  }
+}

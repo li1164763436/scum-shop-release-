@@ -1,0 +1,40 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import mysql from 'mysql2/promise';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const config = JSON.parse((await fs.readFile(path.join(root, 'data', 'config.json'), 'utf8')).replace(/^﻿/, '')).mysql;
+const sourceURL = 'https://scumcode.scum8.cn/assets/admin-commands.json?v=20261008-commands-r2';
+const response = await fetch(sourceURL, { headers: { 'User-Agent': 'SCUM-Shop-Command-Catalog/1.0' } });
+if (!response.ok) throw new Error('命令目录下载失败：HTTP ' + response.status);
+const payload = await response.json();
+const commands = Array.isArray(payload.commands) ? payload.commands : [];
+if (!commands.length || Number(payload.count || commands.length) !== commands.length) throw new Error('命令目录数量校验失败');
+const connection = await mysql.createConnection({ ...config, charset: 'utf8mb4', timezone: 'Z', decimalNumbers: true });
+let locked = false;
+try {
+  const [lockRows] = await connection.query('SELECT GET_LOCK(?,10) AS acquired', ['shop-import-game-admin-commands']);
+  if (Number(lockRows[0]?.acquired) !== 1) throw new Error('已有命令目录导入正在执行');
+  locked = true;
+  await connection.query('CREATE TABLE IF NOT EXISTS game_admin_commands (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,verb VARCHAR(100) NOT NULL,command_text VARCHAR(255) NOT NULL,subcategory VARCHAR(64) NOT NULL,description_zh TEXT NULL,description_en TEXT NULL,usage_text TEXT NOT NULL,usage_zh TEXT NULL,executor_level VARCHAR(64) NULL,execution_side VARCHAR(32) NULL,scope_json JSON NOT NULL,arguments_json JSON NOT NULL,examples_json JSON NOT NULL,notes_zh_json JSON NOT NULL,audit_json JSON NOT NULL,raw_json JSON NOT NULL,source_url VARCHAR(500) NOT NULL,source_build VARCHAR(255) NULL,source_audited_at VARCHAR(64) NULL,imported_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),UNIQUE KEY uk_game_admin_command_verb (verb),INDEX idx_game_admin_command_category (subcategory,verb),INDEX idx_game_admin_command_level (executor_level,verb)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+  await connection.beginTransaction();
+  await connection.query('DELETE FROM game_admin_commands');
+  const sql = 'INSERT INTO game_admin_commands (verb,command_text,subcategory,description_zh,description_en,usage_text,usage_zh,executor_level,execution_side,scope_json,arguments_json,examples_json,notes_zh_json,audit_json,raw_json,source_url,source_build,source_audited_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
+  for (const item of commands) {
+    const verb = String(item.verb || '').trim(), usage = String(item.usage || '').trim();
+    if (!verb || !usage.startsWith('#')) throw new Error('命令记录无效：' + (verb || '未知'));
+    await connection.execute(sql, [verb, '#' + verb, String(item.subcategory || 'other'), item.descriptionZh || null, item.descriptionEn || null, usage, item.usageZh || null, item.executorLevel || null, item.executionSide || null, JSON.stringify(item.scope || []), JSON.stringify(item.arguments || []), JSON.stringify(item.examples || []), JSON.stringify(item.notesZh || []), JSON.stringify(item.audit || {}), JSON.stringify(item), sourceURL, item.audit?.sourceBuild || payload.sourceBuild || null, payload.auditedAt || null]);
+  }
+  const [counts] = await connection.query('SELECT COUNT(*) AS total,COUNT(DISTINCT verb) AS uniqueVerbs,COUNT(DISTINCT subcategory) AS categories FROM game_admin_commands');
+  const result = counts[0];
+  if (Number(result.total) !== commands.length || Number(result.uniqueVerbs) !== commands.length) throw new Error('数据库命令数量核验失败');
+  await connection.commit();
+  console.log(JSON.stringify({ source: sourceURL, sourceCount: commands.length, databaseCount: Number(result.total), uniqueVerbs: Number(result.uniqueVerbs), categories: Number(result.categories), sourceBuild: payload.sourceBuild || null, auditedAt: payload.auditedAt || null }, null, 2));
+} catch (error) {
+  await connection.rollback().catch(() => {});
+  throw error;
+} finally {
+  if (locked) await connection.query('SELECT RELEASE_LOCK(?)', ['shop-import-game-admin-commands']).catch(() => {});
+  await connection.end();
+}

@@ -1,0 +1,6 @@
+<section class="page" id="page-orders">
+          <div class="page-toolbar"><div><h2>订单管理</h2><p>查看商城币订单及自动发货结果。</p></div><button class="btn primary" data-action="new-order">＋ 手工下单</button></div>
+          <section class="card"><div class="filter-row"><div class="search-box">⌕<input id="orderSearch" placeholder="搜索订单号或玩家"></div><select id="orderStatusFilter"><option value="">全部状态</option><option value="pending">待处理</option><option value="processing">发货中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="manual_review">人工核查</option></select><button class="btn secondary" id="reloadOrders">查询</button></div><div class="table-wrap"><table><thead><tr><th>订单号</th><th>玩家</th><th>商品</th><th>实付商城币</th><th>状态</th><th>创建时间</th></tr></thead><tbody id="orderRows"><tr><td colspan="6" class="empty loading">正在加载订单...</td></tr></tbody></table></div></section>
+        </section>
+
+        

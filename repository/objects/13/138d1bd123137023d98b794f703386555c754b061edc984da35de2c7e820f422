@@ -1,0 +1,21 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import mysql from 'mysql2/promise';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const config = JSON.parse((await fs.readFile(path.join(root, 'data', 'config.json'), 'utf8')).replace(/^\uFEFF/, '')).mysql;
+const connection = await mysql.createConnection({ ...config, charset: 'utf8mb4', timezone: 'Z', decimalNumbers: true });
+try {
+  const [rows] = await connection.query('SELECT verb,command_text AS commandText,subcategory,description_zh AS descriptionZh,description_en AS descriptionEn,usage_text AS usageText,usage_zh AS usageZh,executor_level AS executorLevel,execution_side AS executionSide,scope_json AS scopeData,arguments_json AS argumentsData,examples_json AS examplesData,notes_zh_json AS notesZhData,audit_json AS auditData,source_build AS sourceBuild,source_audited_at AS sourceAuditedAt,imported_at AS importedAt,updated_at AS updatedAt FROM game_admin_commands ORDER BY subcategory,verb');
+  const parse = (value, fallback) => { if (value === null || value === undefined || value === '') return fallback; if (typeof value === 'object') return value; try { return JSON.parse(value); } catch { return fallback; } };
+  const commands = rows.map(({ scopeData, argumentsData, examplesData, notesZhData, auditData, usageText, ...item }) => ({ ...item, usage: usageText, scope: parse(scopeData, []), arguments: parse(argumentsData, []), examples: parse(examplesData, []), notesZh: parse(notesZhData, []), audit: parse(auditData, {}) }));
+  const payload = { exportedAt: new Date().toISOString(), sourceBuild: commands[0]?.sourceBuild || null, sourceAuditedAt: commands[0]?.sourceAuditedAt || null, count: commands.length, categories: [...new Set(commands.map((item) => item.subcategory))].sort(), commands };
+  const directory = path.join(root, 'data', 'exports');
+  const target = path.join(directory, 'game-admin-commands.json');
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(target, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+  console.log(JSON.stringify({ target, count: payload.count, categories: payload.categories.length }, null, 2));
+} finally {
+  await connection.end();
+}

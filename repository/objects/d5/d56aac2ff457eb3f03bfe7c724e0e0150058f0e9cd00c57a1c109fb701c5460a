@@ -1,0 +1,7 @@
+<section class="page inner-page" id="page-membership">
+      <header class="inner-heading"><p class="overline"><span></span> 会员中心</p><h1>会员中心</h1><p>查看会员等级权益与专属福利。</p></header>
+      <section class="membership-levels-section">
+        <div class="membership-levels-grid" id="membershipLevelsGrid">
+          <div class="empty-row"><strong>正在读取会员信息...</strong><small>正在连接会员服务</small></div>
+        </div>
+      </section>

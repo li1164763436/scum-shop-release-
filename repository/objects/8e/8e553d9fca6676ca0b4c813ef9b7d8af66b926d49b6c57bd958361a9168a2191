@@ -1,0 +1,172 @@
+let domainAccessLoadSequence = 0;
+
+function domainAccessState(state) {
+  const states = {
+    active: { label: '已生效', tone: 'success', detail: '域名已通过校验并对外提供访问' },
+    pending_cname: { label: '等待解析', tone: 'warning', detail: '等待 DNS 解析生效' },
+    cname_verified: { label: '解析已验证', tone: 'warning', detail: 'DNS 解析已验证，正在准备 HTTPS' },
+    challenge_http: { label: '验证中', tone: 'warning', detail: '正在完成 HTTPS 域名验证' },
+    issuing: { label: '签发证书', tone: 'warning', detail: '正在配置 HTTPS 证书' },
+    rollback: { label: '回退中', tone: 'warning', detail: '正在恢复原有域名配置' },
+    failed: { label: '配置异常', tone: 'error', detail: '请进入管理中心检查配置' }
+  };
+  return states[String(state || '').toLowerCase()] || { label: '处理中', tone: 'neutral', detail: '域名配置正在更新' };
+}
+
+function createDomainAccessRecord({ type, domain, badge, tone, detail, enabled = true }) {
+  const record = document.createElement('article');
+  record.className = 'card domain-access-record';
+
+  const icon = document.createElement('div');
+  icon.className = 'domain-access-record-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = type === '自有域名' ? '◇' : '◎';
+
+  const body = document.createElement('div');
+  body.className = 'domain-access-record-body';
+  const label = document.createElement('span');
+  label.textContent = type;
+  const link = document.createElement('a');
+  link.href = `https://${domain}`;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = domain;
+  const description = document.createElement('p');
+  description.textContent = detail;
+  body.append(label, link, description);
+
+  const status = document.createElement('span');
+  status.className = `domain-access-badge is-${tone}`;
+  status.textContent = badge;
+  status.title = enabled ? badge : '域名已绑定，当前未作为主访问入口';
+  record.append(icon, body, status);
+  return record;
+}
+
+function renderDomainAccessStatus(data) {
+  const root = $('#page-domain-access');
+  if (!root) return;
+  const domainsNode = $('#domainAccessDomains');
+  const countNode = $('#domainAccessCount');
+  const dotNode = $('#domainAccessSummaryDot');
+  const titleNode = $('#domainAccessSummaryTitle');
+  const textNode = $('#domainAccessSummaryText');
+  const timeNode = $('#domainAccessUpdatedAt');
+  const records = [];
+
+  if (data?.managedDomain?.domain) {
+    const active = data.managedDomain.enabled;
+    records.push(createDomainAccessRecord({
+      type: '平台域名',
+      domain: data.managedDomain.domain,
+      badge: active ? '当前启用' : '已绑定',
+      tone: active ? 'success' : 'neutral',
+      detail: active ? '平台托管的商城访问地址' : '当前由自有域名提供主要访问',
+      enabled: active
+    }));
+  }
+  if (data?.customDomain?.domain) {
+    const state = domainAccessState(data.customDomain.state);
+    records.push(createDomainAccessRecord({
+      type: '自有域名',
+      domain: data.customDomain.domain,
+      badge: state.label,
+      tone: state.tone,
+      detail: state.detail,
+      enabled: state.tone === 'success'
+    }));
+  }
+
+  domainsNode.replaceChildren(...records);
+  domainsNode.setAttribute('aria-busy', 'false');
+  countNode.textContent = `${records.length} 个`;
+  const ready = data?.connectionState === 'ready';
+  dotNode.className = `domain-access-summary-dot ${ready ? 'is-success' : 'is-warning'}`;
+  titleNode.textContent = records.length ? `已连接 ${records.length} 个访问域名` : '暂未绑定访问域名';
+  textNode.textContent = ready ? '域名网关连接正常' : '域名网关正在建立连接，状态可能稍有延迟';
+
+  const updatedAt = new Date(data?.updatedAt || Date.now());
+  timeNode.dateTime = Number.isNaN(updatedAt.getTime()) ? '' : updatedAt.toISOString();
+  timeNode.textContent = Number.isNaN(updatedAt.getTime()) ? '--' : `更新于 ${updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+function renderDomainAccessError(message) {
+  const domainsNode = $('#domainAccessDomains');
+  if (!domainsNode) return;
+  const empty = document.createElement('div');
+  empty.className = 'domain-access-empty';
+  const strong = document.createElement('strong');
+  strong.textContent = '域名状态暂不可用';
+  const detail = document.createElement('p');
+  detail.textContent = message || '请稍后刷新重试';
+  empty.append(strong, detail);
+  domainsNode.replaceChildren(empty);
+  domainsNode.setAttribute('aria-busy', 'false');
+  $('#domainAccessCount').textContent = '--';
+  $('#domainAccessSummaryDot').className = 'domain-access-summary-dot is-error';
+  $('#domainAccessSummaryTitle').textContent = '无法读取域名状态';
+  $('#domainAccessSummaryText').textContent = '管理中心仍可正常打开';
+  $('#domainAccessUpdatedAt').textContent = '--';
+}
+
+async function loadDomainAccess() {
+  const sequence = ++domainAccessLoadSequence;
+  const refreshButton = $('#refreshDomainAccess');
+  if (refreshButton) refreshButton.disabled = true;
+  try {
+    const data = await api('/api/domain-access/status');
+    if (sequence === domainAccessLoadSequence) renderDomainAccessStatus(data);
+  } catch (error) {
+    if (sequence === domainAccessLoadSequence) renderDomainAccessError(error.message);
+  } finally {
+    if (sequence === domainAccessLoadSequence && refreshButton) refreshButton.disabled = false;
+  }
+}
+
+$('#refreshDomainAccess')?.addEventListener('click', loadDomainAccess);
+
+$('#openDomainAccess')?.addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  const statusNode = $('#domainAccessStatus');
+  const targetName = `domainAccessHandoff_${Date.now()}`;
+  const launchWindow = window.open('', targetName);
+  if (launchWindow) launchWindow.opener = null;
+  if (statusNode) {
+    statusNode.textContent = '正在签发短时访问凭证...';
+    statusNode.className = 'is-busy';
+  }
+  button.disabled = true;
+  const previousText = button.textContent;
+  button.textContent = '正在进入...';
+  try {
+    const data = await api('/api/domain-access/handoff', { method: 'POST', body: '{}' });
+    if (!data?.launchUrl || !data?.code) throw new Error('域名接入中心返回无效凭证');
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = data.launchUrl;
+    form.target = launchWindow ? targetName : '_blank';
+    form.hidden = true;
+    const code = document.createElement('input');
+    code.type = 'hidden';
+    code.name = 'code';
+    code.value = data.code;
+    form.append(code);
+    document.body.append(form);
+    form.submit();
+    form.remove();
+    if (statusNode) {
+      statusNode.textContent = '管理中心已在新窗口打开';
+      statusNode.className = 'is-success';
+    }
+  } catch (error) {
+    launchWindow?.close();
+    if (statusNode) {
+      statusNode.textContent = error.message || '暂时无法进入域名接入中心';
+      statusNode.className = 'is-error';
+    }
+    toast(error.message || '暂时无法进入域名接入中心', true);
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+});

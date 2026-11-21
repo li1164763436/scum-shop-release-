@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090b0b">
+  <title>商城暂时离线 · 边境补给站</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="/shop/css/errors.css?v=202611171354">
+</head>
+<body class="storefront-error-page" data-error-kind="service-unavailable">
+  <header class="error-header">
+    <a class="error-brand" href="/" aria-label="返回商城首页">
+      <span class="error-brand-mark">S</span>
+      <span><strong>边境补给站</strong><small>SCUM 生存补给</small></span>
+    </a>
+    <span class="error-system-state warning"><i aria-hidden="true"></i><span data-connection-status>正在检测商城服务</span></span>
+  </header>
+  <main class="error-layout" id="page-error-service-unavailable">
+    <section class="error-copy" aria-labelledby="errorTitle">
+      <p class="error-kicker">商城连接已中断</p>
+      <div class="error-code" aria-hidden="true">服务暂停</div>
+      <h1 id="errorTitle">商城服务暂时中断</h1>
+      <p class="error-description">商城业务正在重连或维护中。你的账户、余额和订单数据不会因本页面受到影响，连接恢复后会自动返回商城。</p>
+      <div class="error-actions">
+        <button class="error-button primary" type="button" data-error-retry>立即重试</button>
+        <a class="error-button secondary" href="/">返回商城入口</a>
+      </div>
+      <p class="error-probe-message" data-probe-message aria-live="polite">系统将自动检测恢复状态</p>
+    </section>
+    <aside class="error-status" aria-label="连接状态">
+      <div class="error-status-head"><span>连接状态</span><b data-error-badge>正在重新连接</b></div>
+      <dl>
+        <div><dt>浏览器</dt><dd class="state-online">正常</dd></div>
+        <div><dt>商城业务</dt><dd class="state-warning" data-business-state>等待响应</dd></div>
+        <div><dt>恢复策略</dt><dd>自动检测</dd></div>
+      </dl>
+      <p>商城服务恢复后将自动返回</p>
+    </aside>
+  </main>
+  <footer class="error-footer"><span>SCUM 生存补给网络</span><span>连接状态：<b data-footer-state>重试中</b></span></footer>
+  <script src="/shop/js/errors.js?v=202611171354" defer></script>
+</body>
+</html>

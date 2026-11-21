@@ -1,0 +1,168 @@
+import crypto from 'node:crypto';
+import fsPromises from 'node:fs/promises';
+import path from 'node:path';
+import { decodeScumLog } from './scum-log-parser.js';
+import { GAME_CATEGORIES, physicalCategory, classifyGameLog, auditOf, fameAuditsOf, timestampOf, levelOf, prefixedJsonOf, messageOf } from './log-browser-service.js';
+import { safeError, rowsOf } from './scum-log-worker.js';
+import { SCUM_LOG_TABLES } from './scum-log-table-schema.js';
+
+const SOURCE_TYPE = 'category';
+const PARSER_VERSION = 'category-v1';
+const CURSOR_PROBE_BYTES = 4096;
+const MAX_PENDING_FRAGMENT_BYTES = 16 * 1024 * 1024;
+const TABLE_BY_CATEGORY = new Map(SCUM_LOG_TABLES.map((item) => [item.category, item.table]));
+const RECOGNIZED_PHYSICAL = new Set(GAME_CATEGORIES.flatMap((item) => item.physical));
+
+function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+function iso(clock) { return new Date(clock()).toISOString(); }
+function encodingUnit(encoding) { return String(encoding).startsWith('utf16') ? 2 : 1; }
+function lineByteLength(text, encoding) { return Buffer.byteLength(text, encoding === 'utf16be' ? 'utf16le' : encoding); }
+function cursorProbe(buffer, offset, unit = 1) {
+  const length = Math.min(offset, CURSOR_PROBE_BYTES) - (Math.min(offset, CURSOR_PROBE_BYTES) % unit);
+  return { hash: length ? hash(buffer.subarray(offset - length, offset)) : null, length };
+}
+function fileIdentity(filePath, stat, suffix = '') {
+  return hash(JSON.stringify({ source: SOURCE_TYPE, path: path.resolve(filePath).toLowerCase(), birthtimeMs: stat.birthtimeMs, ctimeMs: stat.ctimeMs, firstMtimeMs: stat.mtimeMs, firstSize: stat.size, suffix }));
+}
+function databaseTime(value, fallback) {
+  const source = String(value || '').trim();
+  const dotted = source.match(/^(\d{4})\.(\d{2})\.(\d{2})-(\d{2})\.(\d{2})\.(\d{2})(?::(\d+))?$/);
+  const normalized = dotted ? `${dotted[1]}-${dotted[2]}-${dotted[3]}T${dotted[4]}:${dotted[5]}:${dotted[6]}${dotted[7] ? `.${dotted[7]}` : ''}Z` : source;
+  const date = new Date(normalized);
+  return Number.isFinite(date.getTime()) ? date : new Date(fallback);
+}
+function levelLabel(level) { return ({ error: '错误', warn: '警告', debug: '调试', info: '信息' })[level] || '信息'; }
+function firstValue(object, keys) {
+  for (const key of keys) if (object?.[key] !== undefined && object?.[key] !== null && object?.[key] !== '') return object[key];
+  return null;
+}
+function jsonValue(value) {
+  if (!value || typeof value !== 'object') return null;
+  const clean = Object.fromEntries(Object.entries(value).filter(([key]) => !key.startsWith('_') && key !== 'raw'));
+  return Object.keys(clean).length ? JSON.stringify(clean) : null;
+}
+function recordOf({ category, raw, parsed, audit, fileId, basename, position, ordinal, fallbackTime }) {
+  const timestamp = firstValue(audit, ['timestamp', 'eventTime']) || timestampOf(raw, parsed);
+  const playerName = firstValue(audit, ['playerName', 'killerName', 'victimName', 'ownerName', 'executorName']);
+  const playerNumber = firstValue(audit, ['playerNumber', 'characterNumber', 'userId']);
+  const steamId = firstValue(audit, ['steamId', 'killerSteamId', 'victimSteamId', 'ownerSteamId']);
+  const eventType = firstValue(audit, ['type', 'eventType', 'parseStatus', 'reasonLabel', 'category']) || category;
+  const content = firstValue(audit, ['content', 'message', 'raw']) || messageOf(raw) || raw;
+  const eventFingerprint = hash(JSON.stringify({ category, timestamp: String(timestamp || ''), playerName, playerNumber, steamId, eventType, content }));
+  return {
+    category,
+    table: TABLE_BY_CATEGORY.get(category),
+    values: [
+      databaseTime(timestamp, fallbackTime), '默认', playerName ? String(playerName).slice(0, 255) : null,
+      playerNumber ? String(playerNumber).slice(0, 64) : null, steamId ? String(steamId).slice(0, 17) : null,
+      levelLabel(levelOf(raw, parsed)), String(eventType).slice(0, 64), String(content), jsonValue(audit || parsed),
+      fileId, basename.slice(0, 255), position, ordinal, hash(raw), eventFingerprint, PARSER_VERSION, raw
+    ]
+  };
+}
+
+export class ScumCategoryLogWorker {
+  constructor({ db, store, logger, fs = fsPromises, clock = () => Date.now(), setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout }) {
+    this.db = db; this.store = store; this.logger = logger; this.fs = fs; this.clock = clock; this.setTimer = setTimer; this.clearTimer = clearTimer;
+    this.timer = null; this.activeTick = null; this.running = false; this.stopped = true; this.enabled = false; this.directory = ''; this.pollIntervalMs = 5000;
+    this.lastStartedAt = null; this.lastCompletedAt = null; this.lastSuccessAt = null; this.lastFile = null; this.lastError = null; this.filesSeen = 0; this.recordsStored = 0;
+  }
+  status() { return { enabled: this.enabled, running: this.running, polling: Boolean(this.timer), directoryConfigured: Boolean(this.directory), pollIntervalMs: this.pollIntervalMs, lastStartedAt: this.lastStartedAt, lastCompletedAt: this.lastCompletedAt, lastSuccessAt: this.lastSuccessAt, lastFile: this.lastFile, lastError: this.lastError, filesSeen: this.filesSeen, recordsStored: this.recordsStored }; }
+  async start() { this.stopped = false; return this.reconfigure(); }
+  async reconfigure() {
+    const config = await this.store.read();
+    const value = { enabled: true, directory: '', pollIntervalMs: 5000, ...config.scumLogs };
+    this.enabled = Boolean(value.enabled); this.directory = String(value.directory || ''); this.pollIntervalMs = Number(value.pollIntervalMs) || 5000;
+    this.clearSchedule();
+    if (!this.enabled || !this.directory) { this.stopped = true; await this.drain(); return this.status(); }
+    this.stopped = false; void this.tick(); return this.status();
+  }
+  clearSchedule() { if (this.timer) this.clearTimer(this.timer); this.timer = null; }
+  schedule() { if (this.stopped || !this.enabled || this.timer) return; this.timer = this.setTimer(() => { this.timer = null; void this.tick(); }, this.pollIntervalMs); this.timer?.unref?.(); }
+  async tick() { if (this.activeTick) return this.activeTick; this.activeTick = this.performTick().finally(() => { this.activeTick = null; this.schedule(); }); return this.activeTick; }
+  async drain() { if (this.activeTick) await this.activeTick; }
+  async stopAndDrain() { this.stopped = true; this.clearSchedule(); await this.drain(); }
+  async performTick() {
+    if (this.running || this.stopped || !this.enabled || !this.directory) return false;
+    this.running = true; this.lastStartedAt = iso(this.clock); this.filesSeen = 0; this.recordsStored = 0;
+    try {
+      const entries = await this.fs.readdir(this.directory, { withFileTypes: true });
+      const basenames = entries.filter((entry) => entry.isFile() && /\.log$/i.test(entry.name) && RECOGNIZED_PHYSICAL.has(physicalCategory('scum', entry.name))).map((entry) => entry.name).sort();
+      this.filesSeen = basenames.length;
+      for (const basename of basenames) {
+        if (this.stopped) break;
+        const filePath = path.join(this.directory, basename); this.lastFile = basename;
+        try { await this.processFile(filePath, basename); }
+        catch (error) {
+          const message = safeError(error); const pathHash = hash(path.resolve(filePath).toLowerCase());
+          await this.db.query("UPDATE scum_log_files SET last_status='error',last_error=? WHERE source_type=? AND path_hash=? ORDER BY id DESC LIMIT 1", [message, SOURCE_TYPE, pathHash]).catch(() => {});
+          this.logger?.warn?.('SCUM 分类日志文件处理失败', { component: 'scum-category-log', file: basename, error: message });
+        }
+      }
+      this.lastSuccessAt = iso(this.clock); this.lastError = null; return true;
+    } catch (error) {
+      this.lastError = safeError(error); this.logger?.warn?.('SCUM 分类日志采集失败', { component: 'scum-category-log', error: this.lastError }); return false;
+    } finally { this.lastCompletedAt = iso(this.clock); this.running = false; }
+  }
+  async processFile(filePath, basename) {
+    const stat = await this.fs.stat(filePath); const pathHash = hash(path.resolve(filePath).toLowerCase());
+    const existingRows = rowsOf(await this.db.query('SELECT * FROM scum_log_files WHERE source_type=? AND path_hash=? ORDER BY id DESC LIMIT 1', [SOURCE_TYPE, pathHash]));
+    let record = existingRows[0] || null; const replaced = record && Number(record.birthtime_ms) !== Math.round(stat.birthtimeMs); const truncated = record && !replaced && stat.size < Number(record.offset_bytes);
+    if (!record || replaced || truncated) {
+      if (record) await this.db.query(`UPDATE scum_log_files SET ${replaced ? 'rotation_count=rotation_count+1' : 'truncation_count=truncation_count+1'},last_status=? WHERE id=?`, [replaced ? 'replaced' : 'truncated', record.id]);
+      const identity = fileIdentity(filePath, stat, record ? `${replaced ? 'rotation' : 'truncation'}:${record.id}:${stat.size}` : 'initial');
+      const inserted = await this.db.query("INSERT INTO scum_log_files (source_type,path_hash,basename,identity,birthtime_ms,ctime_ms,offset_bytes,pending_fragment,pending_position,size_bytes,mtime_ms,last_status) VALUES (?,?,?,?,?,?,0,'',0,?,?,'new')", [SOURCE_TYPE, pathHash, basename.slice(0, 255), identity, Math.round(stat.birthtimeMs), Math.round(stat.ctimeMs), stat.size, Math.round(stat.mtimeMs)]);
+      record = { id: inserted.insertId, offset_bytes: 0, pending_fragment: '', pending_position: 0, encoding: null, cursor_probe_hash: null, cursor_probe_length: 0 };
+    }
+    const all = await this.fs.readFile(filePath); let offset = Math.min(Number(record.offset_bytes) || 0, all.length); let encoding = record.encoding; let bomBytes = 0;
+    if (!encoding || offset === 0) { const detected = decodeScumLog(all.subarray(0, Math.min(all.length, 4096))); encoding = detected.encoding; bomBytes = detected.bomBytes; }
+    const unit = encodingUnit(encoding); const oldProbeLength = Number(record.cursor_probe_length) || 0;
+    if (offset > 0 && record.cursor_probe_hash && oldProbeLength > 0 && (offset < oldProbeLength || hash(all.subarray(offset - oldProbeLength, offset)) !== record.cursor_probe_hash)) {
+      await this.db.query("UPDATE scum_log_files SET truncation_count=truncation_count+1,last_status='truncated' WHERE id=?", [record.id]);
+      const identity = fileIdentity(filePath, stat, `rewrite:${record.id}:${stat.size}`);
+      const inserted = await this.db.query("INSERT INTO scum_log_files (source_type,path_hash,basename,identity,birthtime_ms,ctime_ms,offset_bytes,pending_fragment,pending_position,size_bytes,mtime_ms,last_status) VALUES (?,?,?,?,?,?,0,'',0,?,?,'new')", [SOURCE_TYPE, pathHash, basename.slice(0, 255), identity, Math.round(stat.birthtimeMs), Math.round(stat.ctimeMs), stat.size, Math.round(stat.mtimeMs)]);
+      record = { id: inserted.insertId, offset_bytes: 0, pending_fragment: '', pending_position: 0, encoding: null }; offset = 0;
+      const detected = decodeScumLog(all.subarray(0, Math.min(all.length, 4096))); encoding = detected.encoding; bomBytes = detected.bomBytes;
+    }
+    const readableEnd = all.length - ((all.length - offset) % unit);
+    if (readableEnd <= offset && !record.pending_fragment) {
+      const probe = cursorProbe(all, offset, unit); await this.db.query("UPDATE scum_log_files SET size_bytes=?,mtime_ms=?,encoding=?,cursor_probe_hash=?,cursor_probe_length=?,last_status='idle',last_error=NULL WHERE id=?", [stat.size, Math.round(stat.mtimeMs), encoding, probe.hash, probe.length, record.id]); return;
+    }
+    const appended = all.subarray(offset, readableEnd); let appendedText = encoding === 'utf16be' ? (() => { const copy = Buffer.from(appended); copy.swap16(); return copy.toString('utf16le'); })() : appended.toString(encoding);
+    if (offset === 0) appendedText = appendedText.replace(/^\uFEFF/, '');
+    const pending = String(record.pending_fragment || ''); const combined = pending + appendedText; const startPosition = pending ? Number(record.pending_position) : offset + bomBytes;
+    let position = startPosition; let cursor = 0; const complete = [];
+    for (const match of combined.matchAll(/\r?\n/g)) { const raw = combined.slice(cursor, match.index); complete.push({ raw, position }); position += lineByteLength(raw + match[0], encoding); cursor = match.index + match[0].length; }
+    let fragment = combined.slice(cursor); let fragmentPosition = position;
+    if (Buffer.byteLength(fragment, 'utf8') > MAX_PENDING_FRAGMENT_BYTES) throw Object.assign(new Error('SCUM 分类日志半行超过安全上限，拒绝推进游标'), { code: 'SCUM_CATEGORY_FRAGMENT_TOO_LARGE' });
+    const eofLineComplete = Boolean(fragment.trim()) && (/^\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}:/.test(fragment.trim()) || /^\s*\{/.test(fragment));
+    if (eofLineComplete) { complete.push({ raw: fragment, position: fragmentPosition }); fragment = ''; fragmentPosition = readableEnd; }
+    const physical = physicalCategory('scum', basename); const records = [];
+    if (physical === 'famepoints' && offset === 0 && !pending) {
+      const text = eofLineComplete ? combined : combined.slice(0, cursor); let searchFrom = 0;
+      for (const audit of fameAuditsOf(text)) {
+        const index = text.indexOf(audit.raw, searchFrom); if (index >= 0) searchFrom = index + audit.raw.length;
+        const sourcePosition = startPosition + lineByteLength(text.slice(0, Math.max(index, 0)), encoding);
+        records.push(recordOf({ category: 'fame', raw: audit.raw, parsed: {}, audit, fileId: record.id, basename, position: sourcePosition, ordinal: 0, fallbackTime: stat.mtimeMs }));
+      }
+    } else if (physical !== 'famepoints') {
+      for (const item of complete) {
+        if (!item.raw.trim()) continue;
+        let parsed = null; try { parsed = JSON.parse(item.raw); } catch { parsed = prefixedJsonOf(item.raw); } if (!parsed) parsed = {};
+        const category = classifyGameLog(physical, item.raw); if (!TABLE_BY_CATEGORY.has(category)) continue;
+        const audit = auditOf(category, item.raw, parsed);
+        records.push(recordOf({ category, raw: item.raw, parsed, audit, fileId: record.id, basename, position: item.position, ordinal: 0, fallbackTime: stat.mtimeMs }));
+      }
+    }
+    await this.db.transaction(async (tx) => {
+      for (const item of records) {
+        const result = await tx.query(`INSERT IGNORE INTO \`${item.table}\` (\`发生时间\`,\`服务器标识\`,\`玩家昵称\`,\`玩家编号\`,\`Steam编号\`,\`日志级别\`,\`事件类型\`,\`日志内容\`,\`详细数据\`,\`来源文件编号\`,\`来源文件\`,\`文件位置\`,\`行序号\`,\`行指纹\`,\`事件指纹\`,\`解析版本\`,\`原始日志\`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.values);
+        this.recordsStored += Number(result.affectedRows || 0);
+      }
+      const probe = cursorProbe(all, readableEnd, unit);
+      await tx.query("UPDATE scum_log_files SET offset_bytes=?,pending_fragment=?,pending_position=?,size_bytes=?,mtime_ms=?,encoding=?,cursor_probe_hash=?,cursor_probe_length=?,last_status='ok',last_error=NULL,last_processed_at=CURRENT_TIMESTAMP(3) WHERE id=?", [readableEnd, fragment, fragmentPosition, stat.size, Math.round(stat.mtimeMs), encoding, probe.hash, probe.length, record.id]);
+    });
+  }
+}
+
+export { SOURCE_TYPE, PARSER_VERSION, databaseTime, recordOf };

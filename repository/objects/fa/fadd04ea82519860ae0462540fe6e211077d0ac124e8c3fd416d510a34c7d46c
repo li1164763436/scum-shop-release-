@@ -1,0 +1,85 @@
+import { ServiceError } from './commerce-service.js';
+
+function idOf(value, name = '活动 ID') { const number = Number(value); if (!Number.isSafeInteger(number) || number < 1) throw new ServiceError(`${name} 无效`); return number; }
+function dateOf(value, name) { const date = new Date(value); if (Number.isNaN(date.getTime())) throw new ServiceError(`${name}无效`); return date; }
+function normalize(input, creatorId = null) {
+  const name = String(input?.name || '').trim();
+  const description = String(input?.description || '').trim();
+  if (!name || name.length > 100) throw new ServiceError('活动名称长度必须为 1-100');
+  if (description.length > 2000) throw new ServiceError('活动说明不能超过 2000 字符');
+  const startsAt = dateOf(input?.startsAt, '开始时间');
+  const endsAt = dateOf(input?.endsAt, '结束时间');
+  if (startsAt >= endsAt) throw new ServiceError('活动结束时间必须晚于开始时间');
+  return { name, description, startsAt, endsAt, enabled: input?.enabled !== false, creatorId };
+}
+function rowValue(row) { return { id: Number(row.id), name: row.name, description: row.description || '', startsAt: row.startsAt, endsAt: row.endsAt, enabled: Boolean(row.enabled), createdByUserId: Number(row.createdByUserId), createdAt: row.createdAt, updatedAt: row.updatedAt }; }
+function relationIds(input = {}) {
+  const poolIds = [...new Set((input.poolIds || []).map((item) => idOf(item, '奖池 ID'))) ].sort((a, b) => a - b);
+  return { poolIds };
+}
+const FIELDS = 'id,name,description,starts_at AS startsAt,ends_at AS endsAt,enabled,created_by_user_id AS createdByUserId,created_at AS createdAt,updated_at AS updatedAt';
+
+export class ActivityService {
+  constructor(db, giftService, clock = () => new Date()) { this.db = db; this.clock = clock; }
+  async listAdmin() {
+    const rows = await this.db.query(`SELECT ${FIELDS} FROM activities WHERE enabled=1 ORDER BY id DESC`);
+    const result = [];
+    for (const row of rows) result.push(await this.get(row.id));
+    return result;
+  }
+  async get(value, query = this.db, lock = false) {
+    const id = idOf(value); const rows = await query.query(`SELECT ${FIELDS} FROM activities WHERE id=?${lock ? ' FOR UPDATE' : ''}`, [id]);
+    if (!rows[0]) throw new ServiceError('活动不存在', 404, 'NOT_FOUND');
+    const pools = await query.query('SELECT p.id,p.name,p.description,p.starts_at AS startsAt,p.ends_at AS endsAt,p.enabled FROM activity_lottery_pools ap JOIN lottery_pools p ON p.id=ap.pool_id WHERE ap.activity_id=? ORDER BY p.id', [id]);
+    return { ...rowValue(rows[0]), pools: pools.map((item) => ({ ...item, id: Number(item.id), enabled: Boolean(item.enabled) })) };
+  }
+  async save(input, value = null, creatorId = null) {
+    const activity = normalize(input, idOf(creatorId, '管理员用户 ID'));
+    const hasRelations = Array.isArray(input?.poolIds);
+    const relations = hasRelations ? relationIds(input) : null;
+    try {
+      return await this.db.transaction(async (tx) => {
+        let id;
+        if (value === null) {
+          const result = await tx.query('INSERT INTO activities (name,description,starts_at,ends_at,enabled,created_by_user_id) VALUES (?,?,?,?,?,?)', [activity.name, activity.description || null, activity.startsAt, activity.endsAt, activity.enabled, activity.creatorId]);
+          id = result.insertId;
+          await this.get(id, tx, true);
+        } else {
+          id = idOf(value);
+          await this.get(id, tx, true);
+          await tx.query('UPDATE activities SET name=?,description=?,starts_at=?,ends_at=?,enabled=? WHERE id=?', [activity.name, activity.description || null, activity.startsAt, activity.endsAt, activity.enabled, id]);
+        }
+        if (relations) await this.replaceRelationsInTransaction(id, relations, tx);
+        return this.get(id, tx);
+      });
+    } catch (error) { if (error?.code === 'ER_DUP_ENTRY') throw new ServiceError('活动名称已存在', 409, 'DUPLICATE_NAME'); throw error; }
+  }
+  async disable(value) { const result = await this.db.query('UPDATE activities SET enabled=0 WHERE id=?', [idOf(value)]); if (!result.affectedRows) throw new ServiceError('活动不存在', 404, 'NOT_FOUND'); }
+  async delete(value) { const { deleteActivity } = await import('./deletion-service.js'); return this.db.transaction((tx) => deleteActivity(tx, value)); }
+  async replaceRelationsInTransaction(activityId, { poolIds }, tx) {
+    if (poolIds.length) { const rows = await tx.query(`SELECT id FROM lottery_pools WHERE id IN (${poolIds.map(() => '?').join(',')}) FOR UPDATE`, poolIds); if (rows.length !== poolIds.length) throw new ServiceError('关联奖池不存在', 404, 'POOL_NOT_FOUND'); }
+    await tx.query('DELETE FROM activity_gifts WHERE activity_id=?', [activityId]);
+    await tx.query('DELETE FROM activity_lottery_pools WHERE activity_id=?', [activityId]);
+    for (const poolId of poolIds) await tx.query('INSERT INTO activity_lottery_pools (activity_id,pool_id) VALUES (?,?)', [activityId, poolId]);
+  }
+  async replaceRelations(value, input = {}) {
+    const activityId = idOf(value);
+    const relations = relationIds(input);
+    return this.db.transaction(async (tx) => {
+      await this.get(activityId, tx, true);
+      await this.replaceRelationsInTransaction(activityId, relations, tx);
+      return this.get(activityId, tx);
+    });
+  }
+  async current() {
+    const now = this.clock();
+    const rows = await this.db.query(`SELECT ${FIELDS} FROM activities WHERE enabled=1 AND starts_at<=? AND ends_at>? ORDER BY starts_at,id`, [now, now]);
+    const activities = [];
+    for (const row of rows) {
+      const item = rowValue(row);
+      const pools = await this.db.query('SELECT p.id,p.name,p.description,p.image_path AS imagePath,p.starts_at AS startsAt,p.ends_at AS endsAt,p.enabled,v.single_price AS singlePrice,v.daily_free_count AS dailyFreeCount,v.pity_threshold AS pityThreshold FROM activity_lottery_pools ap JOIN lottery_pools p ON p.id=ap.pool_id JOIN lottery_pool_versions v ON v.id=p.current_version_id WHERE ap.activity_id=? AND p.enabled=1 AND p.starts_at<=? AND p.ends_at>? ORDER BY p.id', [item.id, now, now]);
+      activities.push({ ...item, pools: pools.map((pool) => ({ ...pool, id: Number(pool.id), enabled: Boolean(pool.enabled), singlePrice: Number(pool.singlePrice), dailyFreeCount: Number(pool.dailyFreeCount), pityThreshold: Number(pool.pityThreshold) })) });
+    }
+    return activities;
+  }
+}

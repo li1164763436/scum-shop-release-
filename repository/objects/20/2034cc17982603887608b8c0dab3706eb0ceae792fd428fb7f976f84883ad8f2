@@ -1,0 +1,123 @@
+import json
+import os
+import sqlite3
+import sys
+import xml.etree.ElementTree as ET
+
+
+def database_path(root):
+    root = os.path.abspath(str(root or ''))
+    candidates = [
+        os.path.join(root, 'SCUM', 'Saved', 'SaveFiles', 'SCUM.db'),
+        os.path.join(root, 'Saved', 'SaveFiles', 'SCUM.db'),
+        os.path.join(root, 'SCUM.db'),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    raise RuntimeError('SCUM数据库不存在')
+
+
+def finite_coordinate(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(float(value)) <= 10_000_000
+
+
+def read_locked_vehicles(root):
+    path = database_path(root)
+    uri = 'file:' + path.replace('\\', '/') + '?mode=ro'
+    database = sqlite3.connect(uri, uri=True, timeout=3)
+    database.row_factory = sqlite3.Row
+    try:
+        database.execute('PRAGMA query_only=ON')
+        database.execute('PRAGMA busy_timeout=3000')
+        database.execute('BEGIN')
+        rows = database.execute(
+            "SELECT v.entity_id,v.item_container_entity_id,e.class AS entity_class,"
+            "s.vehicle_asset_id,s.vehicle_alias,s.vehicle_last_access_time,s.is_vehicle_functional,"
+            "e.location_x,e.location_y,e.location_z,c.owning_entity_id,c.parent_entity_id,i.xml "
+            "FROM vehicle_entity v JOIN entity e ON e.id=v.entity_id "
+            "LEFT JOIN vehicle_spawner s ON s.vehicle_entity_id=v.entity_id "
+            "LEFT JOIN entity c ON c.id=v.item_container_entity_id "
+            "LEFT JOIN item_entity i ON i.entity_id=v.item_container_entity_id "
+            "ORDER BY v.entity_id"
+        ).fetchall()
+        vehicles = []
+        seen_entity_ids = set()
+        skipped = {'invalid_container': 0, 'invalid_xml': 0, 'unlocked': 0, 'invalid_owner': 0, 'duplicate_entity': 0}
+        for row in rows:
+            entity_id = int(row['entity_id'] or 0)
+            if entity_id in seen_entity_ids:
+                skipped['duplicate_entity'] += 1
+                continue
+            seen_entity_ids.add(entity_id)
+            container_id = int(row['item_container_entity_id'] or 0)
+            if entity_id <= 0 or container_id <= 0 or row['owning_entity_id'] != entity_id or row['parent_entity_id'] != entity_id:
+                skipped['invalid_container'] += 1
+                continue
+            xml_text = row['xml']
+            if not isinstance(xml_text, str) or len(xml_text) > 2_000_000:
+                skipped['invalid_xml'] += 1
+                continue
+            try:
+                root_node = ET.fromstring(xml_text)
+            except ET.ParseError:
+                skipped['invalid_xml'] += 1
+                continue
+            if root_node.tag != 'Item':
+                skipped['invalid_xml'] += 1
+                continue
+            locks = [element for element in root_node.iter() if element.tag == 'Locks']
+            if len(locks) != 1 or any(child.tag != 'LockSlot' for child in locks[0]):
+                skipped['invalid_xml'] += 1
+                continue
+            lock_slots = len(locks[0])
+            if lock_slots <= 0:
+                skipped['unlocked'] += 1
+                continue
+            profile_text = root_node.get('_owningUserProfileId')
+            if not profile_text or not profile_text.isascii() or not profile_text.isdecimal() or int(profile_text) <= 0:
+                skipped['invalid_owner'] += 1
+                continue
+            profiles = database.execute('SELECT user_id FROM user_profile WHERE id=?', (int(profile_text),)).fetchall()
+            if len(profiles) != 1:
+                skipped['invalid_owner'] += 1
+                continue
+            steam_id = profiles[0][0]
+            if not isinstance(steam_id, str) or len(steam_id) != 17 or not steam_id.isascii() or not steam_id.isdecimal():
+                skipped['invalid_owner'] += 1
+                continue
+            coordinates = [row['location_x'], row['location_y'], row['location_z']]
+            if not all(finite_coordinate(value) for value in coordinates):
+                coordinates = [None, None, None]
+            vehicles.append({
+                'entityId': entity_id,
+                'containerEntityId': container_id,
+                'entityClass': str(row['entity_class'] or ''),
+                'assetId': str(row['vehicle_asset_id'] or ''),
+                'vehicleAlias': str(row['vehicle_alias'] or ''),
+                'ownerProfileId': int(profile_text),
+                'ownerSteamId': steam_id,
+                'lockSlotCount': lock_slots,
+                'worldX': coordinates[0],
+                'worldY': coordinates[1],
+                'worldZ': coordinates[2],
+                'lastAccessTime': row['vehicle_last_access_time'],
+                'functional': None if row['is_vehicle_functional'] is None else bool(row['is_vehicle_functional']),
+                'locationSource': 'scum_db',
+            })
+        complete = skipped['invalid_container'] == 0 and skipped['invalid_xml'] == 0 and skipped['invalid_owner'] == 0 and skipped['duplicate_entity'] == 0
+        return {'complete': complete, 'source': 'read_only_saved_database', 'totalVehicles': len(rows), 'lockedVehicles': vehicles, 'skipped': skipped}
+    finally:
+        database.close()
+
+
+def main():
+    request = json.loads(sys.stdin.read() or '{}')
+    return read_locked_vehicles(request.get('serverDirectory'))
+
+
+try:
+    print(json.dumps(main(), ensure_ascii=False))
+except Exception as error:
+    print(json.dumps({'error': str(error)}, ensure_ascii=False))
+    sys.exit(1)

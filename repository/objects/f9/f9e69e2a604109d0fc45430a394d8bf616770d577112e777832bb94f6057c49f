@@ -1,0 +1,19 @@
+<div class="modal-backdrop" id="attributePurchaseModal" hidden>
+    <section class="modal purchase-modal" role="dialog" aria-modal="true" aria-labelledby="attributePurchaseModalTitle">
+      <button class="modal-close" type="button" data-modal-close aria-label="关闭">×</button>
+      <p class="overline"><span></span> 属性购买确认</p><h2 id="attributePurchaseModalTitle">确认购买属性点</h2>
+      <div class="purchase-summary"><div><span>属性</span><strong id="attributePurchaseName">—</strong><code id="attributePurchaseSteamId">—</code></div><div><span>购买点数</span><strong id="attributePurchaseQuantity">0</strong></div><div><span>合计</span><strong><b id="attributePurchaseConfirmTotal">0</b> 币</strong></div></div>
+      <p class="warning-copy">确认后将立即扣除商城币并修改玩家属性，请保持游戏角色离线。</p>
+      <div class="modal-actions"><button class="button ghost" type="button" data-modal-close>返回检查</button><button class="button primary" id="confirmAttributePurchase" type="button">确认购买</button></div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="skillPurchaseModal" hidden>
+    <section class="modal purchase-modal" role="dialog" aria-modal="true" aria-labelledby="skillPurchaseModalTitle">
+      <button class="modal-close" type="button" data-modal-close aria-label="关闭">×</button>
+      <p class="overline"><span></span> 技能购买确认</p><h2 id="skillPurchaseModalTitle">确认购买技能等级</h2>
+      <div class="purchase-summary"><div><span>已选技能</span><strong id="skillPurchaseNames">—</strong><code id="skillPurchaseSteamId">—</code></div><div><span>技能数量</span><strong id="skillPurchaseQuantity">0</strong></div><div><span>合计</span><strong><b id="skillPurchaseConfirmTotal">0</b> 币</strong></div></div>
+      <p class="warning-copy">确认后将立即扣除商城币并修改玩家技能等级，请保持游戏角色离线。</p>
+      <div class="modal-actions"><button class="button ghost" type="button" data-modal-close>返回检查</button><button class="button primary" id="confirmSkillPurchase" type="button">确认购买</button></div>
+    </section>
+  </div>

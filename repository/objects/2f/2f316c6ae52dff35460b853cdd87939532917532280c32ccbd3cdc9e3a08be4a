@@ -1,0 +1,12 @@
+export function lotteryRewardDisplay(snapshot = {}) {
+  let actions = snapshot.actions ?? snapshot.actionSnapshot ?? [];
+  if (typeof actions === 'string') { try { actions = JSON.parse(actions); } catch { actions = []; } }
+  if (!Array.isArray(actions)) actions = [];
+  const rewardType = snapshot.rewardType || 'gift';
+  if (rewardType === 'gift') return { quantity: 1, quantityUnit: '份', quantityText: '1 份' };
+  const values = actions.filter(action => action.actionType === (rewardType === 'shop_coin' ? 'shop_coin' : 'spawn_item')).map(action => Number(rewardType === 'shop_coin' ? action.coinAmount : action.quantity));
+  const fallback = rewardType === 'shop_coin' ? snapshot.coinAmount : snapshot.quantity;
+  const quantity = values.length ? values.reduce((sum, value) => sum + value, 0) : fallback == null ? null : Number(fallback);
+  const quantityUnit = rewardType === 'shop_coin' ? '商城币' : '件';
+  return { quantity, quantityUnit, quantityText: Number.isSafeInteger(quantity) && quantity >= 0 ? quantity+' '+quantityUnit : '数量未记录' };
+}

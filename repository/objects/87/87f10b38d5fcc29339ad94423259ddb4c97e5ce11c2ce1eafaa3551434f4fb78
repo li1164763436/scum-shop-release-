@@ -1,0 +1,93 @@
+import crypto from 'node:crypto';
+import { ServiceError } from './commerce-service.js';
+
+const ATTRIBUTES = { strength: 8, constitution: 5, dexterity: 5, intelligence: 5 };
+const SKILLS = new Set(['BoxingSkill','MeleeWeaponsSkill','RiflesSkill','HandgunSkill','ArcherySkill','RunningSkill','EnduranceSkill','ResistanceSkill','ThieverySkill','DrivingSkill','StealthSkill','MotorcycleSkill','AviationSkill','AwarenessSkill','SnipingSkill','CamouflageSkill','SurvivalSkill','EngineeringSkill','DemolitionSkill','MedicalSkill','CookingSkill','FarmingSkill','TacticsSkill']);
+const hash = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function price(value, name) { const result = Number(value); if (!Number.isSafeInteger(result) || result < 1) throw new ServiceError(`${name}尚未开放`, 403, 'CHARACTER_GROWTH_DISABLED'); return result; }
+
+export class CharacterGrowthService {
+  constructor({ db, modifyPlayer, readSettings, players, pollIntervalMs = 5000 }) {
+    Object.assign(this, { db, modifyPlayer, readSettings, players, processing: false });
+    this.timer = setInterval(() => void this.processPending(), pollIntervalMs);
+    this.timer.unref?.();
+    void this.processPending();
+  }
+
+  async purchase(steamId, input, requestKey) {
+    const id = String(steamId || ''), key = String(requestKey || '').trim(), type = String(input?.type || '');
+    if (!/^\d{17}$/.test(id)) throw new ServiceError('SteamID格式无效', 400, 'INVALID_STEAM_ID');
+    if (!key || key.length > 100) throw new ServiceError('Idempotency-Key无效', 400, 'INVALID_IDEMPOTENCY_KEY');
+    const settings = await this.readSettings();
+    let targets, quantity, unitPrice;
+    if (type === 'attribute') {
+      const attribute = String(input?.attribute || ''); quantity = Number(input?.quantity);
+      if (!(attribute in ATTRIBUTES) || !Number.isInteger(quantity) || quantity < 1) throw new ServiceError('属性购买参数无效', 400, 'INVALID_INPUT');
+      targets = { attribute, quantity }; unitPrice = price(settings.attributePointPrice, '属性购买');
+    } else if (type === 'skill') {
+      const skills = [...new Set(Array.isArray(input?.skills) ? input.skills.map(String) : [])].sort();
+      if (!skills.length || skills.some((skill) => !SKILLS.has(skill))) throw new ServiceError('技能购买参数无效', 400, 'INVALID_INPUT');
+      targets = { skills }; quantity = skills.length; unitPrice = price(settings.skillLevelPrice, '技能购买');
+    } else throw new ServiceError('购买类型无效', 400, 'INVALID_INPUT');
+    const requestFingerprint = hash({ type, targets, unitPrice });
+    const existing = (await this.db.query('SELECT id,request_fingerprint AS requestFingerprint,status,total_price AS totalPrice,balance_after AS balanceAfter FROM character_growth_purchases WHERE request_key=?', [key]))[0];
+    if (existing) {
+      if (existing.requestFingerprint !== requestFingerprint) throw new ServiceError('Idempotency-Key已用于其他购买', 409, 'IDEMPOTENCY_CONFLICT');
+      return { id: Number(existing.id), type, totalPrice: Number(existing.totalPrice), balance: Number(existing.balanceAfter), status: existing.status, idempotent: true };
+    }
+    const total = unitPrice * quantity;
+    const reserved = await this.db.transaction(async (tx) => {
+      await tx.query('INSERT INTO \`商城用户\` (\`SteamID\`,\`商城币余额\`) VALUES (?,0) ON DUPLICATE KEY UPDATE \`SteamID\`=VALUES(\`SteamID\`)', [id]);
+      const balance = Number((await tx.query('SELECT \`商城币余额\` AS balance FROM \`商城用户\` WHERE \`SteamID\`=? FOR UPDATE', [id]))[0]?.balance || 0);
+      if (balance < total) throw new ServiceError('商城币余额不足', 409, 'INSUFFICIENT_BALANCE');
+      const after = balance - total;
+      const result = await tx.query("INSERT INTO character_growth_purchases (steam_id,request_key,request_fingerprint,purchase_type,target_json,quantity,unit_price,total_price,balance_after,status) VALUES (?,?,?,?,?,?,?,?,?,'processing')", [id,key,requestFingerprint,type,JSON.stringify(targets),quantity,unitPrice,total,after]);
+      await tx.query('UPDATE \`商城用户\` SET \`商城币余额\`=? WHERE \`SteamID\`=?', [after,id]);
+      await tx.query("INSERT INTO coin_ledger (steam_id,amount,balance_after,type,reference_type,reference_id,note) VALUES (?,?,?,'character_growth_purchase','character_growth_purchase',?,?)", [id,-total,after,String(result.insertId),type === 'attribute' ? '购买角色属性点（等待下线）' : '购买技能等级（等待下线）']);
+      return { id: Number(result.insertId), balance: after };
+    });
+    await this.processPending();
+    const completed = (await this.db.query('SELECT status FROM character_growth_purchases WHERE id=?', [reserved.id]))[0]?.status || 'processing';
+    return { ...reserved, type, totalPrice: total, status: completed, idempotent: false };
+  }
+
+  async processPending() {
+    if (this.processing) return; this.processing = true;
+    try {
+      const rows = await this.db.query("SELECT id,steam_id AS steamId,purchase_type AS purchaseType,target_json AS targetJson FROM character_growth_purchases WHERE status='processing' ORDER BY id LIMIT 20");
+      if (!rows.length) return;
+      let online; try { online = new Set((await this.players()).map((item) => String(item.steamId || item.steam_id || ''))); } catch { return; }
+      for (const row of rows) if (!online.has(String(row.steamId))) await this.apply(row);
+    } finally { this.processing = false; }
+  }
+
+  async apply(row) {
+    try {
+      const target = typeof row.targetJson === 'string' ? JSON.parse(row.targetJson) : row.targetJson;
+      const profile = await this.modifyPlayer({ action: 'read', steamId: row.steamId });
+      let payload;
+      if (row.purchaseType === 'attribute') {
+        const current = Number(profile.attributes?.[target.attribute]), next = current + Number(target.quantity);
+        if (!Number.isFinite(current) || next > ATTRIBUTES[target.attribute]) throw new ServiceError('属性已达到上限或购买数量超限', 409, 'ATTRIBUTE_LIMIT');
+        payload = { action:'write', steamId:row.steamId, attributes:{ [target.attribute]:next }, skills:[] };
+      } else {
+        const existing = new Set((profile.skills || []).map((item) => String(item.name)));
+        if (target.skills.some((skill) => !existing.has(skill))) throw new ServiceError('技能数据不存在', 409, 'SKILL_NOT_FOUND');
+        payload = { action:'write', steamId:row.steamId, attributes:{}, skills:target.skills.map((name) => ({ name, level:3, experience:9999999 })) };
+      }
+      await this.modifyPlayer(payload);
+      await this.db.query("UPDATE character_growth_purchases SET status='completed',completed_at=CURRENT_TIMESTAMP(3),error_message=NULL WHERE id=? AND status='processing'", [row.id]);
+    } catch (error) { await this.refund(row.id, row.steamId, error); }
+  }
+
+  async refund(id, steamId, error) {
+    await this.db.transaction(async (tx) => {
+      const purchase = (await tx.query('SELECT status,total_price AS totalPrice FROM character_growth_purchases WHERE id=? FOR UPDATE', [id]))[0];
+      if (purchase?.status !== 'processing') return;
+      const balance = Number((await tx.query('SELECT \`商城币余额\` AS balance FROM \`商城用户\` WHERE \`SteamID\`=? FOR UPDATE', [steamId]))[0]?.balance || 0) + Number(purchase.totalPrice);
+      await tx.query('UPDATE \`商城用户\` SET \`商城币余额\`=? WHERE \`SteamID\`=?', [balance,steamId]);
+      await tx.query("INSERT INTO coin_ledger (steam_id,amount,balance_after,type,reference_type,reference_id,note) VALUES (?,?,?,'character_growth_refund','character_growth_refund',?,'角色属性技能购买执行失败退款')", [steamId,Number(purchase.totalPrice),balance,String(id)]);
+      await tx.query("UPDATE character_growth_purchases SET status='failed',error_message=? WHERE id=?", [String(error?.message || '修改角色存档失败').slice(0,500),id]);
+    });
+  }
+}

@@ -1,0 +1,47 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import mysql from 'mysql2/promise';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const config = JSON.parse((await fs.readFile(path.join(root, 'data', 'config.json'), 'utf8')).replace(/^\uFEFF/, '')).mysql;
+const db = await mysql.createConnection({ ...config, charset: 'utf8mb4', timezone: 'Z', decimalNumbers: true });
+let updated = 0;
+try {
+  await db.beginTransaction();
+  const [products] = await db.execute("SELECT id,item_id AS itemId,fulfillment_codes AS fulfillmentCodes FROM products WHERE parent_category='NPC' AND category_name='动物' FOR UPDATE");
+  for (const product of products) {
+    const raw = String(product.fulfillmentCodes || product.itemId || '').trim();
+    if (!raw) throw new Error(`商品 ${product.id} 没有物品代码`);
+    const codes = raw.split(',').map((value) => {
+      const code = value.trim();
+      if (!code) throw new Error(`商品 ${product.id} 包含空物品代码`);
+      if (/^#spawnanimal\s+/i.test(code)) return code.replace(/^#spawnanimal\s+/i, '#spawnanimal ');
+      if (/^#spawnitem\s+/i.test(code)) return code.replace(/^#spawnitem\s+/i, '#spawnanimal ');
+      if (code.startsWith('#')) throw new Error(`商品 ${product.id} 包含非物品命令，已中止`);
+      return `#spawnanimal ${code}`;
+    });
+    if (!codes.every((code) => /^#spawnanimal\s+[A-Za-z0-9_]{1,80}(?:\s+[1-9]\d*)?$/.test(code))) {
+      throw new Error(`商品 ${product.id} 的动物代码格式无效，已中止`);
+    }
+    const next = codes.join(',');
+    if (next !== raw) {
+      await db.execute('UPDATE products SET fulfillment_codes=?,updated_at=CURRENT_TIMESTAMP(3) WHERE id=?', [next, product.id]);
+      updated += 1;
+    }
+  }
+  const [check] = await db.execute("SELECT id,fulfillment_codes AS fulfillmentCodes,item_id AS itemId FROM products WHERE parent_category='NPC' AND category_name='动物'");
+  for (const product of check) {
+    const raw = String(product.fulfillmentCodes || product.itemId || '').trim();
+    if (!raw || !raw.split(',').every((code) => /^#spawnanimal\s+[A-Za-z0-9_]{1,80}(?:\s+[1-9]\d*)?$/.test(code.trim()))) {
+      throw new Error(`商品 ${product.id} 的前缀核验失败，已中止`);
+    }
+  }
+  await db.commit();
+  console.log(JSON.stringify({ total: products.length, updated, valid: check.length }, null, 2));
+} catch (error) {
+  await db.rollback().catch(() => {});
+  throw error;
+} finally {
+  await db.end();
+}

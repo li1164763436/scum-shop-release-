@@ -1,0 +1,148 @@
+import { ServiceError } from './commerce-service.js';
+
+function steamId(value) {
+  const result = String(value || '').trim();
+  if (!/^\d{17}$/.test(result)) throw new ServiceError('传送地图快照包含无效SteamID', 422, 'TELEPORT_SNAPSHOT_STEAM_ID_INVALID');
+  return result;
+}
+
+function finite(value, field) {
+  if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) {
+    throw new ServiceError(`传送地图快照包含无效${field}`, 422, 'TELEPORT_SNAPSHOT_COORDINATE_INVALID');
+  }
+  return Number(value);
+}
+
+function observedAt(value) {
+  const date = new Date(value || Date.now());
+  if (!Number.isFinite(date.getTime())) throw new ServiceError('传送地图快照时间无效', 422, 'TELEPORT_SNAPSHOT_TIME_INVALID');
+  return date.toISOString();
+}
+
+function safeName(value, fallback) {
+  const result = String(value || '').trim();
+  return result ? result.slice(0, 100) : fallback;
+}
+
+export class TeleportEntitySnapshotStore {
+  constructor({ db = null } = {}) {
+    this.db = db;
+    this.players = new Map();
+    this.flags = [];
+    this.playerSnapshotAt = null;
+    this.flagSnapshotAt = null;
+    this.available = { playerLocation: false, flagLocation: false };
+  }
+
+  upsertPlayer(input) {
+    const owner = steamId(input?.steamId);
+    const record = Object.freeze({
+      steamId: owner,
+      name: safeName(input?.name, '本人角色'),
+      worldX: finite(input?.worldX, '人物X坐标'),
+      worldY: finite(input?.worldY, '人物Y坐标'),
+      worldZ: finite(input?.worldZ, '人物Z坐标'),
+      observedAt: observedAt(input?.observedAt),
+      source: safeName(input?.source, 'shared_snapshot'),
+      online: true
+    });
+    this.players.set(owner, record);
+    this.playerSnapshotAt = record.observedAt;
+    this.available.playerLocation = true;
+    return record;
+  }
+
+  removePlayer(inputSteamId) {
+    const owner = steamId(inputSteamId);
+    const current = this.players.get(owner);
+    if (!current) return false;
+    this.players.set(owner, Object.freeze({ ...current, online: false }));
+    return true;
+  }
+
+  replaceFlags(inputFlags, options = {}) {
+    if (options.complete !== true) throw new ServiceError('领地旗仅接受完整权威快照', 422, 'TELEPORT_FLAG_SNAPSHOT_INCOMPLETE');
+    if (!Array.isArray(inputFlags)) throw new ServiceError('领地旗快照格式无效', 422, 'TELEPORT_FLAG_SNAPSHOT_INVALID');
+    const next = inputFlags.map((input, index) => {
+      const ownerSteamId = steamId(input?.ownerSteamId);
+      const visibleToSteamIds = [...new Set([ownerSteamId, ...(Array.isArray(input?.visibleToSteamIds) ? input.visibleToSteamIds.map(steamId) : [])])];
+      return Object.freeze({
+        id: safeName(input?.id, `flag-${index + 1}`),
+        name: safeName(input?.name, '领地旗'),
+        ownerSteamId,
+        visibleToSteamIds: Object.freeze(visibleToSteamIds),
+        worldX: finite(input?.worldX, '领地旗X坐标'),
+        worldY: finite(input?.worldY, '领地旗Y坐标'),
+        worldZ: finite(input?.worldZ, '领地旗Z坐标'),
+        observedAt: observedAt(input?.observedAt || options.observedAt),
+        source: safeName(input?.source, 'shared_snapshot')
+      });
+    });
+    this.flags = Object.freeze(next);
+    this.flagSnapshotAt = observedAt(options.observedAt);
+    this.available.flagLocation = true;
+    return { count: next.length, observedAt: this.flagSnapshotAt };
+  }
+
+  async persistPlayers(records, offlineSteamIds = []) {
+    if (!this.db) return;
+    await this.db.transaction(async (tx) => {
+      for (const record of records) {
+        await tx.query("INSERT INTO `商城用户` (`SteamID`,`游戏名称`,`位置世界X坐标`,`位置世界Y坐标`,`位置世界Z坐标`,`位置数据来源`,`位置观测时间`,`位置是否当前有效`) VALUES (?,?,?,?,?,?,?,1) ON DUPLICATE KEY UPDATE `游戏名称`=VALUES(`游戏名称`),`位置世界X坐标`=VALUES(`位置世界X坐标`),`位置世界Y坐标`=VALUES(`位置世界Y坐标`),`位置世界Z坐标`=VALUES(`位置世界Z坐标`),`位置数据来源`=VALUES(`位置数据来源`),`位置观测时间`=VALUES(`位置观测时间`),`位置是否当前有效`=1", [record.steamId, record.name, record.worldX, record.worldY, record.worldZ, record.source, new Date(record.observedAt)]);
+      }
+      for (const value of offlineSteamIds) {
+        const owner = steamId(value);
+        await tx.query('UPDATE `商城用户` SET `位置是否当前有效`=0 WHERE `SteamID`=?', [owner]);
+      }
+    });
+  }
+
+  async persistSquads(inputSquads, options = {}) {
+    if (!this.db) return;
+    if (options.complete !== true || !Array.isArray(inputSquads)) throw new ServiceError('小队仅接受完整权威快照', 422, 'TELEPORT_SQUAD_SNAPSHOT_INCOMPLETE');
+    const members = inputSquads.map((input) => ({
+      steamId: steamId(input?.steamId),
+      squadId: safeName(input?.squadId, ''),
+      squadName: safeName(input?.squadName, '')
+    }));
+    if (members.some((member) => !member.squadId || !member.squadName) || new Set(members.map((member) => member.steamId)).size !== members.length) throw new ServiceError('小队快照包含无效成员', 422, 'TELEPORT_SQUAD_SNAPSHOT_INVALID');
+    await this.db.transaction(async (tx) => {
+      await tx.query('UPDATE `商城用户` SET `小队编号`=NULL,`小队名称`=NULL,`小队更新时间`=NULL WHERE `小队编号` IS NOT NULL');
+      for (const member of members) await tx.query('INSERT INTO `商城用户` (`SteamID`,`小队编号`,`小队名称`,`小队更新时间`) VALUES (?,?,?,CURRENT_TIMESTAMP(3)) ON DUPLICATE KEY UPDATE `小队编号`=VALUES(`小队编号`),`小队名称`=VALUES(`小队名称`),`小队更新时间`=CURRENT_TIMESTAMP(3)', [member.steamId, member.squadId, member.squadName]);
+    });
+  }
+
+  async persistFlags() {
+    if (!this.db) return;
+    await this.db.transaction(async (tx) => {
+      await tx.query("UPDATE `传送位置快照` SET `是否当前有效`=0 WHERE `实体类型`='flag'");
+      for (const flag of this.flags) {
+        await tx.query("INSERT INTO `传送位置快照` (`实体类型`,`实体标识`,`归属SteamID`,`显示名称`,`世界X坐标`,`世界Y坐标`,`世界Z坐标`,`数据来源`,`观测时间`,`是否当前有效`) VALUES ('flag',?,?,?,?,?,?,?,?,1) ON DUPLICATE KEY UPDATE `归属SteamID`=VALUES(`归属SteamID`),`显示名称`=VALUES(`显示名称`),`世界X坐标`=VALUES(`世界X坐标`),`世界Y坐标`=VALUES(`世界Y坐标`),`世界Z坐标`=VALUES(`世界Z坐标`),`数据来源`=VALUES(`数据来源`),`观测时间`=VALUES(`观测时间`),`是否当前有效`=1", [flag.id, flag.ownerSteamId, flag.name, flag.worldX, flag.worldY, flag.worldZ, flag.source, new Date(flag.observedAt)]);
+      }
+    });
+  }
+
+  setCapability(name, available) {
+    if (!Object.hasOwn(this.available, name)) throw new ServiceError('传送地图能力名称无效', 422, 'TELEPORT_SNAPSHOT_CAPABILITY_INVALID');
+    this.available[name] = available === true;
+    return this.capabilities();
+  }
+
+  capabilities() {
+    return { ...this.available };
+  }
+
+  readPlayersForSteamIds(inputSteamIds) {
+    if (!Array.isArray(inputSteamIds)) throw new ServiceError('队友位置读取名单无效', 422, 'TELEPORT_SNAPSHOT_PLAYER_LIST_INVALID');
+    return [...new Set(inputSteamIds.map(steamId))].map((id) => this.players.get(id)).filter(Boolean);
+  }
+
+  readForSteamId(inputSteamId) {
+    const owner = steamId(inputSteamId);
+    return {
+      player: this.players.get(owner) || null,
+      flags: this.flags.filter((flag) => flag.visibleToSteamIds.includes(owner)),
+      flagSnapshotAt: this.flagSnapshotAt
+    };
+  }
+}

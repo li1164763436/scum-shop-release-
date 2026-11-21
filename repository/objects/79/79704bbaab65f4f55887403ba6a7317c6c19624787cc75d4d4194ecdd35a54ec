@@ -1,0 +1,19 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import mysql from 'mysql2/promise';
+const root = process.cwd();
+const config = JSON.parse(fs.readFileSync('data/config.json', 'utf8').replace(/^﻿/, '')).mysql;
+const db = await mysql.createConnection(config);
+try {
+  await db.beginTransaction();
+  const [products] = await db.query('SELECT sku,name,price,item_id AS itemId,grant_amount AS grantAmount,parent_category AS parentCategory,category_name AS category,currency_type AS currencyType,min_member_level AS minMemberLevel,max_uses AS maxUses,image_path AS imagePath,fulfillment_codes AS fulfillmentCodes,enabled FROM products ORDER BY id');
+  const [parents] = await db.query('SELECT name,sort_order AS sortOrder FROM product_parent_categories ORDER BY sort_order,id');
+  const [categories] = await db.query('SELECT parent_name AS parentName,name,sort_order AS sortOrder FROM product_categories ORDER BY parent_name,sort_order,id');
+  const missing = products.filter(p => p.imagePath && !fs.existsSync(path.join(root, 'public', p.imagePath)));
+  if (missing.length) throw new Error('商品图片缺失：' + JSON.stringify(missing));
+  const dir = path.join(root, 'data', 'release-catalog-1.0.43');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'products.json'), JSON.stringify({ version: '1.0.43', snapshot: true, products, parents, categories }, null, 2));
+  await db.commit();
+  console.log(JSON.stringify({ products: products.length, parents: parents.length, categories: categories.length, missingImages: missing.length }));
+} finally { await db.end(); }

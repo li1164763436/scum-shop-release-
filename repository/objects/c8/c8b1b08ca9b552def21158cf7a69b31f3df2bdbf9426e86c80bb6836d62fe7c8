@@ -1,0 +1,6 @@
+<section class="page" id="page-gateway">
+          <div class="page-toolbar"><div><p class="breadcrumb-inline">运维 / 网关状态</p><h2>网关状态</h2><p>查看网关连接状态，并管理前台网站背景图。</p></div><button class="btn secondary" id="reloadGateway" type="button">刷新状态</button></div>
+          <div class="card form-card"><div class="card-head"><div><h3>网站背景图</h3><p>选择本地图片上传，保存后前台商城将自动使用该背景图。</p></div></div><form id="websiteBackgroundForm"><div class="form-grid cols-3"><label class="span-3">当前背景图<input name="websiteBackgroundImage" type="text" readonly placeholder="尚未设置"><input id="websiteBackgroundFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif"><span class="field-hint">支持 JPG、PNG、WebP、GIF，最大 8MB。</span></label></div><div class="form-actions"><button class="btn primary" type="submit">上传并保存背景图</button></div></form></div>
+          <div class="card form-card"><div class="card-head"><div><h3>连接状态</h3><p>实时查看游戏网关、实例与在线玩家状态。</p></div></div><div id="gatewayStatusPanel" class="empty">正在加载网关状态...</div></div>
+        </section>
+        

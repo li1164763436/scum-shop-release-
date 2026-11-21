@@ -1,0 +1,21 @@
+import path from 'node:path';
+import mysql from 'mysql2/promise';
+import { ConfigStore } from '../src/services/config-store.js';
+
+const root = path.resolve(import.meta.dirname, '..');
+const config = (await new ConfigStore(path.join(root, 'data', 'config.json')).read()).mysql;
+const connection = await mysql.createConnection({ ...config, charset:'utf8mb4', timezone:'Z' });
+
+try {
+  await connection.beginTransaction();
+  const [vehicles] = await connection.query('SELECT id FROM vehicles ORDER BY id LIMIT 1 FOR UPDATE');
+  const vehicleId = vehicles[0]?.id;
+  if (!vehicleId) throw new Error('没有可用于验证的载具档案');
+  await connection.execute("INSERT INTO vehicle_insurance (vehicle_id,status) VALUES (?,'none') ON DUPLICATE KEY UPDATE status=VALUES(status)", [vehicleId]);
+  const [insert] = await connection.execute("INSERT INTO vehicle_audit_logs (vehicle_id,vehicle_code_snapshot,action,changes_json,actor_name) VALUES (?,'compat-test','update','{}','verification')", [vehicleId]);
+  const [deleted] = await connection.execute('DELETE FROM vehicle_audit_logs WHERE id=?', [insert.insertId]);
+  console.log(JSON.stringify({ forUpdate:true, upsert:true, generatedInsertId:insert.insertId > 0, delete:deleted.affectedRows === 1, rolledBack:true }));
+} finally {
+  await connection.rollback().catch(() => {});
+  await connection.end();
+}

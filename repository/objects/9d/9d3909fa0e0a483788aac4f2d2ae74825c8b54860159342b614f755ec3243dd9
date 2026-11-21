@@ -1,0 +1,93 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import net from 'node:net';
+import path from 'node:path';
+
+export const MAX_FRAME_SIZE = 64 * 1024;
+
+export function encodeFrame(payload) {
+  const body = Buffer.from(typeof payload === 'string' ? payload : JSON.stringify(payload), 'utf8');
+  if (!body.length || body.length > MAX_FRAME_SIZE) throw new Error('管道帧长度无效');
+  const frame = Buffer.allocUnsafe(body.length + 4);
+  frame.writeUInt32LE(body.length, 0);
+  body.copy(frame, 4);
+  return frame;
+}
+
+export function decodeFrame(frame) {
+  if (frame.length < 4) throw new Error('管道帧不完整');
+  const length = frame.readUInt32LE(0);
+  if (!length || length > MAX_FRAME_SIZE || frame.length !== length + 4) throw new Error('管道帧长度无效');
+  return JSON.parse(frame.subarray(4).toString('utf8'));
+}
+
+export function signRequest({ id, method, timestamp, nonce }, key) {
+  return crypto.createHmac('sha256', key).update(`${id}\n${method}\n${timestamp}\n${nonce}`, 'utf8').digest('hex');
+}
+
+export class CapabilityUnavailableError extends Error {
+  constructor(message = '游戏适配器能力不可用') {
+    super(message);
+    this.name = 'CapabilityUnavailableError';
+    this.code = 'CAPABILITY_UNAVAILABLE';
+  }
+}
+
+export class ScumShopPipeClient {
+  constructor({ endpointFile = path.resolve('runtime/bridge/endpoint.json'), timeoutMs = 5000 } = {}) {
+    this.endpointFile = path.resolve(endpointFile);
+    this.timeoutMs = timeoutMs;
+  }
+
+  async endpoint() {
+    const endpoint = JSON.parse(await fs.readFile(this.endpointFile, 'utf8'));
+    if (endpoint.protocol !== 'scum-shop-pipe-v1' || !String(endpoint.pipe).startsWith('\\\\.\\pipe\\ScumShop\\')) throw new Error('SCUM 商城管道端点无效');
+    const root = path.resolve(path.dirname(this.endpointFile), '..', '..');
+    const keyFile = path.resolve(root, endpoint.keyFile);
+    if (!keyFile.startsWith(`${root}${path.sep}`)) throw new Error('SCUM 商城密钥路径无效');
+    return { ...endpoint, keyFile };
+  }
+
+  async request(method) {
+    if (!['bridge.health', 'bridge.capabilities'].includes(method)) throw new CapabilityUnavailableError();
+    const endpoint = await this.endpoint();
+    const key = await fs.readFile(endpoint.keyFile);
+    if (key.length !== 32) throw new Error('SCUM 商城 IPC 密钥无效');
+    const request = { id: crypto.randomUUID(), method, timestamp: Date.now(), nonce: crypto.randomBytes(24).toString('hex') };
+    request.signature = signRequest(request, key);
+    const response = await this.exchange(endpoint.pipe, encodeFrame(request));
+    if (!response.ok) {
+      if (response.error?.code === 'CAPABILITY_UNAVAILABLE') throw new CapabilityUnavailableError(response.error.message);
+      const error = new Error(response.error?.message || response.error?.code || 'SCUM 商城管道请求失败');
+      error.code = response.error?.code;
+      throw error;
+    }
+    return response.result;
+  }
+
+  exchange(pipe, frame) {
+    return new Promise((resolve, reject) => {
+      const socket = net.createConnection(pipe);
+      const chunks = [];
+      let total = 0;
+      const timer = setTimeout(() => socket.destroy(Object.assign(new Error('SCUM 商城管道请求超时'), { code: 'ETIMEDOUT' })), this.timeoutMs);
+      socket.once('connect', () => socket.write(frame));
+      socket.on('data', (chunk) => {
+        chunks.push(chunk); total += chunk.length;
+        if (total < 4) return;
+        const buffer = Buffer.concat(chunks, total);
+        const length = buffer.readUInt32LE(0);
+        if (!length || length > MAX_FRAME_SIZE) return socket.destroy(new Error('SCUM 商城管道响应长度无效'));
+        if (buffer.length >= length + 4) { clearTimeout(timer); socket.end(); resolve(decodeFrame(buffer.subarray(0, length + 4))); }
+      });
+      socket.once('error', (error) => { clearTimeout(timer); reject(error); });
+      socket.once('close', () => clearTimeout(timer));
+    });
+  }
+
+  health() { return this.request('bridge.health'); }
+  capabilities() { return this.request('bridge.capabilities'); }
+  players() { return Promise.reject(new CapabilityUnavailableError()); }
+  command() { return Promise.reject(new CapabilityUnavailableError()); }
+  close() {}
+}

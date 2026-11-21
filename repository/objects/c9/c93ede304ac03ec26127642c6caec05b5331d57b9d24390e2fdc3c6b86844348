@@ -1,0 +1,90 @@
+import { ServiceError } from './commerce-service.js';
+import { redact } from '../utils/redactor.js';
+
+function rowsOf(result) { return Array.isArray(result) && Array.isArray(result[0]) ? result[0] : result; }
+function stableKey(eventHash) {
+  if (!/^[a-f0-9]{64}$/i.test(String(eventHash || ''))) throw new ServiceError('聊天事件指纹无效', 500, 'INVALID_CHAT_EVENT_HASH');
+  return `chat:${String(eventHash).toLowerCase()}`;
+}
+function safeMessage(error) {
+  return String(redact(error?.message || '领取失败')).replace(/\d{17}/g, '*****************').replace(/[A-Za-z]:\\[^\r\n]*/g, '[路径已隐藏]').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 500) || '领取失败';
+}
+function safeCode(error) { return String(error?.code || 'CLAIM_FAILED').replace(/[^A-Z0-9_]/gi, '_').slice(0, 64); }
+function limitOf(value, fallback = 50) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (!/^\d+$/.test(String(value)) || Number(value) < 1 || Number(value) > 200) throw new ServiceError('limit 必须是 1-200 的整数', 400, 'INVALID_LIMIT');
+  return Number(value);
+}
+function pageOf(value) {
+  if (value === undefined || value === null || value === '') return 1;
+  if (!/^\d+$/.test(String(value)) || Number(value) < 1 || Number(value) > 1000000) throw new ServiceError('page 必须是正整数', 400, 'INVALID_PAGE');
+  return Number(value);
+}
+function auditRow(row) {
+  return { id: Number(row.id), eventId: Number(row.eventId), eventTime: row.eventTime, steamId: row.steamId, playerName: row.playerName || null, characterNumber: Number(row.characterNumber), channel: row.channel, parseStatus: row.parseStatus, commandType: row.commandType || null, commandTarget: row.commandTarget || null, result: row.result || null, giftId: row.giftId === null || row.giftId === undefined ? null : Number(row.giftId), orderId: row.orderId === null || row.orderId === undefined ? null : Number(row.orderId), errorCode: row.errorCode || null, errorMessage: row.errorMessage || null, processedAt: row.processedAt || null };
+}
+
+export class ChatGiftClaimService {
+  constructor({ db, gifts, cloudWarehouse = null }) { this.db = db; this.gifts = gifts; this.cloudWarehouse = cloudWarehouse; }
+  requestKey(event) { return stableKey(event.eventHash); }
+  async existing(eventId) {
+    return rowsOf(await this.db.query('SELECT id,event_id AS eventId,result,gift_id AS giftId,order_id AS orderId,error_code AS errorCode,error_message AS errorMessage,processed_at AS processedAt FROM scum_chat_claim_audits WHERE event_id=?', [eventId]))[0] || null;
+  }
+  async resolveGift(command) {
+    if (command.type === 'id') {
+      const giftId = Number(command.giftId);
+      const rows = rowsOf(await this.db.query('SELECT id FROM gift_packages WHERE id=? LIMIT 1', [giftId]));
+      if (!rows[0]) throw new ServiceError('礼包不存在', 404, 'NOT_FOUND');
+      return Number(rows[0].id);
+    }
+    const rows = rowsOf(await this.db.query('SELECT id FROM gift_packages WHERE name=? LIMIT 2', [command.giftName]));
+    if (!rows[0]) throw new ServiceError('礼包不存在', 404, 'NOT_FOUND');
+    return Number(rows[0].id);
+  }
+  async process(event) {
+    if (!['Global','Local','Squad','Admin'].includes(event.channel) || !event.command) return null;
+    const prior = await this.existing(event.id);
+    if (prior) return { ...prior, idempotent: true };
+    let giftId = null;
+    try {
+      if (event.command.type === 'recycle') {
+        if (!this.cloudWarehouse) throw new ServiceError('云储回收服务未就绪', 503, 'RECYCLE_UNAVAILABLE');
+        const recycled = await this.cloudWarehouse.recycle(event.steamId, event.command.itemId);
+        const inserted = await this.db.query("INSERT INTO scum_chat_claim_audits (event_id,command_type,command_target,result,processed_at) VALUES (?,?,?,'succeeded',CURRENT_TIMESTAMP(3))", [event.id, event.command.type, event.command.target]);
+        return { id: Number(inserted.insertId), eventId: Number(event.id), result: 'succeeded', inventoryId: recycled?.id || null, idempotent: Boolean(recycled?.idempotent) };
+      }
+      giftId = await this.resolveGift(event.command);
+      const claim = await this.gifts.claim(giftId, event.steamId, 0, this.requestKey(event));
+      const inserted = await this.db.query("INSERT INTO scum_chat_claim_audits (event_id,command_type,command_target,result,gift_id,gift_claim_id,order_id,processed_at) VALUES (?,?,?,'succeeded',?,?,?,CURRENT_TIMESTAMP(3))", [event.id, event.command.type, event.command.target, giftId, claim.claimId || null, claim.id || null]);
+      return { id: Number(inserted.insertId), eventId: Number(event.id), result: 'succeeded', giftId, orderId: claim.id || null, idempotent: Boolean(claim.idempotent) };
+    } catch (error) {
+      if (!(error instanceof ServiceError)) throw error;
+      try {
+        const errorCode = safeCode(error), errorMessage = safeMessage(error);
+        const inserted = await this.db.query("INSERT INTO scum_chat_claim_audits (event_id,command_type,command_target,result,gift_id,error_code,error_message,processed_at) VALUES (?,?,?,'failed',?,?,?,CURRENT_TIMESTAMP(3))", [event.id, event.command.type, event.command.target, giftId, errorCode, errorMessage]);
+        if (event.command.type === 'recycle') await this.cloudWarehouse?.notifyRecycleFailure?.(event.steamId, event.command.itemId, errorCode);
+        return { id: Number(inserted.insertId), eventId: Number(event.id), result: 'failed', giftId, errorCode, errorMessage, idempotent: false };
+      } catch (auditError) {
+        if (auditError?.code !== 'ER_DUP_ENTRY' && auditError?.errno !== 1062) throw auditError;
+        const repeated = await this.existing(event.id);
+        if (repeated) return { ...repeated, idempotent: true };
+        throw auditError;
+      }
+    }
+  }
+  async overview(workerStatus = null, claimPrefix = null) {
+    const collector = typeof workerStatus === 'function' ? await workerStatus() : workerStatus;
+    const counts = rowsOf(await this.db.query("SELECT COUNT(*) AS totalEvents,SUM(channel IN ('Global','Local','Squad','Admin')) AS globalEvents,SUM(parse_status='claim_command') AS claimCommands,MAX(event_time) AS latestEventAt FROM scum_chat_events"))[0] || {};
+    const prefix = String(claimPrefix || collector?.claimPrefix || '@');
+    const audits = rowsOf(await this.db.query("SELECT COUNT(*) AS processed,SUM(result='succeeded') AS succeeded,SUM(result='failed') AS failed FROM (SELECT a.result FROM scum_chat_claim_audits a JOIN scum_chat_events e ON e.id=a.event_id WHERE LEFT(e.message_text,CHAR_LENGTH(?))=? UNION ALL SELECT r.result FROM chat_auto_reply_audits r JOIN scum_chat_events e ON e.id=r.event_id WHERE LEFT(e.message_text,CHAR_LENGTH(?))=?) trigger_results", [prefix, prefix, prefix, prefix]))[0] || {};
+    const files = rowsOf(await this.db.query("SELECT COUNT(*) AS files,MAX(last_processed_at) AS lastProcessedAt FROM scum_log_files WHERE source_type='chat'"))[0] || {};
+    return { totalEvents: Number(counts.totalEvents || 0), globalEvents: Number(counts.globalEvents || 0), claimCommands: Number(counts.claimCommands || 0), triggerPrefix: prefix, processed: Number(audits.processed || 0), succeeded: Number(audits.succeeded || 0), failed: Number(audits.failed || 0), files: Number(files.files || 0), latestEventAt: counts.latestEventAt || null, lastProcessedAt: files.lastProcessedAt || null, collector };
+  }
+  async events({ page, limit } = {}) {
+    const safePage = pageOf(page); const safeLimit = limitOf(limit); const offset = (safePage - 1) * safeLimit;
+    const rows = rowsOf(await this.db.query(`SELECT e.id,e.event_time AS eventTime,e.steam_id AS steamId,e.player_name AS playerName,e.character_number AS characterNumber,e.channel,e.parse_status AS parseStatus,a.command_type AS commandType,a.command_target AS commandTarget,a.result,a.gift_id AS giftId,a.order_id AS orderId,a.error_code AS errorCode,a.error_message AS errorMessage,a.processed_at AS processedAt FROM scum_chat_events e LEFT JOIN scum_chat_claim_audits a ON a.event_id=e.id ORDER BY e.event_time DESC,e.id DESC LIMIT ${safeLimit} OFFSET ${offset}`));
+    return { page: safePage, limit: safeLimit, items: rows.map(auditRow) };
+  }
+}
+
+export { stableKey, safeMessage, limitOf, pageOf };

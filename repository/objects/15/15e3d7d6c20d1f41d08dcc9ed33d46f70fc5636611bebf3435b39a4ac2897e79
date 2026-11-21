@@ -1,0 +1,87 @@
+async function loadDashboard() {
+  const [dashboard] = await Promise.allSettled([api('/api/dashboard'), loadMonitor(), loadGameChatPlayers()]);
+  if (dashboard.status === 'fulfilled') {
+    const data = dashboard.value || {};
+    $('#dashboardPlayerCount').textContent = `${number(data.accounts?.registered_count)} / ${number(data.accounts?.count)}`;
+    $('#dashboardTodayTasks').textContent = optionalNumber(data.tasks?.today_processed_count);
+    const username = String(data?.license?.username || '');
+    $('#licenseUsername').textContent = !username ? '--' : username.length === 1 ? '*' : `${username[0]}${'*'.repeat(Math.max(1, username.length - 2))}${username.at(-1)}`;
+    $('#licenseExpiresAt').textContent = date(data?.license?.expiresAt);
+  } else {
+    $('#dashboardPlayerCount').textContent = '-- / --';
+    $('#dashboardTodayTasks').textContent = '--';
+    toast(dashboard.reason.message, true);
+  }
+  await loadHealth();
+ }
+const restartStoreButton = $('[data-go="operations"]', $('#page-dashboard'));
+if (restartStoreButton) {
+  restartStoreButton.removeAttribute('data-go');
+  restartStoreButton.id = 'restartStore';
+  restartStoreButton.textContent = '重启商城';
+  restartStoreButton.addEventListener('click', async (event) => {
+    if (!window.confirm('确认重启商城全部服务？重启期间页面会短暂断开。')) return;
+    await withBusy(event.currentTarget, async () => {
+      await api('/api/admin/system/restart', { method: 'POST' });
+      toast('商城正在重启，请稍候');
+    });
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = '重启中...';
+  });
+}
+$('[data-service="backend"]')?.remove();
+$('[data-service="chatLogs"]')?.remove();
+const monitorLastSuccessItem = $('#monitorLastSuccess')?.closest('div');
+if (monitorLastSuccessItem && !$('#monitorCpuUsage')) {
+  const cpuItem = document.createElement('div');
+  cpuItem.innerHTML = '<dt>CPU占用</dt><dd id="monitorCpuUsage">--</dd>';
+  monitorLastSuccessItem.after(cpuItem);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes)) return '--';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
+  return `${(bytes / 1073741824).toFixed(1)} GB`;
+}
+async function loadMonitor() {
+  if (state.page !== 'dashboard') return;
+  const [overview, players, events] = await Promise.allSettled([api('/api/monitor/overview'), api('/api/monitor/players'), api('/api/monitor/events?limit=50')]);
+  if (overview.status === 'fulfilled') renderMonitorOverview(overview.value); else renderMonitorOverviewError(overview.reason.message);
+  if (players.status === 'fulfilled') renderMonitorPlayers(players.value); else $('#monitorPlayerRows').innerHTML = empty(5, players.reason.message);
+  if (events.status === 'fulfilled') renderMonitorEvents(list(events.value, ['items', 'events'])); else $('#monitorEventRows').innerHTML = empty(4, events.reason.message);
+}
+function renderMonitorOverview(data) {
+  const collector = data?.collector || {};
+  const hasSample = Boolean(data?.lastSampledAt);
+  const failed = Boolean(data?.queryFailed);
+  const hasSuccess = data?.onlineCount !== null && data?.onlineCount !== undefined;
+  $('#monitorOnlineCount').textContent = hasSuccess ? number(data.onlineCount) : '--';
+  $('#monitorOnlineDetail').textContent = !hasSuccess ? '暂无成功采样' : failed ? '查询失败，显示最近成功人数' : Number(data.onlineCount) === 0 ? '0 人在线' : '最近成功采样';
+  $('#monitorRconLatency').textContent = data?.rconLatencyMs === null || data?.rconLatencyMs === undefined ? '--' : `${number(data.rconLatencyMs)} ms`;
+  $('#monitorLastSample').textContent = data?.stale ? '数据已过期；失败不会显示为 0 人在线' : hasSample ? `最近采样 ${date(data.lastSampledAt)}` : '暂无监控采样';
+  $('#monitorCollectorState').textContent = !collector.enabled ? '未启用' : collector.running ? '采集中' : collector.polling ? '运行中' : '异常';
+  $('#monitorLastSuccess').textContent = collector.lastSuccessAt ? date(collector.lastSuccessAt) : date(data?.lastSuccessAt);
+  $('#monitorCpuUsage').textContent = `${Number(data?.process?.cpuPercent || 0).toFixed(1)}%`;
+  $('#monitorProcessMemory').innerHTML = data?.process ? `应用占用<br>${(Number(data.process.rssBytes || 0) / 1048576).toFixed(2)} MB` : '应用占用<br>0.00 MB';
+  const connectionMetric = $('#monitorFailureCount')?.closest('div');
+  if (connectionMetric) connectionMetric.dataset.retries = String(Number(collector.consecutiveFailures || 0));
+  renderMonitorConnectionMetric(state.gameConnectionOnline, Number(collector.consecutiveFailures || 0));
+}
+function renderMonitorOverviewError(message) {
+  $('#monitorLastSample').textContent = `监控概览加载失败：${message}`;
+}
+function renderMonitorPlayers(data) {
+  const items = list(data, ['items', 'players']);
+  $('#monitorPlayersMeta').textContent = `${data?.stale ? '数据已过期 · ' : ''}快照 ${date(data?.sampledAt)} · ${items.length} 人`;
+  $('#monitorPlayerRows').innerHTML = items.length ? items.map((player) => `<tr><td><strong>${esc(player.characterName || '未命名角色')}</strong></td><td>${esc(player.steamName || '--')}</td><td><code>${esc(player.steamId)}</code></td><td>${player.isAdmin ? '<span class="badge active">管理员</span>' : '<span class="badge">玩家</span>'}</td><td>${esc(date(player.observedAt || data.sampledAt))}</td></tr>`).join('') : empty(5, data?.sampledAt ? '0 人在线' : '暂无成功采样');
+}
+function renderMonitorEvents(items) {
+  $('#monitorEventRows').innerHTML = items.length ? items.map((item) => `<tr><td><span class="badge ${item.eventType === 'online' ? 'active' : 'inactive'}">${item.eventType === 'online' ? '上线' : '下线'}</span></td><td><strong>${esc(item.characterName || '未命名角色')}</strong><br><span class="muted">${esc(item.steamName || '--')}</span></td><td><code>${esc(item.steamId)}</code></td><td>${esc(date(item.observedAt))}</td></tr>`).join('') : empty(4, '暂无上下线事件');
+}
+
+$('#startVersionUpdate')?.addEventListener('click', openVersionUpdateConfig);
+
+

@@ -1,0 +1,10 @@
+<section class="page" id="page-accounts">
+          <div class="page-toolbar account-toolbar"><div><span class="section-kicker">PLAYER MANAGEMENT</span><h2>玩家管理</h2><p>集中查看玩家身份、在线状态与会员资料。</p></div></div>
+          <div class="account-summary-grid"><article><span>账户总数</span><strong id="accountTotalCount">--</strong><small>已创建商城账户</small></article><article><span>当前在线</span><strong id="accountOnlineCount">--</strong><small>最近成功快照</small></article><article><span>商城币总额</span><strong id="accountBalanceTotal">--</strong><small>全部账户余额</small></article></div>
+          <section class="card account-directory"><div class="account-filter-bar"><div class="search-box wide">⌕<input id="accountSearch" placeholder="搜索商城用户/游戏昵称/SteamID"></div><button class="btn secondary" id="searchAccounts">搜索</button><button class="btn secondary" id="openAccountLicenseManagement" type="button" hidden>授权管理</button><span class="result-count" id="accountResultCount">0 位玩家</span></div><div class="table-wrap"><table class="account-table"><thead><tr><th>操作</th><th>状态</th><th>用户 / 昵称</th><th>SteamID</th><th>在线记录</th><th>会员等级</th><th>商城币</th></tr></thead><tbody id="accountRows"><tr><td colspan="7" class="empty loading">正在加载账户...</td></tr></tbody></table></div></section>
+        </section>
+
+
+
+
+

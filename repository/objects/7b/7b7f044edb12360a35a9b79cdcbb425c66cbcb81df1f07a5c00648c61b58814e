@@ -1,0 +1,152 @@
+function membershipState(item) {
+  const level = Number(item.memberLevel || 0);
+  if (!level) return { key: 'none', label: '非会员' };
+  if (!item.memberExpiresAt) return { key: 'active', label: '永久有效' };
+  return new Date(item.memberExpiresAt).getTime() > Date.now() ? { key: 'active', label: '有效' } : { key: 'inactive', label: '已过期' };
+}
+
+function membershipStrategyModal(strategy = {}) {
+  const editing = strategy.level !== undefined && strategy.level !== null;
+  openModal({ title: editing ? '编辑会员策略' : '新增会员策略', description: '配置会员等级权益和前台展示信息。', submitText: editing ? '保存策略' : '提交', body: `<div class="modal-section-grid"><label>会员等级<input name="level" type="number" min="0" max="100" value="${esc(strategy.level ?? '')}" placeholder="如：1、2、3" ${editing ? 'readonly' : ''} required></label><label>会员称号<input name="title" value="${esc(strategy.title || '')}" maxlength="100" placeholder="如：白银会员 / 【称号】" required></label><label>开通金额<input name="openingAmount" type="number" min="0" value="${esc(strategy.openingAmount ?? '')}" placeholder="金额" required></label><label>开通周期（天）<input name="periodDays" type="number" min="1" value="${esc(strategy.periodDays ?? '')}" placeholder="周期天数" required></label><label>赠送代币<input name="giftTokens" type="number" min="0" value="${esc(strategy.giftTokens ?? '')}" placeholder="商城币/代币" required></label><label>升级所需消费<input name="upgradeSpend" type="number" min="0" value="${esc(strategy.upgradeSpend ?? '')}" placeholder="消费门槛" required></label><label>传送折扣（%）<input name="teleportDiscount" type="number" min="0" max="100" step="0.01" value="${esc(strategy.teleportDiscount ?? 100)}" placeholder="如 80 表示 8 折" required></label><label>在线加成（%）<input name="onlineBonus" type="number" min="0" max="100" step="0.01" value="${esc(strategy.onlineBonus ?? 100)}" required></label><label>购物折扣（%）<input name="shoppingDiscount" type="number" min="0" max="100" step="0.01" value="${esc(strategy.shoppingDiscount ?? 100)}" required></label><label>礼包折扣（%）<input name="giftDiscount" type="number" min="0" max="100" step="0.01" value="${esc(strategy.giftDiscount ?? 100)}" required></label><label>充值加成（%）<input name="rechargeBonus" type="number" min="0" max="100" step="0.01" value="${esc(strategy.rechargeBonus ?? 100)}" required></label><label>每日传送次数<input name="dailyTeleports" type="number" min="0" value="${esc(strategy.dailyTeleports ?? 0)}" placeholder="0 表示该等级不可使用限制" required></label><label>签到额外赠送商城币<input name="checkinBonus" type="number" min="0" value="${esc(strategy.checkinBonus ?? 0)}" required></label><label class="full">额外提示<textarea name="extraHint" maxlength="500" placeholder="显示在玩家端会员卡片">${esc(strategy.extraHint || '')}</textarea></label></div>`, onSubmit: async (form) => { const values = Object.fromEntries(new FormData(form)); const body = { ...values, level: Number(values.level), openingAmount: Number(values.openingAmount), periodDays: Number(values.periodDays), giftTokens: Number(values.giftTokens), upgradeSpend: Number(values.upgradeSpend), teleportDiscount: Number(values.teleportDiscount), onlineBonus: Number(values.onlineBonus), shoppingDiscount: Number(values.shoppingDiscount), giftDiscount: Number(values.giftDiscount), rechargeBonus: Number(values.rechargeBonus), dailyTeleports: Number(values.dailyTeleports), checkinBonus: Number(values.checkinBonus), enabled: true }; await api(editing ? `/api/memberships/strategies/${encodeURIComponent(strategy.level)}` : '/api/memberships/strategies', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }); toast(editing ? '会员策略已更新' : '会员策略已添加'); closeModal(); await loadMembership(); } });
+}
+function renderMembershipStrategies() {
+  const rows = state.membershipStrategies;
+  $('#membershipLevelRows').innerHTML = rows.length ? rows.map((item) => `<tr><td>${number(item.level)}</td><td>${esc(item.title)}</td><td>${number(item.openingAmount)}</td><td>${number(item.periodDays)} 天</td><td>${number(item.giftTokens)}</td><td>${number(item.upgradeSpend)}</td><td>${number(item.shoppingDiscount)}%</td><td>${number(item.giftDiscount)}%</td><td>${number(item.teleportDiscount)}%</td><td>${number(item.onlineBonus)}%</td><td>${number(item.rechargeBonus)}%</td><td>${number(item.checkinBonus)}</td><td>${number(item.dailyTeleports)}</td><td><div class="row-actions"><button class="row-btn" data-edit-membership-strategy="${esc(item.level)}">编辑</button>${Number(item.level) === 0 ? '' : `<button class="row-btn danger" data-delete-membership-strategy="${esc(item.level)}">删除</button>`}</div></td></tr>`).join('') : empty(14, '暂无会员策略');
+}
+function renderMembershipPolicy(policy = {}) {
+  $('#enableOpenSystem').checked = policy.openEnabled !== false;
+  $('#enableUpgrade').checked = policy.consumptionUpgradeEnabled === true;
+  $('#enableRenew').checked = policy.renewalEnabled !== false;
+  $('#renewPriceStrategy').value = policy.renewalPriceStrategy || 'original';
+  $('#enableRenewGift').checked = policy.renewalGiftEnabled !== false;
+  $('#renewDiscount').value = Number(policy.renewalDiscount ?? 100);
+  $('#renewFixedPrice').value = Number(policy.renewalFixedPrice || 0);
+  $('#upgradeStrategy').value = policy.upgradeStrategy || 'allow';
+  $('#upgradeExpiryStrategy').value = policy.upgradeExpiryStrategy || 'extend';
+  $('#enableUpgradeGift').checked = policy.upgradeGiftEnabled === true;
+  $('#upgradeGiftAmount').value = Number(policy.upgradeGiftAmount || 0);
+  $('#lowerLevelPurchase').value = policy.lowerLevelPurchase || 'forbid';
+  syncMembershipMode(policy.consumptionUpgradeEnabled ? 'consumption' : 'open');
+}
+function syncMembershipMode(mode) {
+  const consumption = mode === 'consumption';
+  $('#enableOpenSystem').checked = !consumption;
+  $('#enableUpgrade').checked = consumption;
+  const status = $('.strategy-status');
+  status.textContent = consumption ? '当前制度：消费制' : '当前制度：开通制';
+  status.classList.toggle('consumption', consumption);
+  status.classList.toggle('opening', !consumption);
+}
+async function loadMembership() {
+  try {
+    const [strategies, policy] = await Promise.all([api('/api/memberships/strategies'), api('/api/memberships/policy')]);
+    state.membershipStrategies = Array.isArray(strategies) ? strategies : [];
+    state.membershipPolicy = policy || {};
+    renderMembershipStrategies();
+    renderMembershipPolicy(state.membershipPolicy);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function openMembershipLogs(page = 1) {
+  const query = new URLSearchParams({ page });
+  if (state.membershipLogSteamId) query.set('steamId', state.membershipLogSteamId);
+  const logs = await api(`/api/memberships/logs?${query}`);
+  state.membershipLogPage = Number(logs.page || 1);
+  state.membershipLogTotal = Number(logs.total || 0);
+  const pages = Math.max(1, Math.ceil(state.membershipLogTotal / 15));
+  const rows = (logs.items || []).length ? logs.items.map((item) => `<tr><td><strong>${esc(item.characterName || item.steamName || item.username || '--')}</strong><br><code>${esc(item.steamId)}</code></td><td>等级 ${number(item.oldLevel)}</td><td>等级 ${number(item.newLevel)}</td><td>${item.oldExpiresAt ? esc(date(item.oldExpiresAt)) : Number(item.oldLevel) > 0 ? '永久' : '--'}</td><td>${item.newExpiresAt ? esc(date(item.newExpiresAt)) : Number(item.newLevel) > 0 ? '永久' : '--'}</td><td>${esc(item.reason)}</td><td>${esc(item.operator || 'admin')}</td><td>${esc(date(item.createdAt))}</td></tr>`).join('') : empty(8, '暂无会员变更记录');
+  const scope = state.membershipLogSteamId ? `仅展示 ${state.membershipLogSteamId} 的会员变更` : '展示全部会员等级和有效期调整记录';
+  openModal({ title: '会员变更记录', description: scope, body: `<div class="membership-log-modal-table"><table><thead><tr><th>玩家</th><th>变更前等级</th><th>变更后等级</th><th>变更前到期</th><th>变更后到期</th><th>原因</th><th>操作者</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table></div><div class="table-pagination membership-log-modal-pagination"><button type="button" data-membership-log-page="${state.membershipLogPage - 1}" ${state.membershipLogPage <= 1 ? 'disabled' : ''}>上一页</button><span>第 ${state.membershipLogPage} / ${pages} 页，共 ${state.membershipLogTotal} 条</span><button type="button" data-membership-log-page="${state.membershipLogPage + 1}" ${state.membershipLogPage >= pages ? 'disabled' : ''}>下一页</button></div>`, submitText: '关闭', onSubmit: closeModal });
+  $('#modalBackdrop').classList.add('centered-modal', 'membership-log-modal');
+  $('#cancelModal').hidden = true;
+}
+
+function renderMembershipConsumption(data) {
+  const next = data.nextLevel === null ? '<strong>已达到最高等级</strong><small>没有更高等级策略</small>' : `<strong>等级 ${number(data.nextLevel)} · ${esc(data.nextTitle || '')}</strong><small>升级门槛 ${number(data.nextUpgradeSpend)} 商城币</small>`;
+  const progress = data.nextLevel === null ? 100 : Math.min(100, Math.round(Number(data.totalSpent || 0) / Math.max(1, Number(data.nextUpgradeSpend || 0)) * 100));
+  $('#membershipConsumptionResult').innerHTML = `<div class="membership-consumption-identity"><span>商城账号</span><strong>${esc(data.username || '--')}</strong><code>${esc(data.steamId)}</code></div><div class="membership-consumption-metrics"><article><span>已消费</span><strong>${number(data.totalSpent)}</strong><small>商城币</small></article><article><span>当前等级</span><strong>${number(data.currentLevel)}</strong><small>${data.memberExpiresAt ? '有效期至 ' + esc(date(data.memberExpiresAt)) : data.currentLevel > 0 ? '永久会员' : '非会员'}</small></article><article><span>下一级差额</span><strong>${data.nextLevel === null ? '—' : number(data.remainingSpend)}</strong><small>${data.eligible ? '已满足升级条件' : '商城币'}</small></article></div><div class="membership-consumption-next"><div>${next}</div><span class="membership-consumption-progress"><i style="width:${progress}%"></i></span><em>${progress}%</em></div>`;
+}
+
+async function queryMembershipConsumption(form, button) {
+  const steamId = form.elements.steamId.value.trim();
+  await withBusy(button, async () => {
+    $('#membershipConsumptionResult').innerHTML = '<div class="empty-row"><strong>正在查询消费数据</strong><small>CONSUMPTION LOOKUP</small></div>';
+    try { renderMembershipConsumption(await api(`/api/memberships/consumption/${encodeURIComponent(steamId)}`)); }
+    catch (error) { $('#membershipConsumptionResult').innerHTML = `<div class="empty-row"><strong>${esc(error.message)}</strong><small>QUERY FAILED</small></div>`; }
+  });
+}
+
+function membershipModal(steamId = '') {
+  const current = state.memberships.find((item) => item.steamId === steamId) || state.accounts.find((item) => item.steamId === steamId);
+  const localExpiry = current?.memberExpiresAt ? new Date(new Date(current.memberExpiresAt).getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
+  openModal({ title: '赠送/调整会员', description: '会员等级范围为 1-100；永久会员无需填写到期时间。', submitText: '确认保存', body: `<label class="full">玩家 SteamID<input name="steamId" value="${esc(steamId)}" ${steamId ? 'readonly ' : ''}required pattern="[0-9]{17}"></label><label>会员等级<input name="memberLevel" type="number" min="1" max="100" value="${esc(Math.max(1, Number(current?.memberLevel || 1)))}" required></label><label>期限模式<select name="duration"><option value="permanent"${localExpiry ? '' : ' selected'}>永久</option><option value="specified"${localExpiry ? ' selected' : ''}>指定到期</option></select></label><label class="full" data-membership-expiry>到期时间<input name="memberExpiresAt" type="datetime-local" value="${esc(localExpiry)}"></label><label class="full">操作原因<textarea name="reason" required maxlength="500" placeholder="请填写赠送、续期或调整原因"></textarea></label>`, onSubmit: async (form) => { const f = form.elements; if (f.duration.value === 'specified' && !f.memberExpiresAt.value) throw new Error('请选择到期时间'); await api(`/api/memberships/${encodeURIComponent(f.steamId.value)}`, { method: 'PUT', body: JSON.stringify({ level: Number(f.memberLevel.value), expiresAt: f.duration.value === 'permanent' ? null : new Date(f.memberExpiresAt.value).toISOString(), reason: f.reason.value.trim() }) }); toast('会员信息已保存'); closeModal(); if (state.page === 'membership') await loadMembership(); if (state.page === 'accounts') await loadAccounts(); } });
+  $('#modalBackdrop').classList.add('centered-modal', 'membership-adjust-modal');
+  const sync = () => $('[data-membership-expiry]').hidden = $('#modalForm').elements.duration.value === 'permanent'; sync(); $('#modalForm').elements.duration.addEventListener('change', sync);
+}
+
+async function cancelMembership(steamId) {
+  const reason = window.prompt('请输入取消会员原因（必填）');
+  if (reason === null) return;
+  if (!reason.trim()) { toast('取消原因不能为空', true); return; }
+  if (!window.confirm(`确认取消玩家 ${steamId} 的会员？`)) return;
+  await api(`/api/memberships/${encodeURIComponent(steamId)}`, { method: 'DELETE', body: JSON.stringify({ reason: reason.trim() }) }); toast('会员已取消'); await loadMembership();
+}
+
+$('#reloadMembership').addEventListener('click', loadMembership);
+
+function openMembershipStrategyModal(strategy = {}) { membershipStrategyModal(strategy); $('#modalBackdrop').classList.add('centered-modal', 'membership-strategy-modal'); }
+
+$('#newMembership').addEventListener('click', () => openMembershipStrategyModal());
+
+$('#addLevelStrategy').addEventListener('click', () => openMembershipStrategyModal());
+
+$('#enableOpenSystem').addEventListener('change', (event) => syncMembershipMode(event.currentTarget.checked ? 'open' : 'consumption'));
+$('#enableUpgrade').addEventListener('change', (event) => syncMembershipMode(event.currentTarget.checked ? 'consumption' : 'open'));
+
+$('#saveStrategy').addEventListener('click', async (event) => {
+  await withBusy(event.currentTarget, async () => {
+    const body = {
+      openEnabled: $('#enableOpenSystem').checked, consumptionUpgradeEnabled: $('#enableUpgrade').checked, renewalEnabled: $('#enableRenew').checked,
+      renewalPriceStrategy: $('#renewPriceStrategy').value, renewalGiftEnabled: $('#enableRenewGift').checked,
+      renewalDiscount: Number($('#renewDiscount').value), renewalFixedPrice: Number($('#renewFixedPrice').value),
+      upgradeStrategy: $('#upgradeStrategy').value, upgradeExpiryStrategy: $('#upgradeExpiryStrategy').value,
+      upgradeGiftEnabled: $('#enableUpgradeGift').checked, upgradeGiftAmount: Number($('#upgradeGiftAmount').value), lowerLevelPurchase: $('#lowerLevelPurchase').value
+    };
+    state.membershipPolicy = await api('/api/memberships/policy', { method: 'PUT', body: JSON.stringify(body) });
+    renderMembershipPolicy(state.membershipPolicy);
+    toast('会员制度配置已保存');
+  });
+});
+
+$('#membershipConsumptionForm').addEventListener('submit', (event) => { event.preventDefault(); queryMembershipConsumption(event.currentTarget, event.submitter); });
+$('#openMembershipLogs').addEventListener('click', async (event) => { state.membershipLogSteamId = ''; await withBusy(event.currentTarget, () => openMembershipLogs(1)); });
+
+async function handleMembershipClick(event) {
+  const logPageButton = event.target.closest('[data-membership-log-page]');
+  if (logPageButton && !logPageButton.disabled) { await openMembershipLogs(Number(logPageButton.dataset.membershipLogPage)); return true; }
+  const editStrategyButton = event.target.closest('[data-edit-membership-strategy]');
+  if (editStrategyButton) {
+    const strategy = state.membershipStrategies.find((item) => String(item.level) === String(editStrategyButton.dataset.editMembershipStrategy));
+    if (strategy) openMembershipStrategyModal(strategy);
+    return true;
+  }
+  const deleteStrategyButton = event.target.closest('[data-delete-membership-strategy]');
+  if (deleteStrategyButton) {
+    if (!window.confirm(`确认删除会员等级 ${deleteStrategyButton.dataset.deleteMembershipStrategy} 的策略？`)) return true;
+    try { await api(`/api/memberships/strategies/${encodeURIComponent(deleteStrategyButton.dataset.deleteMembershipStrategy)}`, { method: 'DELETE' }); toast('会员策略已删除'); await loadMembership(); } catch (error) { toast(error.message, true); }
+    return true;
+  }
+  const adjustMembershipButton = event.target.closest('[data-adjust-membership]');
+  if (adjustMembershipButton) { membershipModal(adjustMembershipButton.dataset.adjustMembership); return true; }
+  const cancelMembershipButton = event.target.closest('[data-cancel-membership]');
+  if (cancelMembershipButton) { await cancelMembership(cancelMembershipButton.dataset.cancelMembership); return true; }
+  const membershipLogsButton = event.target.closest('[data-membership-logs]');
+  if (membershipLogsButton) {
+    state.membershipLogSteamId = membershipLogsButton.dataset.membershipLogs;
+    state.membershipLogPage = 1;
+    await openMembershipLogs(1);
+    return true;
+  }
+}
+
+

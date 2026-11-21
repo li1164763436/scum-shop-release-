@@ -1,0 +1,46 @@
+const sensitiveKeys = /^(?:api[-_]?key|password|shared[-_]?secret|authorization|x-api-key)$/i;
+
+function redactString(value) {
+  return String(value)
+    .replace(/(https?:\/\/)([^\s/@:]+):([^\s/@]+)@/gi, '$1***:***@')
+    .replace(/([?&](?:api_?key|apikey|token|password|shared_?secret|authorization)=)[^&#\s]*/gi, '$1***')
+    .replace(/\b(Bearer|ApiKey)\s+[A-Za-z0-9._~+\/-]+=*/gi, '$1 ***')
+    .replace(/((?:x-api-key|authorization|password|shared[-_]?secret|api[-_]?key)\s*[=:]\s*)[^,;\s}\]]+/gi, '$1***');
+}
+
+export function redact(value, seen = new WeakSet()) {
+  if (typeof value === 'string') return redactString(value);
+  if (value === null || typeof value !== 'object') return value;
+  if (seen.has(value)) return '[循环引用]';
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((item) => redact(item, seen));
+  const output = {};
+  for (const [key, item] of Object.entries(value)) {
+    output[key] = sensitiveKeys.test(key) ? '***' : redact(item, seen);
+  }
+  return output;
+}
+
+export function safeMessage(error, fallback = '请求失败') {
+  const status = error?.response?.status;
+  if (status === 401 || status === 403) return '鉴权失败，请检查连接凭据';
+  if (status === 404) return '外部服务接口不存在或版本不兼容';
+  if (status >= 500) return '外部服务暂时不可用';
+  if (error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT') return '连接超时';
+  if (String(error?.code || '').startsWith('ER_')) return '数据库处理失败';
+  if (['ECONNREFUSED', 'ENOTFOUND', 'ECONNRESET', 'EAI_AGAIN'].includes(error?.code) || (error?.request && !error?.response)) return '无法连接外部服务';
+  const message = redactString(error?.message || fallback);
+  if (/[\u3400-\u9fff]/u.test(message)) return message;
+  const text = message.toLowerCase();
+  if (/duplicate entry|already exists/.test(text)) return '数据已存在，请勿重复提交';
+  if (/cannot add or update a child row|foreign key constraint/.test(text)) return '关联数据不存在或已被删除';
+  if (/data too long|value too long/.test(text)) return '输入内容超过允许长度';
+  if (/incorrect .* value|invalid .* value|out of range/.test(text)) return '输入数据格式或范围无效';
+  if (/access denied|unauthorized|forbidden|not authorized/.test(text)) return '没有权限执行此操作';
+  if (/not found|does not exist|unknown command/.test(text)) return '请求的数据或功能不存在';
+  if (/timeout|timed out/.test(text)) return '请求超时，请稍后重试';
+  if (/connection refused|connection reset|network|socket|fetch failed/.test(text)) return '网络连接失败，请稍后重试';
+  if (/required|must be|cannot be empty|is empty/.test(text)) return '必填内容不能为空或格式不正确';
+  if (/failed|failure|error|exception/.test(text)) return '操作失败，请稍后重试';
+  return '操作失败，请稍后重试';
+}

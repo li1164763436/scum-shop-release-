@@ -1,0 +1,132 @@
+async function loadProducts() {
+  $('#productCount').textContent = '正在同步库存...';
+  $('#productGrid').innerHTML = '<div class="state-panel loading-state"><span class="loader"></span><strong>正在连接物资网络</strong><small>正在同步库存</small></div>';
+  try {
+    const data = await api('/api/shop/products');
+    state.products = asList(data, ['products', 'items']).filter((product) => product.enabled !== false);
+    renderProducts();
+  } catch (error) {
+    state.products = [];
+    $('#productCount').textContent = '库存同步失败';
+    $('#productGrid').innerHTML = `<div class="state-panel"><strong>${escapeHtml(chineseErrorMessage(error.message, '库存读取失败，请稍后重试'))}</strong><small>库存连接失败</small></div>`;
+  }
+}
+
+function renderProductsLegacy() {
+  $('#productCount').textContent = `${state.products.length} 项可用物资，库存已同步`;
+  if (!state.products.length) {
+    $('#productGrid').innerHTML = '<div class="state-panel"><strong>当前没有可购买物资</strong><small>暂无可用库存</small></div>';
+    return;
+  }
+  $('#productGrid').innerHTML = state.products.map((product, index) => {
+    const sku = pick(product, ['sku', 'code']);
+    const name = pick(product, ['name', 'title'], '未命名物资');
+    const price = Number(pick(product, ['price', 'coinPrice', 'amount'], 0));
+    const parentCategory = pick(product, ['parentCategory'], '商城物资');
+    const category = pick(product, ['category'], '未分类');
+    const memberLevel = Number(pick(product, ['minMemberLevel'], 0));
+    const imagePath = pick(product, ['imagePath'], '');
+    const image = imagePath ? `<div class="product-image"><img src="${escapeHtml(imagePath)}" alt="${escapeHtml(name)}" loading="lazy"></div>` : '<div class="product-image placeholder" aria-hidden="true"><span>SCUM</span></div>';
+    return `<article class="product-card" data-sku="${escapeHtml(sku)}">${image}<span class="product-index">物资 / ${String(index + 1).padStart(2, '0')}</span><div class="product-category">${escapeHtml(parentCategory)} / ${escapeHtml(category)}</div><h3>${escapeHtml(name)}</h3><div class="product-labels"><span>${escapeHtml({ money: '美金', gold: '金条' }[product.currencyType] || '商城币')}</span>${memberLevel > 0 ? `<span class="member-limit">会员等级 ${number(memberLevel)} 级</span>` : '<span>无会员限制</span>'}</div><div class="product-meta"><div class="price"><span>物资价格</span><strong>${number(price)} <small>${escapeHtml({ money: '美金', gold: '金条' }[product.currencyType] || '商城币')}</small></strong></div><div class="quantity-control" aria-label="购买数量"><button type="button" data-quantity="minus" aria-label="减少数量">−</button><input type="number" min="1" max="99" value="1" aria-label="数量"><button type="button" data-quantity="plus" aria-label="增加数量">+</button></div></div><button class="button primary buy-button" type="button" data-buy="${escapeHtml(sku)}">申请物资</button></article>`;
+  }).join('');
+}
+
+function renderProducts() {
+  const parentOf = (item) => String(pick(item, ['parentCategory'], '商城物资'));
+  const categoryOf = (item) => String(pick(item, ['category'], '未分类'));
+  const keyword = state.productFilters.search.trim().toLocaleLowerCase('zh-CN');
+  const parentSort = new Map(state.products.map((item) => [parentOf(item), Number(item.parentSortOrder ?? 2147483647)]));
+  const parents = [...new Set(state.products.map(parentOf).filter(Boolean))].sort((a, b) => (parentSort.get(a) - parentSort.get(b)) || a.localeCompare(b, 'zh-CN'));
+  const categories = [...new Set(state.products.filter((item) => !state.productFilters.parent || parentOf(item) === state.productFilters.parent).map(categoryOf).filter(Boolean))].sort((a, b) => {
+    const orderA = Math.min(...state.products.filter((item) => categoryOf(item) === a && (!state.productFilters.parent || parentOf(item) === state.productFilters.parent)).map((item) => Number(item.categorySortOrder ?? 2147483647)));
+    const orderB = Math.min(...state.products.filter((item) => categoryOf(item) === b && (!state.productFilters.parent || parentOf(item) === state.productFilters.parent)).map((item) => Number(item.categorySortOrder ?? 2147483647)));
+    return orderA - orderB || a.localeCompare(b, 'zh-CN');
+  });
+  if (state.productFilters.category && !categories.includes(state.productFilters.category)) state.productFilters.category = '';
+  const filtered = state.products.filter((item) => {
+    const searchText = [pick(item, ['name', 'title'], ''), pick(item, ['sku', 'code'], ''), parentOf(item), categoryOf(item)].join(' ').toLocaleLowerCase('zh-CN');
+    return (!state.productFilters.parent || parentOf(item) === state.productFilters.parent) && (!state.productFilters.category || categoryOf(item) === state.productFilters.category) && (!keyword || searchText.includes(keyword));
+  });
+  if (!state.productFilters.parent && !state.productFilters.category) filtered.sort((a, b) => {
+    const timeA = a.lastPurchasedAt ? new Date(a.lastPurchasedAt).getTime() : 0;
+    const timeB = b.lastPurchasedAt ? new Date(b.lastPurchasedAt).getTime() : 0;
+    return timeB - timeA;
+  });
+  const totalPages = Math.max(1, Math.ceil(filtered.length / 12));
+  state.productFilters.page = Math.max(0, Math.min(state.productFilters.page, totalPages - 1));
+  const start = state.productFilters.page * 12;
+  const visible = filtered.slice(start, start + 12);
+  $('#productCount').textContent = `${filtered.length} 项可用物资，库存已同步`;
+  const filters = `<div class="catalog-filters"><label class="catalog-search"><span>搜索物资</span><input type="search" data-product-search value="${escapeHtml(state.productFilters.search)}" placeholder="输入物资名称或代码" autocomplete="off"></label><div class="catalog-parent-tabs"><button type="button" data-product-parent="" class="${!state.productFilters.parent ? 'active' : ''}">全部</button>${parents.map((item) => `<button type="button" data-product-parent="${escapeHtml(item)}" class="${item === state.productFilters.parent ? 'active' : ''}">${escapeHtml(item)}</button>`).join('')}</div>${state.productFilters.parent ? `<div class="catalog-category-tabs">${categories.map((item) => `<button type="button" data-product-category="${escapeHtml(item)}" class="${item === state.productFilters.category ? 'active' : ''}">${escapeHtml(item)}</button>`).join('')}</div>` : ''}</div>`;
+  const cards = visible.map((product, index) => {
+    const sku = pick(product, ['sku', 'code']);
+    const name = pick(product, ['name', 'title'], '未命名物资');
+    const price = Number(pick(product, ['price', 'coinPrice', 'amount'], 0));
+    const memberLevel = Number(pick(product, ['minMemberLevel'], 0));
+    const imagePath = pick(product, ['imagePath'], '');
+    const image = imagePath ? `<div class="product-image"><img src="${escapeHtml(imagePath)}" alt="${escapeHtml(name)}" loading="lazy"></div>` : '<div class="product-image placeholder" aria-hidden="true"><span>SCUM</span></div>';
+    const currency = { money: '美金', gold: '金条' }[product.currencyType] || '商城币';
+    return `<article class="product-card" data-sku="${escapeHtml(sku)}">${image}<span class="product-index">ITEM / ${String(start + index + 1).padStart(2, '0')}</span><div class="product-category">${escapeHtml(parentOf(product))} / ${escapeHtml(categoryOf(product))}</div><h3>${escapeHtml(name)}</h3><div class="product-labels"><span>${escapeHtml(currency)}</span>${memberLevel > 0 ? `<span class="member-limit">会员等级 ${number(memberLevel)} 级</span>` : '<span>无会员限制</span>'}</div><div class="product-meta"><div class="price"><span>物资价格</span><strong>${number(price)} <small>${escapeHtml(currency)}</small></strong></div><div class="quantity-control" aria-label="购买数量"><button type="button" data-quantity="minus" aria-label="减少数量">−</button><input type="number" min="1" max="99" value="1" aria-label="数量"><button type="button" data-quantity="plus" aria-label="增加数量">+</button></div></div><button class="button primary buy-button" type="button" data-buy="${escapeHtml(sku)}">申请物资</button></article>`;
+  }).join('');
+  const empty = `<div class="state-panel"><strong>${state.products.length ? '当前分类暂无物资' : '当前没有可购买物资'}</strong><small>暂无可用库存</small></div>`;
+  const pages = totalPages > 1 ? `<nav class="record-pagination catalog-pagination"><button type="button" data-product-page="-1" ${state.productFilters.page === 0 ? 'disabled' : ''}>上一页</button><span>第 ${state.productFilters.page + 1} / ${totalPages} 页</span><button type="button" data-product-page="1" ${state.productFilters.page >= totalPages - 1 ? 'disabled' : ''}>下一页</button></nav>` : '';
+  $('#productGrid').innerHTML = filters + (cards || empty) + pages;
+}
+
+function updateQuantity(card, delta) {
+  const input = $('input[type="number"]', card);
+  input.value = String(Math.min(99, Math.max(1, (Number(input.value) || 1) + delta)));
+}
+
+function preparePurchase(sku, card) {
+  if (!state.user) { openAuth('login'); toast('购买物资前需要先登录档案', 'error', '需要登录'); return; }
+  const product = state.products.find((item) => String(pick(item, ['sku', 'code'])) === sku);
+  if (!product) return;
+  if (['money', 'gold'].includes(product.currencyType)) { toast('该币种尚未接入游戏资产结算', 'error', '无法购买'); return; }
+  const quantityInput = $('input[type="number"]', card);
+  const quantity = Math.min(99, Math.max(1, Number(quantityInput?.value) || 1));
+  const price = Number(pick(product, ['price', 'coinPrice', 'amount'], 0));
+  state.purchase = { sku, quantity, product, quantityInput };
+  $('#purchaseName').textContent = pick(product, ['name', 'title'], '未命名物资');
+  $('#purchaseCategory').textContent = [pick(product, ['parentCategory'], ''), pick(product, ['category'], '')].filter(Boolean).join(' / ') || '商城物资';
+  $('#purchaseQuantity').textContent = String(quantity);
+  $('#purchaseTotal').textContent = number(price * quantity);
+  const memberLevel = Number(pick(product, ['minMemberLevel'], 0));
+  $('#purchaseMemberWarning').hidden = memberLevel <= 0;
+  $('#purchaseMemberWarning').textContent = memberLevel > 0 ? `该商品要求会员等级达到 ${memberLevel} 级，是否可购买以提交订单时的确认结果为准。` : '';
+  openModal($('#purchaseModal'));
+}
+
+function uuid() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, '0'));
+  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
+}
+
+async function confirmPurchase() {
+  if (!state.purchase) return;
+  await withBusy($('#confirmPurchase'), async () => {
+    try {
+      await api('/api/shop/orders', {
+        method: 'POST', headers: { 'Idempotency-Key': uuid() },
+        body: JSON.stringify({ items: [{ sku: state.purchase.sku, quantity: state.purchase.quantity }] })
+      });
+      closeModal($('#purchaseModal'));
+      if (state.purchase.quantityInput?.isConnected) state.purchase.quantityInput.value = '1';
+      state.purchase = null;
+      $('#purchaseResultTitle').textContent = '申请成功';
+      $('#purchaseResultMessage').textContent = '物资已进入发放队列。';
+      openModal($('#purchaseResultModal'));
+      await loadMe();
+    } catch (error) {
+      closeModal($('#purchaseModal'));
+      $('#purchaseResultTitle').textContent = '申请失败';
+      $('#purchaseResultMessage').textContent = chineseErrorMessage(error.message, '物资申请失败，请稍后重试');
+      openModal($('#purchaseResultModal'));
+    }
+  });
+}

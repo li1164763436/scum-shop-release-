@@ -1,0 +1,8 @@
+#page-store .purchase-attribute-list article[data-purchase-attribute]{cursor:pointer;transition:background .16s ease,box-shadow .16s ease}
+#page-store .purchase-attribute-list article[data-purchase-attribute]:hover,#page-store .purchase-attribute-list article[data-purchase-attribute].active{background:color-mix(in srgb,var(--purchase-color) 8%,#101311)}
+#page-store .purchase-attribute-list article[data-purchase-attribute].active{box-shadow:inset 3px 0 var(--purchase-color)}
+#page-store .purchase-attribute-list article[data-purchase-attribute]:focus-visible{outline:1px solid var(--purchase-color);outline-offset:-2px}
+#page-store .purchase-stepper button:not(:disabled){cursor:pointer}
+#page-store .purchase-stepper button:not(:disabled):hover{background:#252b26;color:#fff}
+#page-store .purchase-skill-choice{display:flex;align-items:center;justify-content:center;gap:6px;color:#aeb5ae;font-size:11px;cursor:pointer}
+#page-store .purchase-skill-choice input{width:18px;height:18px;margin:0;accent-color:var(--acid)}
