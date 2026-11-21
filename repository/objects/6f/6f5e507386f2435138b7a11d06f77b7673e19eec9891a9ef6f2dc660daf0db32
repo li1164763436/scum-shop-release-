@@ -1,0 +1,200 @@
+﻿#requires -Version 5.1
+param(
+  [Parameter(Mandatory = $true)][string]$PackagePath,
+  [Parameter(Mandatory = $true)][string]$AppRoot,
+  [Parameter(Mandatory = $true)][string]$TargetVersion,
+  [Parameter(Mandatory = $true)][string]$LockPath,
+  [Parameter(Mandatory = $true)][string]$UpdaterPath,
+  [string]$LauncherPath,
+  [string]$TaskName
+)
+$ErrorActionPreference = 'Stop'
+$statusFile = Join-Path $AppRoot 'data\version-update-status.json'
+$temp = Join-Path $env:TEMP ('scum-rcon-update-' + [guid]::NewGuid().ToString('N'))
+$backup = Join-Path $AppRoot ('data\updates\backup-' + (Get-Date -Format 'yyyyMMddHHmmss'))
+$items = @('src','public','scripts','resources','node_modules','package.json','package-lock.json','data\release-catalog-1.0.0','SCUM商城控制台.bat','ScumShopLauncher.exe')
+$backupReady = $false
+$restartLauncher = $false
+$serviceNames = @('ScumRconMySQL','ScumRconBridge','ScumRconApp')
+$serviceMode = @($serviceNames | Where-Object { Get-Service -Name $_ -ErrorAction SilentlyContinue }).Count -eq $serviceNames.Count
+$utf8 = New-Object Text.UTF8Encoding($false)
+function Write-UpdateStatus([string]$Status, [string]$Message, [int]$Progress) {
+  $payload = @{ status = $Status; message = $Message; progress = $Progress; targetVersion = $TargetVersion; updatedAt = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Depth 3
+  [IO.File]::WriteAllText($statusFile, $payload, $utf8)
+}
+function Wait-ServiceState([string]$Name, [string]$State) {
+  $service = Get-Service -Name $Name -ErrorAction Stop
+  $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::$State, [TimeSpan]::FromSeconds(60))
+  $service.Refresh()
+  if ($service.Status.ToString() -ne $State) { throw "服务 $Name 未进入 $State 状态" }
+}
+function Stop-AppServices {
+  if (-not $script:serviceMode) { return }
+  foreach ($name in @('ScumRconApp','ScumRconBridge')) {
+    $service = Get-Service -Name $name -ErrorAction Stop
+    if ($service.Status -ne 'Stopped') { Stop-Service -Name $name -Force -ErrorAction Stop; Wait-ServiceState $name 'Stopped' }
+  }
+}
+function Start-AppServices {
+  if (-not $script:serviceMode) { return }
+  Start-Service -Name 'ScumRconBridge' -ErrorAction Stop
+  Wait-ServiceState 'ScumRconBridge' 'Running'
+  Start-Service -Name 'ScumRconApp' -ErrorAction Stop
+  Wait-ServiceState 'ScumRconApp' 'Running'
+}
+function Set-AppServicesManual {
+  foreach ($name in $script:serviceNames) {
+    if (Get-Service -Name $name -ErrorAction SilentlyContinue) {
+      Set-Service -Name $name -StartupType Manual -ErrorAction Stop
+    }
+  }
+}
+function Stop-PortableProcesses {
+  if ($script:serviceMode) { return }
+  $runtimeRoots = @(
+    (Join-Path $AppRoot 'runtime'),
+    ([IO.Path]::GetFullPath((Join-Path $AppRoot '..\PackagedApp\installer\staging\runtime')))
+  )
+  foreach ($process in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) {
+    if ($process.Name -notin @('node.exe','mysqld.exe','ScumShopHost.exe')) { continue }
+    if (-not $process.ExecutablePath) { continue }
+    $executable = [IO.Path]::GetFullPath($process.ExecutablePath)
+    $inRuntime = @($runtimeRoots | Where-Object { $executable.StartsWith(([IO.Path]::GetFullPath($_) + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    if (-not $inRuntime) { continue }
+    if ($process.Name -eq 'node.exe' -and $process.CommandLine -notmatch 'src[\/]server[.]js') { continue }
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+  Start-Sleep -Seconds 2
+}
+function Stop-AppLauncher {
+  $launcherPath = [IO.Path]::GetFullPath((Join-Path $AppRoot 'ScumShopLauncher.exe'))
+  $processes = Get-CimInstance Win32_Process -Filter "Name='ScumShopLauncher.exe'" -ErrorAction SilentlyContinue
+  foreach ($process in $processes) {
+    if (-not $process.ExecutablePath) { continue }
+    if ([IO.Path]::GetFullPath($process.ExecutablePath).Equals($launcherPath, [StringComparison]::OrdinalIgnoreCase)) {
+      $script:restartLauncher = $true
+      Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+      Wait-Process -Id $process.ProcessId -Timeout 30 -ErrorAction SilentlyContinue
+    }
+  }
+}
+function Start-AppLauncher {
+  if (-not $script:restartLauncher) { return }
+  $launcherPath = Join-Path $AppRoot 'ScumShopLauncher.exe'
+  if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) { return }
+  $interactiveUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+  if (-not $interactiveUser) {
+    $explorer = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue | Sort-Object SessionId -Descending | Select-Object -First 1
+    if ($explorer) {
+      $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction SilentlyContinue
+      if ($owner.User) { $interactiveUser = if ($owner.Domain) { "$($owner.Domain)\$($owner.User)" } else { [string]$owner.User } }
+    }
+  }
+  if (-not $interactiveUser) { return }
+  $scheduler = New-Object -ComObject 'Schedule.Service'
+  $scheduler.Connect()
+  $task = $scheduler.NewTask(0)
+  $task.RegistrationInfo.Description = 'Restart store desktop launcher after update'
+  $task.Principal.UserId = $interactiveUser
+  $task.Principal.LogonType = 3
+  $task.Principal.RunLevel = 1
+  $task.Settings.Enabled = $true
+  $task.Settings.StartWhenAvailable = $true
+  $task.Settings.ExecutionTimeLimit = 'PT5M'
+  $task.Settings.DeleteExpiredTaskAfter = 'PT1M'
+  $trigger = $task.Triggers.Create(1)
+  $trigger.StartBoundary = (Get-Date).AddSeconds(2).ToString('s')
+  $trigger.EndBoundary = (Get-Date).AddMinutes(5).ToString('s')
+  $action = $task.Actions.Create(0)
+  $action.Path = $launcherPath
+  $action.WorkingDirectory = $AppRoot
+  $restartTaskName = 'ScumRconLauncherRestart-' + [guid]::NewGuid().ToString('N')
+  $registeredTask = $scheduler.GetFolder('\').RegisterTaskDefinition($restartTaskName, $task, 6, $null, $null, 3, $null)
+  $registeredTask.Run($null) | Out-Null
+}
+function Restore-Backup {
+  Stop-Service -Name 'ScumRconApp' -Force -ErrorAction SilentlyContinue
+  Stop-Service -Name 'ScumRconBridge' -Force -ErrorAction SilentlyContinue
+  foreach ($name in $items) {
+    $to = Join-Path $AppRoot $name
+    $from = Join-Path $backup $name
+    if (Test-Path -LiteralPath $from) {
+      if (Test-Path -LiteralPath $to) { Remove-Item -LiteralPath $to -Recurse -Force }
+      Move-Item -LiteralPath $from -Destination $to -Force
+    }
+  }
+  Start-AppServices
+}
+try {
+  Write-UpdateStatus staging '正在检查更新文件' 80
+  New-Item -ItemType Directory -Force -Path $temp,$backup | Out-Null
+  if (Test-Path -LiteralPath $PackagePath -PathType Container) { $source = $PackagePath } else { Expand-Archive -LiteralPath $PackagePath -DestinationPath $temp -Force; $source = $temp }
+  $items = @($items | Where-Object { $_ -ne 'data\release-catalog-1.0.0' })
+  if (Test-Path -LiteralPath (Join-Path $source 'data\release-catalog-1.0.0')) { $items += 'data\release-catalog-1.0.0' }
+  if (-not (Test-Path -LiteralPath (Join-Path $source 'package.json'))) {
+    $directories = @(Get-ChildItem -LiteralPath $temp -Directory)
+    if ($directories.Count -ne 1) { throw '更新包根目录结构无效' }
+    $source = $directories[0].FullName
+  }
+  foreach ($required in @('package.json','package-lock.json','src\server.js','public\index.html','scripts\apply-version-update.ps1','scripts\control-services.ps1','resources\scum-rcon','SCUM商城控制台.bat','ScumShopLauncher.exe','node_modules')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $source $required))) { throw "更新包缺少：$required" }
+  }
+  $package = Get-Content -LiteralPath (Join-Path $source 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ([string]$package.version -ne $TargetVersion) { throw "更新包版本 $($package.version) 与目标版本 $TargetVersion 不一致" }
+  Write-UpdateStatus stopping '更新包检查通过，正在停止服务' 84
+  Stop-AppServices
+  Stop-AppLauncher
+  Stop-PortableProcesses
+  $uploads = Join-Path $AppRoot 'public\uploads'
+  if (Test-Path -LiteralPath $uploads) { Copy-Item -LiteralPath $uploads -Destination (Join-Path $source 'public\uploads') -Recurse -Force }
+  Write-UpdateStatus backing_up '正在备份当前版本' 88
+  $backupReady = $true
+  foreach ($name in $items) {
+    $from = Join-Path $AppRoot $name
+    if (Test-Path -LiteralPath $from) {
+      $destination = Join-Path $backup $name
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+      Move-Item -LiteralPath $from -Destination $destination -Force
+    }
+  }
+  Write-UpdateStatus installing '正在安装新版本' 92
+  foreach ($name in $items) { Move-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $AppRoot $name) -Force }
+  foreach ($relative in @('public\pages\dashboard.html','public\pages\players.html','public\pages\fulfillment.html','public\pages\system.html','scripts\__pycache__\modify-scum-player.cpython-314.pyc')) {
+    $obsolete = [IO.Path]::GetFullPath((Join-Path $AppRoot $relative))
+    if (-not $obsolete.StartsWith(([IO.Path]::GetFullPath($AppRoot) + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) { throw '旧文件清理路径越界' }
+    if (Test-Path -LiteralPath $obsolete -PathType Leaf) { Remove-Item -LiteralPath $obsolete -Force }
+  }
+  Write-UpdateStatus starting '新版本已安装，正在设置服务为手动启动' 95
+  Set-AppServicesManual
+  Write-UpdateStatus starting '服务已设为手动启动，正在恢复本次运行' 96
+  Start-AppServices
+  if (-not $serviceMode) { Start-AppLauncher }
+  $healthy = $false
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    Start-Sleep -Seconds 2
+    try {
+      $health = Invoke-RestMethod -Uri 'http://127.0.0.1:3090/api/health' -TimeoutSec 5
+      if ($health.success -and [string]$health.data.version -eq $TargetVersion) { $healthy = $true; break }
+    } catch {}
+  }
+  if (-not $healthy) { throw '新版本健康检查失败' }
+  Write-UpdateStatus completed '版本更新完成，服务运行正常' 100
+  if ($serviceMode) { Start-AppLauncher }
+  Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+} catch {
+  $message = $_.Exception.Message
+  try {
+    if ($backupReady) { Write-UpdateStatus rollback '更新失败，正在恢复上一版本' 98; Restore-Backup }
+    Start-AppLauncher
+    Write-UpdateStatus failed $(if ($backupReady) { "版本更新失败，已恢复上一版本：$message" } else { "版本更新失败：$message" }) 100
+  } catch { Write-UpdateStatus failed "版本更新失败且回滚失败：$message；$($_.Exception.Message)" 100 }
+} finally {
+  Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+  $resolvedPackage = [IO.Path]::GetFullPath($PackagePath)
+  $updateRoot = [IO.Path]::GetFullPath((Join-Path $AppRoot 'data\updates')) + [IO.Path]::DirectorySeparatorChar
+  if ($resolvedPackage.StartsWith($updateRoot, [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $resolvedPackage -Recurse -Force -ErrorAction SilentlyContinue }
+  Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $UpdaterPath -Force -ErrorAction SilentlyContinue
+  if ($LauncherPath) { Remove-Item -LiteralPath $LauncherPath -Force -ErrorAction SilentlyContinue }
+  if ($TaskName) { & "$env:SystemRoot\System32\schtasks.exe" /Delete /TN $TaskName /F 2>$null | Out-Null }
+}

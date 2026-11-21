@@ -1,0 +1,155 @@
+import crypto from 'node:crypto';
+import fsSync from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { ServiceError } from './commerce-service.js';
+
+const PLUGIN_NAMES = ['version.dll', 'SCUMRCON.dll', 'SCUMRCONAdapter.dll'];
+
+function sha256(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function requireDirectory(value) {
+  const directory = String(value || '').trim();
+  if (!directory || directory.includes('\0')) throw new ServiceError('请先填写有效的 SCUM 游戏主目录', 400, 'INVALID_GAME_DIRECTORY');
+  return path.resolve(directory);
+}
+
+function targetDirectory(value) {
+  const directory = requireDirectory(value);
+  const parts = directory.split(path.sep).map((item) => item.toLowerCase());
+  return parts.at(-1) === 'win64' && parts.at(-2) === 'binaries' ? directory : path.join(directory, 'Binaries', 'Win64');
+}
+
+export class RconPluginService {
+  constructor({ root, store, sourceRoot, cacheRoot }) {
+    this.store = store;
+    this.manifestUrl = process.env.VERSION_UPDATE_MANIFEST_URL || 'https://update.scum0.cn/release-v1/version.json';
+    const bundledRoot = path.join(root, 'resources', 'scum-rcon');
+    this.sourceRoot = sourceRoot || (fsSync.existsSync(bundledRoot) ? bundledRoot : path.join(root, 'src', 'resources', 'scum-rcon'));
+    this.cacheRoot = cacheRoot || path.join(root, 'data', 'updates', 'repository', 'objects');
+  }
+
+  async resolveTarget(input) {
+    const config = await this.store.read();
+    return targetDirectory(input || config.ggcon?.serverDirectory);
+  }
+
+  async fileInfo(file) {
+    try {
+      const stat = await fs.stat(file);
+      if (!stat.isFile()) return { exists: false, size: 0, modifiedAt: null, sha256: null };
+      return { exists: true, size: stat.size, modifiedAt: stat.mtime.toISOString(), sha256: sha256(await fs.readFile(file)) };
+    } catch (error) {
+      if (['ENOENT', 'ENOTDIR'].includes(error.code)) return { exists: false, size: 0, modifiedAt: null, sha256: null };
+      throw error;
+    }
+  }
+
+  cacheFile(sha256) {
+    return path.join(this.cacheRoot, sha256.slice(0, 2), sha256);
+  }
+
+  async inspect(input) {
+    const directory = await this.resolveTarget(input);
+    const response = await fetch(this.manifestUrl, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new ServiceError('插件版本清单读取失败', 502, 'PLUGIN_MANIFEST_FAILED');
+    const manifest = await response.json();
+    const remoteFiles = manifest.plugins?.files;
+    if (!Array.isArray(remoteFiles)) throw new ServiceError('版本更新清单尚未发布插件明细，无法比较插件版本', 409, 'PLUGIN_MANIFEST_MISSING');
+    const files = [];
+    for (const name of PLUGIN_NAMES) {
+      const remote = remoteFiles.find(file => file.name === name);
+      if (!remote || !/^[a-f0-9]{64}$/i.test(remote.sha256) || !Number.isSafeInteger(remote.size) || remote.size <= 0 || remote.size > 64 * 1024 * 1024) throw new ServiceError('插件版本清单无效', 502, 'PLUGIN_MANIFEST_INVALID');
+      const url = new URL(remote.url, this.manifestUrl);
+      if (!['http:', 'https:'].includes(url.protocol)) throw new ServiceError('插件下载地址无效', 502, 'PLUGIN_MANIFEST_INVALID');
+      const expectedSha256 = remote.sha256.toLowerCase();
+      const applicationEntry = Array.isArray(manifest.files) ? manifest.files.find(file => file.path === `resources/scum-rcon/${name}`) : null;
+      if (!applicationEntry || applicationEntry.url !== remote.url || applicationEntry.sha256?.toLowerCase() !== expectedSha256 || applicationEntry.size !== remote.size) throw new ServiceError('插件未使用统一内容仓库', 502, 'PLUGIN_REPOSITORY_MISMATCH');
+      const [installed, cached] = await Promise.all([
+        this.fileInfo(path.join(directory, name)),
+        this.fileInfo(this.cacheFile(expectedSha256))
+      ]);
+      files.push({
+        name,
+        installed: installed.exists,
+        size: installed.size,
+        modifiedAt: installed.modifiedAt,
+        sha256: installed.sha256,
+        available: true,
+        url: url.href,
+        downloaded: Boolean(cached.exists && expectedSha256 && cached.sha256 === expectedSha256),
+        matches: Boolean(installed.exists && expectedSha256 && installed.sha256 === expectedSha256),
+        expectedSize: remote.size,
+        expectedSha256
+      });
+    }
+    return { directory, files, version: manifest.plugins.version || manifest.version };
+  }
+
+  async download(input) {
+    const before = await this.inspect(input);
+    const directory = before.directory;
+    await fs.mkdir(this.cacheRoot, { recursive: true });
+    for (const file of before.files) {
+      if (file.downloaded) continue;
+      const buffer = file.matches ? await fs.readFile(path.join(directory, file.name)) : await this.downloadFile(file);
+      if (buffer.length !== file.expectedSize || sha256(buffer) !== file.expectedSha256) throw new ServiceError(`插件校验失败：${file.name}`, 502, 'PLUGIN_HASH_MISMATCH');
+      const cached = this.cacheFile(file.expectedSha256);
+      const temporary = `${cached}.${process.pid}.${Date.now()}.tmp`;
+      await fs.mkdir(path.dirname(cached), { recursive: true });
+      try {
+        await fs.writeFile(temporary, buffer);
+        await fs.rename(temporary, cached).catch(async error => {
+          if ((await this.fileInfo(cached)).sha256 !== file.expectedSha256) throw error;
+          await fs.rm(temporary, { force: true });
+        });
+      } finally {
+        await fs.rm(temporary, { force: true }).catch(() => {});
+      }
+    }
+    return this.inspect(directory);
+  }
+
+  async downloadFile(file) {
+    const response = await fetch(file.url, { cache: 'no-store', signal: AbortSignal.timeout(60000) });
+    if (!response.ok) throw new ServiceError(`插件下载失败：${file.name}`, 502, 'PLUGIN_DOWNLOAD_FAILED');
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > file.expectedSize) {
+        throw new ServiceError(`插件大小不符：${file.name}`, 502, 'PLUGIN_SIZE_MISMATCH');
+      }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  async replace(input) {
+    const before = await this.inspect(input);
+    const directory = before.directory;
+    const invalid = before.files.find((file) => !file.downloaded);
+    if (invalid) throw new ServiceError(`请先下载插件文件：${invalid.name}`, 409, 'PLUGIN_NOT_DOWNLOADED');
+    await fs.mkdir(directory, { recursive: true });
+    const backupSuffix = new Date().toISOString().replace(/[-:.TZ]/g, '');
+    const replaced = [];
+    try {
+      for (const name of PLUGIN_NAMES) {
+        const target = path.join(directory, name);
+        if ((await this.fileInfo(target)).exists) await fs.copyFile(target, `${target}.bak.${backupSuffix}`);
+        const file = before.files.find(item => item.name === name);
+        await fs.copyFile(this.cacheFile(file.expectedSha256), target);
+        replaced.push(target);
+      }
+    } catch (error) {
+      for (const target of replaced) {
+        const backup = `${target}.bak.${backupSuffix}`;
+        if ((await this.fileInfo(backup)).exists) await fs.copyFile(backup, target);
+      }
+      throw error;
+    }
+    return this.inspect(directory);
+  }
+}

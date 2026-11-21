@@ -1,0 +1,33 @@
+{
+    "name":  "scum-rcon-console",
+    "version":  "1.0.1",
+    "releaseRevision":  6,
+    "private":  true,
+    "type":  "module",
+    "engines":  {
+                    "node":  "\u003e=20"
+                },
+    "scripts":  {
+                    "start":  "node src/server.js",
+                    "license:activate":  "node scripts/license-activate.js activate",
+                    "license:connect":  "node scripts/license-activate.js connect",
+                    "license:status":  "node scripts/license-activate.js status",
+                    "admin:promote":  "node scripts/promote-super-admin.js",
+                    "data:purge-players":  "node scripts/purge-player-data.js",
+                    "database:backup":  "node scripts/backup-database.js",
+                    "database:audit-account-migration":  "node scripts/audit-account-migration.js",
+                    "database:migrate-schema":  "node scripts/migrate-schema.js",
+                    "database:finalize-account-schema":  "node scripts/finalize-account-schema.js",
+                    "check":  "node -e \"const fs=require(\u0027fs\u0027),path=require(\u0027path\u0027),cp=require(\u0027child_process\u0027);const dirs=[\u0027src\u0027,\u0027scripts\u0027,\u0027public\u0027,\u0027test\u0027];const files=[];for(const dir of dirs){if(!fs.existsSync(dir))continue;const walk=p=\u003e{for(const entry of fs.readdirSync(p,{withFileTypes:true})){const file=path.join(p,entry.name);if(entry.isDirectory())walk(file);else if(entry.name.endsWith(\u0027.js\u0027))files.push(file)}};walk(dir)}for(const file of files)cp.execFileSync(process.execPath,[\u0027--check\u0027,file],{stdio:\u0027inherit\u0027})\"",
+                    "test":  "node --test --test-concurrency=1 test/*.test.js",
+                    "installer:check":  "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ..\\PackagedApp\\installer\\test-installer.ps1",
+                    "installer:build":  "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ..\\PackagedApp\\installer\\build-installer.ps1"
+                },
+    "dependencies":  {
+                         "axios":  "^1.14.0",
+                         "express":  "^4.22.1",
+                         "joi":  "^17.13.3",
+                         "mysql2":  "^3.23.0",
+                         "winston":  "^3.19.0"
+                     }
+}
