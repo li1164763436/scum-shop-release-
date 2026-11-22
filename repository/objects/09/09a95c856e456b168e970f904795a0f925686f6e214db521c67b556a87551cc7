@@ -1,0 +1,28 @@
+param([string]$Source,[string]$OutputDirectory)
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Drawing
+New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+$sourceImage=[Drawing.Image]::FromFile($Source)
+try {
+  $images=@()
+  foreach($size in @(16,32,48,64,128,256)) {
+    $bitmap=New-Object Drawing.Bitmap $size,$size
+    $graphics=[Drawing.Graphics]::FromImage($bitmap)
+    try { $graphics.InterpolationMode=[Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; $graphics.DrawImage($sourceImage,0,0,$size,$size) }
+    finally { $graphics.Dispose() }
+    $stream=New-Object IO.MemoryStream
+    $bitmap.Save($stream,[Drawing.Imaging.ImageFormat]::Png)
+    if($size -eq 32){$bitmap.Save((Join-Path $OutputDirectory 'favicon-32.png'),[Drawing.Imaging.ImageFormat]::Png)}
+    $images+=,[pscustomobject]@{Size=$size;Bytes=$stream.ToArray()}
+    $stream.Dispose();$bitmap.Dispose()
+  }
+  $ico=Join-Path $OutputDirectory 'scum-shop.ico'
+  $file=[IO.File]::Open($ico,[IO.FileMode]::Create,[IO.FileAccess]::Write)
+  $writer=New-Object IO.BinaryWriter $file
+  try {
+    $writer.Write([uint16]0);$writer.Write([uint16]1);$writer.Write([uint16]$images.Count)
+    $offset=6+16*$images.Count
+    foreach($item in $images){$edge=if($item.Size-eq256){0}else{$item.Size};$writer.Write([byte]$edge);$writer.Write([byte]$edge);$writer.Write([byte]0);$writer.Write([byte]0);$writer.Write([uint16]1);$writer.Write([uint16]32);$writer.Write([uint32]$item.Bytes.Length);$writer.Write([uint32]$offset);$offset+=$item.Bytes.Length}
+    foreach($item in $images){$writer.Write($item.Bytes)}
+  } finally {$writer.Dispose();$file.Dispose()}
+} finally {$sourceImage.Dispose()}
