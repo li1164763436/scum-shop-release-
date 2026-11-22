@@ -9,7 +9,7 @@ import { assertStartupAllowed } from './services/license-client.js';
 import { createLicenseGuide } from './services/license-guide.js';
 import { createDatabase } from './services/database.js';
 import { ensureSchema } from './services/schema.js';
-import { createInitialSuperAdmin, hasInitialSuperAdmin } from './services/initial-super-admin-service.js';
+import { assertInitialSuperAdminBinding, createInitialSuperAdmin, hasInitialSuperAdmin } from './services/initial-super-admin-service.js';
 import { createRuntimeHost } from './services/runtime-host.js';
 import { DatabaseBackups } from './services/database-backups.js';
 import { enforceManualServiceStartup } from './services/windows-service-startup.js';
@@ -28,7 +28,7 @@ enforceManualServiceStartup({ logger });
 logger.info('SCUM RCON 控制台正在启动', { component: 'application', host, port });
 const licenseStore = new LicenseStore(process.env.LICENSE_FILE || path.join(root, 'runtime', 'secrets', 'license.json'));
 
-const runtime = createRuntimeHost({ host, port, root });
+const runtime = createRuntimeHost({ host, port, root, appVersion, releaseRevision });
 const backups = new DatabaseBackups({ root, store, logger });
 await runtime.listen();
 backups.start();
@@ -46,7 +46,7 @@ async function withInitializedDatabase(handler) {
 }
 const initialAdmin = {
   required: async () => withInitializedDatabase(async db => !(await hasInitialSuperAdmin(db))),
-  create: async ({ identity, steamId, password, metadata }) => withInitializedDatabase(db => createInitialSuperAdmin(db, { username: identity.username, steamId, password }, { actorType: 'license', actorLabel: identity.username, metadata }))
+  create: async ({ identity, steamId, password, metadata }) => withInitializedDatabase(db => createInitialSuperAdmin(db, { username: identity.username, steamId, password }, { actorType: 'license', actorLabel: identity.username, metadata, authorization: identity }))
 };
 async function showLicenseGuide(initialIdentity = null) {
   if (guide) return;
@@ -67,6 +67,7 @@ async function attemptStart() {
   try {
     const verified = await assertStartupAllowed({ store: licenseStore });
     if (await initialAdmin.required()) { await showLicenseGuide(verified); return; }
+    await withInitializedDatabase(db => assertInitialSuperAdminBinding(db, verified, { allowLegacy: false }));
     if (guide) {
       const completedGuide = guide;
       guide = null;
@@ -78,7 +79,7 @@ async function attemptStart() {
   }
   catch (error) {
     runtime.fail(error);
-    logger.error('商城业务未启动，运行主体保留', { code: error?.code || 'BUSINESS_START_FAILED' });
+    logger.error('商城业务未启动，运行主体保留', { code: error?.code || 'BUSINESS_START_FAILED', error });
     if (String(error?.code || '').startsWith('LICENSE_')) await showLicenseGuide();
   } finally { starting = false; }
 }
