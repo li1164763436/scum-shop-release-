@@ -1,0 +1,268 @@
+import { ServiceError } from './commerce-service.js';
+
+const VEHICLE_STATUSES = new Set(['active', 'stored', 'maintenance', 'lost', 'destroyed', 'retired']);
+const VEHICLE_DISPLAY_STATUSES = new Set([...VEHICLE_STATUSES, 'recovered']);
+const INSURANCE_STATUSES = new Set(['none', 'active', 'expired', 'suspended']);
+const INSURANCE_DISPLAY_STATUSES = new Set([...INSURANCE_STATUSES, 'claimed']);
+const VEHICLE_FIELDS = `v.\`载具档案编号\` AS id,v.\`载具档案编码\` AS vehicleCode,v.\`车主SteamID\` AS ownerSteamId,v.\`车主名称\` AS ownerName,v.\`载具类型\` AS vehicleType,v.\`型号名称\` AS modelName,v.\`显示名称\` AS displayName,v.\`车牌号\` AS plateNumber,CASE WHEN ft.status IN ('completed','succeeded') THEN 'recovered' ELSE v.\`档案状态\` END AS status,v.\`档案状态\` AS sourceStatus,v.\`车况百分比\` AS conditionPercent,v.\`燃油百分比\` AS fuelPercent,v.\`地图格编号\` AS gridCode,v.\`世界X坐标\` AS worldX,v.\`世界Y坐标\` AS worldY,v.\`世界Z坐标\` AS worldZ,v.\`地图X百分比\` AS mapXPercent,v.\`地图Y百分比\` AS mapYPercent,v.\`位置备注\` AS locationNote,v.\`最后观测时间\` AS lastSeenAt,v.\`备注\` AS notes,v.\`来源类型\` AS sourceType,v.\`来源载具编号\` AS sourceVehicleId,v.\`来源资产标识\` AS sourceAssetId,v.\`来源载具别名\` AS sourceVehicleAlias,v.\`来源实体类名\` AS sourceEntityClass,v.\`来源锁槽数量\` AS sourceLockSlots,v.\`位置来源\` AS locationSource,v.\`来源同步时间\` AS sourceSynchronizedAt,v.\`来源同步状态\` AS sourceSyncState,v.\`来源缺失时间\` AS sourceMissingSince,v.\`创建时间\` AS createdAt,v.\`更新时间\` AS updatedAt,p.name AS productName,p.image_path AS productImagePath,CASE WHEN i.status='active' AND (i.expires_at IS NULL OR i.expires_at>CURRENT_TIMESTAMP(3)) THEN i.policy_number WHEN ip.id IS NOT NULL AND ip.expires_at>CURRENT_TIMESTAMP(3) THEN ip.policy_number WHEN i.status<>'none' THEN i.policy_number ELSE ip.policy_number END AS policyNumber,CASE WHEN ft.status IN ('completed','succeeded') THEN 'claimed' WHEN i.status='active' AND (i.expires_at IS NULL OR i.expires_at>CURRENT_TIMESTAMP(3)) THEN 'active' WHEN ip.id IS NOT NULL AND ip.expires_at>CURRENT_TIMESTAMP(3) THEN 'active' WHEN i.vehicle_id IS NOT NULL AND i.status<>'none' THEN CASE WHEN i.status='active' THEN 'expired' ELSE i.status END WHEN ip.id IS NOT NULL THEN 'expired' ELSE 'none' END AS insuranceStatus,i.insured_value AS insuredValue,COALESCE(i.premium_amount,ip.price) AS premiumAmount,COALESCE(i.starts_at,ip.starts_at) AS insuranceStartsAt,COALESCE(i.expires_at,ip.expires_at) AS insuranceExpiresAt,i.coverage_note AS coverageNote,i.notes AS insuranceNotes,ic.claim_number AS claimNumber,ft.status AS claimFulfillmentStatus`;
+const PURCHASE_VEHICLE_MATCH = `REPLACE(LOWER(COALESCE(NULLIF(ip2.vehicle_code_snapshot,''),ip2.vehicle_type_snapshot)),'#spawnvehicle ','') IN (REPLACE(LOWER(COALESCE(v.\`来源资产标识\`,'')),'vehicle:',''),REPLACE(LOWER(COALESCE(v.\`来源载具别名\`,'')),'vehicle:',''),REPLACE(LOWER(COALESCE(v.\`来源实体类名\`,'')),'vehicle:',''),LOWER(COALESCE(v.\`载具类型\`,'')),LOWER(COALESCE(v.\`型号名称\`,'')))`;
+const VEHICLE_JOINS = `LEFT JOIN products p ON p.id=(SELECT p2.id FROM products p2 WHERE p2.parent_category='载具交通' AND p2.category_name='载具' AND LOWER(COALESCE(NULLIF(p2.item_id,''),SUBSTRING_INDEX(p2.fulfillment_codes,',',1)))=LOWER(REPLACE(COALESCE(v.\`来源资产标识\`,v.\`来源载具别名\`,v.\`来源实体类名\`,''),'Vehicle:','')) ORDER BY p2.enabled DESC,p2.id DESC LIMIT 1) LEFT JOIN vehicle_insurance i ON i.vehicle_id=v.\`载具档案编号\` LEFT JOIN vehicle_insurance_purchases ip ON ip.id=(SELECT ip2.id FROM vehicle_insurance_purchases ip2 WHERE ip2.steam_id=v.\`车主SteamID\` AND ip2.cancelled_at IS NULL AND ${PURCHASE_VEHICLE_MATCH} ORDER BY ip2.created_at DESC,ip2.id DESC LIMIT 1) LEFT JOIN vehicle_insurance_claims ic ON ic.id=(SELECT ic2.id FROM vehicle_insurance_claims ic2 WHERE ic2.vehicle_id=v.\`载具档案编号\` ORDER BY ic2.created_at DESC,ic2.id DESC LIMIT 1) LEFT JOIN fulfillment_tasks ft ON ft.id=ic.fulfillment_task_id`;
+
+function idOf(value) {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id < 1) throw new ServiceError('载具编号无效', 400, 'INVALID_VEHICLE_ID');
+  return id;
+}
+function strategyIdOf(value) {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id < 1) throw new ServiceError('保险策略编号无效', 400, 'INVALID_INSURANCE_STRATEGY_ID');
+  return id;
+}
+function purchaseIdOf(value) {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id < 1) throw new ServiceError('玩家保单编号无效', 400, 'INVALID_INSURANCE_PURCHASE_ID');
+  return id;
+}
+function text(value, name, max, required = false) {
+  const result = String(value ?? '').trim();
+  if (required && !result) throw new ServiceError(`${name}不能为空`, 400, 'INVALID_INPUT');
+  if (result.length > max) throw new ServiceError(`${name}不能超过 ${max} 字符`, 400, 'INVALID_INPUT');
+  return result || null;
+}
+function number(value, name, { min = null, max = null, integer = false } = {}) {
+  if (value === '' || value === null || value === undefined) return null;
+  const result = Number(value);
+  if (!Number.isFinite(result) || (integer && !Number.isSafeInteger(result)) || (min !== null && result < min) || (max !== null && result > max)) throw new ServiceError(`${name}无效`, 400, 'INVALID_INPUT');
+  return result;
+}
+function date(value, name) {
+  if (!value) return null;
+  const result = new Date(value);
+  if (Number.isNaN(result.getTime())) throw new ServiceError(`${name}无效`, 400, 'INVALID_INPUT');
+  return result;
+}
+function actorOf(actor) {
+  if (typeof actor === 'string') return { id: null, name: actor.slice(0, 100) || 'system' };
+  return { id: Number.isSafeInteger(Number(actor?.id)) ? Number(actor.id) : null, name: String(actor?.username || actor?.name || actor?.label || 'system').slice(0, 100) };
+}
+function vehicleValue(row) {
+  if (!row) return null;
+  const numeric = ['id','conditionPercent','fuelPercent','worldX','worldY','worldZ','mapXPercent','mapYPercent','insuredValue','premiumAmount','sourceVehicleId','sourceLockSlots'];
+  const result = { ...row };
+  for (const key of numeric) result[key] = result[key] === null || result[key] === undefined ? null : Number(result[key]);
+  return result;
+}
+function vehicleInput(input, partial = false) {
+  const status = String(input?.status || (partial ? '' : 'active')).trim();
+  if (status && !VEHICLE_STATUSES.has(status)) throw new ServiceError('载具状态无效', 400, 'INVALID_VEHICLE_STATUS');
+  return {
+    vehicleCode: text(input?.vehicleCode, '载具档案编号', 64, !partial),
+    ownerSteamId: text(input?.ownerSteamId, '车主SteamID', 17), ownerName: text(input?.ownerName, '车主名称', 100),
+    vehicleType: text(input?.vehicleType, '载具类型', 80, !partial), modelName: text(input?.modelName, '载具型号', 120, !partial),
+    displayName: text(input?.displayName, '载具别名', 120), plateNumber: text(input?.plateNumber, '车牌/注册号', 64),
+    status: status || null, conditionPercent: number(input?.conditionPercent, '车况', { min: 0, max: 100 }), fuelPercent: number(input?.fuelPercent, '油量', { min: 0, max: 100 }),
+    gridCode: text(input?.gridCode, '地图格', 16), worldX: number(input?.worldX, 'X坐标'), worldY: number(input?.worldY, 'Y坐标'), worldZ: number(input?.worldZ, 'Z坐标'),
+    mapXPercent: number(input?.mapXPercent, '地图横向位置', { min: 0, max: 100 }), mapYPercent: number(input?.mapYPercent, '地图纵向位置', { min: 0, max: 100 }),
+    locationNote: text(input?.locationNote, '位置说明', 500), lastSeenAt: date(input?.lastSeenAt, '最后发现时间'), notes: text(input?.notes, '载具备注', 2000)
+  };
+}
+function insuranceInput(input) {
+  const status = String(input?.status || 'none').trim();
+  if (!INSURANCE_STATUSES.has(status)) throw new ServiceError('保险状态无效', 400, 'INVALID_INSURANCE_STATUS');
+  const startsAt = date(input?.startsAt, '保险生效时间'), expiresAt = date(input?.expiresAt, '保险到期时间');
+  if (startsAt && expiresAt && startsAt >= expiresAt) throw new ServiceError('保险到期时间必须晚于生效时间', 400, 'INVALID_INSURANCE_PERIOD');
+  return { status, policyNumber: text(input?.policyNumber, '保单编号', 100), insuredValue: number(input?.insuredValue, '保险价值', { min: 0, integer: true }), premiumAmount: number(input?.premiumAmount, '保费', { min: 0, integer: true }), startsAt, expiresAt, coverageNote: text(input?.coverageNote, '保障范围', 1000), notes: text(input?.notes, '保险备注', 1000) };
+}
+function insuranceStrategyInput(input) {
+  const totalClaimLimit = number(input?.totalClaimLimit, '总赔付次数限制', { min: 1, integer: true });
+  const dailyClaimLimit = number(input?.dailyClaimLimit, '每日赔付次数限制', { min: 1, integer: true });
+  if (totalClaimLimit === null || dailyClaimLimit === null) throw new ServiceError('赔付次数限制不能为空', 400, 'INVALID_INSURANCE_CLAIM_LIMIT');
+  if (dailyClaimLimit > totalClaimLimit) throw new ServiceError('每日赔付次数不能超过总赔付次数', 400, 'INVALID_INSURANCE_CLAIM_LIMIT');
+  const durationDays = number(input?.durationDays, '有效时长', { min: 1, integer: true });
+  const price = number(input?.price, '售价', { min: 0, integer: true });
+  const productId = number(input?.productId, '载具类型', { min: 1, integer: true });
+  if (durationDays === null) throw new ServiceError('有效时长不能为空', 400, 'INVALID_INSURANCE_DURATION');
+  if (productId === null) throw new ServiceError('请选择载具类型', 400, 'INVALID_INSURANCE_VEHICLE_PRODUCT');
+  if (price === null) throw new ServiceError('售价不能为空', 400, 'INVALID_INSURANCE_PRICE');
+  return {
+    name: text(input?.name, '保险名称', 100, true), totalClaimLimit, dailyClaimLimit, durationDays,
+    purchaseCondition: text(input?.purchaseCondition, '购买条件', 200, true), productId, price,
+    enabled: input?.enabled !== false && input?.enabled !== 0 && input?.enabled !== '0'
+  };
+}
+function insuranceStrategyValue(row) {
+  if (!row) return null;
+  return { ...row, id: Number(row.id), productId: row.productId ? Number(row.productId) : null, totalClaimLimit: Number(row.totalClaimLimit), dailyClaimLimit: Number(row.dailyClaimLimit), durationDays: Number(row.durationDays), price: Number(row.price), enabled: Boolean(row.enabled) };
+}
+
+export class VehicleManagementService {
+  constructor({ db }) { this.db = db; }
+
+  async listInsuranceProducts() {
+    const rows = await this.db.query("SELECT id,name,enabled,COALESCE(NULLIF(item_id,''),SUBSTRING_INDEX(fulfillment_codes,',',1)) AS vehicleCode FROM products WHERE parent_category='载具交通' AND category_name='载具' ORDER BY enabled DESC,name,id");
+    return rows.map((row) => ({ id:Number(row.id), name:String(row.name || ''), vehicleCode:String(row.vehicleCode || '').trim(), enabled:Boolean(row.enabled) }));
+  }
+
+  async listInsuranceStrategies() {
+    const rows = await this.db.query('SELECT id,name,total_claim_limit AS totalClaimLimit,daily_claim_limit AS dailyClaimLimit,duration_days AS durationDays,purchase_condition AS purchaseCondition,product_id AS productId,vehicle_type AS vehicleType,vehicle_code AS vehicleCode,price,enabled,created_at AS createdAt,updated_at AS updatedAt FROM vehicle_insurance_strategies WHERE deleted_at IS NULL ORDER BY enabled DESC,updated_at DESC,id DESC');
+    return rows.map(insuranceStrategyValue);
+  }
+
+  async getInsuranceStrategy(id, query = this.db) {
+    const rows = await query.query('SELECT id,name,total_claim_limit AS totalClaimLimit,daily_claim_limit AS dailyClaimLimit,duration_days AS durationDays,purchase_condition AS purchaseCondition,product_id AS productId,vehicle_type AS vehicleType,vehicle_code AS vehicleCode,price,enabled,created_at AS createdAt,updated_at AS updatedAt FROM vehicle_insurance_strategies WHERE id=?', [strategyIdOf(id)]);
+    if (!rows[0]) throw new ServiceError('保险销售策略不存在', 404, 'INSURANCE_STRATEGY_NOT_FOUND');
+    return insuranceStrategyValue(rows[0]);
+  }
+
+  async saveInsuranceStrategy(input, actor, id = null) {
+    const value = insuranceStrategyInput(input), user = actorOf(actor), safeId = id === null ? null : strategyIdOf(id);
+    return this.db.transaction(async (tx) => {
+      const products = await tx.query("SELECT id,name,enabled,COALESCE(NULLIF(item_id,''),SUBSTRING_INDEX(fulfillment_codes,',',1)) AS vehicleCode FROM products WHERE id=? AND parent_category='载具交通' AND category_name='载具' LIMIT 1", [value.productId]);
+      const product = products[0];
+      if (!product) throw new ServiceError('所选载具商品不存在', 400, 'INVALID_INSURANCE_VEHICLE_PRODUCT');
+      const vehicleCode = String(product.vehicleCode || '').trim();
+      if (!vehicleCode) throw new ServiceError('所选载具商品未配置载具代码', 400, 'MISSING_INSURANCE_VEHICLE_CODE');
+      const duplicate = await tx.query('SELECT id FROM vehicle_insurance_strategies WHERE name=? AND id<>? LIMIT 1', [value.name, safeId || 0]);
+      if (duplicate[0]) throw new ServiceError('保险名称已存在，请勿重复', 409, 'DUPLICATE_INSURANCE_STRATEGY_NAME');
+      if (safeId) {
+        await this.getInsuranceStrategy(safeId, tx);
+        await tx.query('UPDATE vehicle_insurance_strategies SET name=?,total_claim_limit=?,daily_claim_limit=?,duration_days=?,purchase_condition=?,product_id=?,vehicle_type=?,vehicle_code=?,price=?,enabled=?,updated_by_user_id=? WHERE id=?', [value.name,value.totalClaimLimit,value.dailyClaimLimit,value.durationDays,value.purchaseCondition,value.productId,String(product.name),vehicleCode,value.price,value.enabled ? 1 : 0,user.id,safeId]);
+        return this.getInsuranceStrategy(safeId, tx);
+      }
+      const result = await tx.query('INSERT INTO vehicle_insurance_strategies (name,total_claim_limit,daily_claim_limit,duration_days,purchase_condition,product_id,vehicle_type,vehicle_code,price,enabled,created_by_user_id,updated_by_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [value.name,value.totalClaimLimit,value.dailyClaimLimit,value.durationDays,value.purchaseCondition,value.productId,String(product.name),vehicleCode,value.price,value.enabled ? 1 : 0,user.id,user.id]);
+      return this.getInsuranceStrategy(result.insertId, tx);
+    });
+  }
+
+  async removeInsuranceStrategy(id) {
+    const safeId = strategyIdOf(id);
+    return this.db.transaction(async (tx) => {
+      const locked = await tx.query('SELECT id FROM vehicle_insurance_strategies WHERE id=? AND deleted_at IS NULL FOR UPDATE', [safeId]);
+      if (!locked[0]) throw new ServiceError('保险销售策略不存在', 404, 'INSURANCE_STRATEGY_NOT_FOUND');
+      const current = await this.getInsuranceStrategy(safeId, tx);
+      await tx.query('UPDATE vehicle_insurance_strategies SET enabled=0,deleted_at=CURRENT_TIMESTAMP(3) WHERE id=?', [safeId]);
+      return { id: safeId, name: current.name, deleted: true };
+    });
+  }
+
+  async removeInsurancePurchase(id) {
+    const safeId = purchaseIdOf(id);
+    return this.db.transaction(async (tx) => {
+      const rows = await tx.query('SELECT id,policy_number AS policyNumber FROM vehicle_insurance_purchases WHERE id=? AND cancelled_at IS NULL FOR UPDATE', [safeId]);
+      if (!rows[0]) throw new ServiceError('玩家保单不存在', 404, 'INSURANCE_PURCHASE_NOT_FOUND');
+      await tx.query('UPDATE vehicle_insurance_purchases SET cancelled_at=CURRENT_TIMESTAMP(3) WHERE id=?', [safeId]);
+      return { id: safeId, policyNumber: rows[0].policyNumber, deleted: true };
+    });
+  }
+
+  async summary() {
+    const rows = await this.db.query("SELECT COUNT(*) AS total,SUM(`档案状态`='active') AS active,SUM(`档案状态`='maintenance') AS maintenance,SUM(`档案状态` IN ('lost','destroyed')) AS attention FROM `载具档案`");
+    const insured = await this.db.query("SELECT (SELECT COUNT(*) FROM vehicle_insurance WHERE status='active' AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP(3)))+(SELECT COUNT(*) FROM vehicle_insurance_purchases WHERE cancelled_at IS NULL AND expires_at>CURRENT_TIMESTAMP(3)) AS insured");
+    const synchronized = await this.db.query("SELECT COUNT(*) AS synchronized,MAX(`来源同步时间`) AS lastSynchronizedAt FROM `载具档案` WHERE `来源类型`='scum_locked_vehicle'");
+    return { total: Number(rows[0]?.total || 0), active: Number(rows[0]?.active || 0), maintenance: Number(rows[0]?.maintenance || 0), attention: Number(rows[0]?.attention || 0), insured: Number(insured[0]?.insured || 0), synchronized: Number(synchronized[0]?.synchronized || 0), lastSynchronizedAt: synchronized[0]?.lastSynchronizedAt || null };
+  }
+
+  async listInsurancePurchases(query = {}) {
+    const pageSize = Math.min(Math.max(Number(query.pageSize) || 20, 1), 100);
+    const page = Math.max(Number(query.page) || 1, 1);
+    const count = await this.db.query('SELECT COUNT(*) AS total FROM vehicle_insurance_purchases WHERE cancelled_at IS NULL');
+    const rows = await this.db.query(`SELECT p.id,p.policy_number AS policyNumber,p.steam_id AS ownerSteamId,COALESCE(NULLIF(a.\`游戏名称\`,''),NULLIF(a.\`登录账号\`,''),p.steam_id) AS ownerName,p.price,p.starts_at AS startsAt,p.expires_at AS expiresAt,CASE WHEN p.expires_at<=CURRENT_TIMESTAMP(3) THEN 'expired' ELSE 'active' END AS insuranceStatus,p.strategy_name_snapshot AS strategyName,p.vehicle_type_snapshot AS vehicleType,p.vehicle_code_snapshot AS vehicleCode,pr.name AS productName,pr.image_path AS productImagePath FROM vehicle_insurance_purchases p LEFT JOIN \`商城用户\` a ON a.\`SteamID\`=p.steam_id LEFT JOIN products pr ON pr.id=p.product_id_snapshot WHERE p.cancelled_at IS NULL ORDER BY p.created_at DESC,p.id DESC LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`);
+    return { items: rows.map((row) => ({ ...row, id:Number(row.id), price:Number(row.price) })), total:Number(count[0]?.total || 0), page, pageSize };
+  }
+
+  async list(query = {}) {
+    const where = [], params = [];
+    const search = String(query.search || '').trim();
+    if (search) { where.push('(v.`载具档案编码` LIKE ? OR v.`车主SteamID` LIKE ? OR v.`车主名称` LIKE ? OR v.`型号名称` LIKE ? OR v.`显示名称` LIKE ? OR v.`车牌号` LIKE ?)'); params.push(...Array(6).fill(`%${search.slice(0,100)}%`)); }
+    const status = String(query.status || '');
+    if (status && VEHICLE_DISPLAY_STATUSES.has(status)) {
+      where.push(status === 'recovered' ? "ft.status IN ('completed','succeeded')" : "v.`档案状态`=? AND (ft.status IS NULL OR ft.status NOT IN ('completed','succeeded'))");
+      if (status !== 'recovered') params.push(status);
+    }
+    const insuranceStatus = String(query.insuranceStatus || '');
+    if (insuranceStatus && INSURANCE_DISPLAY_STATUSES.has(insuranceStatus)) {
+      const derivedInsuranceStatus = "CASE WHEN ft.status IN ('completed','succeeded') THEN 'claimed' WHEN i.status='active' AND (i.expires_at IS NULL OR i.expires_at>CURRENT_TIMESTAMP(3)) THEN 'active' WHEN ip.id IS NOT NULL AND ip.expires_at>CURRENT_TIMESTAMP(3) THEN 'active' WHEN i.vehicle_id IS NOT NULL AND i.status<>'none' THEN CASE WHEN i.status='active' THEN 'expired' ELSE i.status END WHEN ip.id IS NOT NULL THEN 'expired' ELSE 'none' END";
+      where.push(`${derivedInsuranceStatus}=?`);
+      params.push(insuranceStatus);
+    }
+    if (query.vehicleType) { where.push('v.`载具类型`=?'); params.push(String(query.vehicleType).slice(0,80)); }
+    const pageSize = Math.min(Math.max(Number(query.pageSize || query.limit) || 30, 1), 100);
+    const page = Math.max(Number(query.page) || 1, 1);
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const countRows = await this.db.query(`SELECT COUNT(*) AS total FROM \`载具档案\` v ${VEHICLE_JOINS} ${whereSql}`, params);
+    const rows = await this.db.query(`SELECT ${VEHICLE_FIELDS} FROM \`载具档案\` v ${VEHICLE_JOINS} ${whereSql} ORDER BY v.\`更新时间\` DESC,v.\`载具档案编号\` DESC LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, params);
+    return { items:rows.map(vehicleValue), total:Number(countRows[0]?.total || 0), page, pageSize };
+  }
+
+  async get(id, query = this.db, lock = false) {
+    const rows = await query.query(`SELECT ${VEHICLE_FIELDS} FROM \`载具档案\` v ${VEHICLE_JOINS} WHERE v.\`载具档案编号\`=?${lock ? ' FOR UPDATE' : ''}`, [idOf(id)]);
+    if (!rows[0]) throw new ServiceError('载具档案不存在', 404, 'VEHICLE_NOT_FOUND');
+    return vehicleValue(rows[0]);
+  }
+
+  async detail(id) {
+    const vehicle = await this.get(id);
+    const audits = await this.db.query('SELECT id,vehicle_id AS vehicleId,vehicle_code_snapshot AS vehicleCode,action,changes_json AS changes,actor_user_id AS actorUserId,actor_name AS actorName,created_at AS createdAt FROM vehicle_audit_logs WHERE vehicle_id=? ORDER BY id DESC LIMIT 100', [vehicle.id]);
+    return { vehicle, audits: audits.map((row) => ({ ...row, id: Number(row.id), vehicleId: row.vehicleId ? Number(row.vehicleId) : null, changes: typeof row.changes === 'string' ? JSON.parse(row.changes) : row.changes })) };
+  }
+
+  async audit(query, vehicle, action, changes, actor) {
+    const user = actorOf(actor);
+    await query.query('INSERT INTO vehicle_audit_logs (vehicle_id,vehicle_code_snapshot,action,changes_json,actor_user_id,actor_name) VALUES (?,?,?,?,?,?)', [vehicle.id, vehicle.vehicleCode, action, JSON.stringify(changes || {}), user.id, user.name]);
+  }
+
+  async create(input, actor) {
+    const value = vehicleInput(input);
+    return this.db.transaction(async (tx) => {
+      const user = actorOf(actor);
+      const result = await tx.query('INSERT INTO `载具档案` (`载具档案编码`,`车主SteamID`,`车主名称`,`载具类型`,`型号名称`,`显示名称`,`车牌号`,`档案状态`,`车况百分比`,`燃油百分比`,`地图格编号`,`世界X坐标`,`世界Y坐标`,`世界Z坐标`,`地图X百分比`,`地图Y百分比`,`位置备注`,`最后观测时间`,`备注`,`创建管理员编号`,`更新管理员编号`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [value.vehicleCode,value.ownerSteamId,value.ownerName,value.vehicleType,value.modelName,value.displayName,value.plateNumber,value.status,value.conditionPercent,value.fuelPercent,value.gridCode,value.worldX,value.worldY,value.worldZ,value.mapXPercent,value.mapYPercent,value.locationNote,value.lastSeenAt,value.notes,user.id,user.id]);
+      const vehicle = await this.get(result.insertId, tx);
+      await this.audit(tx, vehicle, 'create', { after: vehicle }, actor);
+      return vehicle;
+    });
+  }
+
+  async update(id, input, actor) {
+    const safeId = idOf(id), value = vehicleInput(input, true);
+    return this.db.transaction(async (tx) => {
+      const before = await this.get(safeId, tx, true), user = actorOf(actor);
+      const fields = [], params = [];
+      const protectedSourceFields = new Set(['vehicleCode','ownerSteamId','ownerName','vehicleType','modelName','gridCode','worldX','worldY','worldZ','lastSeenAt']);
+      for (const [key, column] of Object.entries({ vehicleCode:'载具档案编码',ownerSteamId:'车主SteamID',ownerName:'车主名称',vehicleType:'载具类型',modelName:'型号名称',displayName:'显示名称',plateNumber:'车牌号',status:'档案状态',conditionPercent:'车况百分比',fuelPercent:'燃油百分比',gridCode:'地图格编号',worldX:'世界X坐标',worldY:'世界Y坐标',worldZ:'世界Z坐标',mapXPercent:'地图X百分比',mapYPercent:'地图Y百分比',locationNote:'位置备注',lastSeenAt:'最后观测时间',notes:'备注' })) {
+        if (before.sourceType && protectedSourceFields.has(key)) continue;
+        if (Object.prototype.hasOwnProperty.call(input || {}, key)) { fields.push(`\`${column}\`=?`); params.push(value[key]); }
+      }
+      if (!fields.length) return before;
+      fields.push('`更新管理员编号`=?'); params.push(user.id, safeId);
+      await tx.query(`UPDATE \`载具档案\` SET ${fields.join(',')} WHERE \`载具档案编号\`=?`, params);
+      const after = await this.get(safeId, tx);
+      await this.audit(tx, after, 'update', { before, after }, actor);
+      return after;
+    });
+  }
+
+  async setInsurance(id, input, actor) {
+    const safeId = idOf(id), value = insuranceInput(input), user = actorOf(actor);
+    return this.db.transaction(async (tx) => {
+      const vehicle = await this.get(safeId, tx, true);
+      const before = (await tx.query('SELECT policy_number AS policyNumber,status,insured_value AS insuredValue,premium_amount AS premiumAmount,starts_at AS startsAt,expires_at AS expiresAt,coverage_note AS coverageNote,notes FROM vehicle_insurance WHERE vehicle_id=?', [safeId]))[0] || null;
+      await tx.query('INSERT INTO vehicle_insurance (vehicle_id,policy_number,status,insured_value,premium_amount,starts_at,expires_at,coverage_note,notes,updated_by_user_id) VALUES (?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE policy_number=VALUES(policy_number),status=VALUES(status),insured_value=VALUES(insured_value),premium_amount=VALUES(premium_amount),starts_at=VALUES(starts_at),expires_at=VALUES(expires_at),coverage_note=VALUES(coverage_note),notes=VALUES(notes),updated_by_user_id=VALUES(updated_by_user_id)', [safeId,value.policyNumber,value.status,value.insuredValue,value.premiumAmount,value.startsAt,value.expiresAt,value.coverageNote,value.notes,user.id]);
+      const after = (await tx.query('SELECT policy_number AS policyNumber,status,insured_value AS insuredValue,premium_amount AS premiumAmount,starts_at AS startsAt,expires_at AS expiresAt,coverage_note AS coverageNote,notes FROM vehicle_insurance WHERE vehicle_id=?', [safeId]))[0];
+      await this.audit(tx, vehicle, 'insurance_update', { before, after }, actor);
+      return this.get(safeId, tx);
+    });
+  }
+
+  async remove(id, actor) {
+    const safeId = idOf(id);
+    return this.db.transaction(async (tx) => {
+      const vehicle = await this.get(safeId, tx, true);
+      if (vehicle.sourceType === 'scum_locked_vehicle') throw new ServiceError('同步载具档案不可删除；源中缺失时会自动标记失联并保留保险与历史', 409, 'SYNCHRONIZED_VEHICLE_DELETE_FORBIDDEN');
+      await this.audit(tx, vehicle, 'delete', { before: vehicle }, actor);
+      await tx.query('DELETE FROM `载具档案` WHERE `载具档案编号`=?', [safeId]);
+      return { id: safeId, vehicleCode: vehicle.vehicleCode };
+    });
+  }
+}
+
+export { VEHICLE_STATUSES, INSURANCE_STATUSES };
