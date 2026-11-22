@@ -1,0 +1,759 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { isSteamId64 } from './command-policy.js';
+import { ServiceError } from './commerce-service.js';
+import { parseTeleportCoordinateResult, parseVehicleTeleportResult } from './scum-rcon-parser.js';
+import { parseVehicleLocation } from './scum-locked-vehicle-reader.js';
+import { parseTeleportLocationResponse } from './teleport-player-location-provider.js';
+
+const TARGET_TYPES = new Set(['player', 'owned_vehicle', 'territory_flag', 'fixed_location', 'vehicle_to_territory_flag', 'vehicle_to_player', 'vehicle_to_fixed_location']);
+
+function rows(value) { return Array.isArray(value) ? value : []; }
+function requestKey(value) {
+  const key = String(value || '').trim();
+  if (!key || key.length > 100) throw new ServiceError('Idempotency-Key 必填且长度不能超过 100', 400, 'INVALID_REQUEST_KEY');
+  return key;
+}
+function targetInput(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => !['targetType', 'targetId', 'destinationId'].includes(key))) throw new ServiceError('请求仅允许目标类型、目标引用与不透明目的地引用', 400, 'UNSAFE_TELEPORT_INPUT');
+  const targetType = String(input.targetType || '').trim();
+  const targetId = String(input.targetId || '').trim();
+  const destinationId = String(input.destinationId || '').trim();
+  if (!TARGET_TYPES.has(targetType) || !targetId || targetId.length > 100) throw new ServiceError('传送目标无效', 400, 'INVALID_TARGET');
+  const vehicleMode = targetType.startsWith('vehicle_to_');
+  if (vehicleMode && !destinationId) throw new ServiceError('请在地图上选择载具目的地', 400, 'INVALID_DESTINATION');
+  if (!vehicleMode && destinationId) throw new ServiceError('当前传送方式不接受载具目的地', 400, 'INVALID_DESTINATION');
+  if (targetType === 'vehicle_to_player' && !/^player:(?:self|[0-9a-f]{32})$/i.test(destinationId)) throw new ServiceError('载具玩家目的地无效', 400, 'INVALID_DESTINATION');
+  if (targetType === 'vehicle_to_territory_flag' && !/^territory_flag:[0-9a-f]{32}$/i.test(destinationId)) throw new ServiceError('载具领地旗目的地无效', 400, 'INVALID_DESTINATION');
+  if (targetType === 'vehicle_to_fixed_location' && !/^fixed_location:[0-9a-f]{32}$/i.test(destinationId)) throw new ServiceError('载具固定位置目的地无效', 400, 'INVALID_DESTINATION');
+  return { targetType, targetId, destinationId: destinationId || null };
+}
+function fingerprint(owner, target) {
+  return createHash('sha256').update(JSON.stringify({ owner, ...target })).digest('hex');
+}
+function operationRow(row) {
+  if (!row) return null;
+  const output = { ...row };
+  for (const key of ['id', 'kilometers', 'basePrice', 'discountPercent', 'chargedAmount', 'balanceAfter']) {
+    if (output[key] !== undefined && output[key] !== null) output[key] = Number(output[key]);
+  }
+  return output;
+}
+function publicOperation(operation) {
+  if (!operation) return operation;
+  const { steamId, requestFingerprint, nativeTargetId, targetSteamId, worldX, worldY, worldZ, destinationWorldX, destinationWorldY, destinationWorldZ, destinationId, ...safe } = operation;
+  return safe;
+}
+function priceFor(basePrice, discountPercent) {
+  const discount = Number.isFinite(Number(discountPercent)) ? Math.min(100, Math.max(0, Number(discountPercent))) : 100;
+  return { discount, chargedAmount: Math.max(0, Math.round(Number(basePrice || 0) * discount / 100)) };
+}
+function boundedInteger(value, name, min, max) {
+  const result = Number(value);
+  if (!Number.isSafeInteger(result) || result < min || result > max) throw new ServiceError(`${name}必须为 ${min}-${max} 的整数`, 400, 'INVALID_TELEPORT_SETTING');
+  return result;
+}
+function booleanSetting(value, name) {
+  if (typeof value !== 'boolean') throw new ServiceError(`${name}必须为布尔值`, 400, 'INVALID_TELEPORT_SETTING');
+  return value;
+}
+function pricingMode(value, name) {
+  const mode = String(value || '').trim();
+  if (!['fixed', 'distance'].includes(mode)) throw new ServiceError(`${name}必须为固定价格或距离计价`, 400, 'INVALID_TELEPORT_SETTING');
+  return mode;
+}
+function teleportCategory(targetType) {
+  return String(targetType).startsWith('vehicle_to_') ? 'vehicle' : 'character';
+}
+const WORLD_UNITS_PER_KILOMETER = 100000;
+function distanceKilometers(source, destination) {
+  const values = [source?.worldX, source?.worldY, destination?.worldX, destination?.worldY].map(Number);
+  if (values.some((value) => !Number.isFinite(value))) throw new ServiceError('传送距离暂时无法计算，请刷新位置后重试', 409, 'TELEPORT_DISTANCE_UNAVAILABLE');
+  return Math.max(1, Math.ceil(Math.hypot(values[2] - values[0], values[3] - values[1]) / WORLD_UNITS_PER_KILOMETER));
+}
+function capabilityValue(source, aliases) {
+  if (!source || typeof source !== 'object') return false;
+  const normalized = new Set(aliases.map((item) => String(item).toLowerCase()));
+  const visit = (value, key = '') => {
+    if (normalized.has(String(key).toLowerCase()) && value === true) return true;
+    if (typeof value === 'string' && normalized.has(value.toLowerCase())) return true;
+    if (Array.isArray(value)) return value.some((item) => visit(item));
+    if (value && typeof value === 'object') return Object.entries(value).some(([childKey, child]) => visit(child, childKey));
+    return false;
+  };
+  return visit(source);
+}
+export function playerTargetId(steamId) {
+  return `player:${createHash('sha256').update(`teleport-player-target:v1:${steamId}`).digest('hex').slice(0, 32)}`;
+}
+function playerTargetName(player) {
+  const name = String(player?.characterName || player?.steamName || '').trim();
+  return name || `在线玩家 · ${String(player?.steamId || '').slice(-4)}`;
+}
+export function flagTargetId(flagId) {
+  return `territory_flag:${createHash('sha256').update(`teleport-flag-target:v1:${flagId}`).digest('hex').slice(0, 32)}`;
+}
+export function fixedLocationTargetId(locationId) {
+  return `fixed_location:${createHash('sha256').update(`teleport-fixed-location:v1:${locationId}`).digest('hex').slice(0, 32)}`;
+}
+function teleportCoordinate(value, name) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || Math.abs(number) > 10_000_000) throw new ServiceError(`${name}无效，请刷新传送目标数据`, 409, 'TELEPORT_COORDINATE_INVALID');
+  return number;
+}
+function fixedLocationCoordinates(value) {
+  if (typeof value !== 'string') throw new ServiceError('XYZ 坐标必须使用文本格式填写', 400, 'INVALID_FIXED_LOCATION');
+  const parts = value.trim().split(/[\s,]+/).filter(Boolean);
+  if (parts.length !== 3) throw new ServiceError('XYZ 坐标必须依次填写三个数值', 400, 'INVALID_FIXED_LOCATION');
+  const coordinates = parts.map(Number);
+  if (coordinates.some((coordinate) => !Number.isFinite(coordinate) || Math.abs(coordinate) > 10_000_000)) throw new ServiceError('XYZ 坐标包含无效或超出范围的数值', 400, 'INVALID_FIXED_LOCATION');
+  return coordinates;
+}
+const SAFE_OFFSET_DISTANCE = Object.freeze({ player: 180, owned_vehicle: 300, territory_flag: 250 });
+const SAFE_OFFSET_DIRECTIONS = Object.freeze([[1, 0], [-1, 0], [0, 1], [0, -1], [Math.SQRT1_2, Math.SQRT1_2], [Math.SQRT1_2, -Math.SQRT1_2], [-Math.SQRT1_2, Math.SQRT1_2], [-Math.SQRT1_2, -Math.SQRT1_2]]);
+function finalDestinations(target) {
+  if (target.targetType === 'fixed_location') return [{ x: teleportCoordinate(target.worldX, '最终X坐标'), y: teleportCoordinate(target.worldY, '最终Y坐标'), z: teleportCoordinate(target.worldZ, '最终Z坐标') }];
+  const baseDistance = SAFE_OFFSET_DISTANCE[target.targetType];
+  if (!baseDistance) throw new ServiceError('该传送模式不使用玩家坐标落点', 400, 'INVALID_TARGET');
+  const directionIndex = createHash('sha256').update(`teleport-safe-offset:v1:${target.targetType}:${target.targetId}`).digest()[0] % SAFE_OFFSET_DIRECTIONS.length;
+  const attempts = [[1, 0], [2, 1], [2, 2], [2, 3], [4, 4], [4, 5], [4, 6], [4, 7], [8, 0], [8, 2], [8, 1], [8, 3]];
+  return attempts.map(([distanceMultiplier, directionOffset]) => {
+    const [directionX, directionY] = SAFE_OFFSET_DIRECTIONS[(directionIndex + directionOffset) % SAFE_OFFSET_DIRECTIONS.length];
+    return {
+      x: teleportCoordinate(Number(target.worldX) + directionX * baseDistance * distanceMultiplier, '最终X坐标'),
+      y: teleportCoordinate(Number(target.worldY) + directionY * baseDistance * distanceMultiplier, '最终Y坐标'),
+      z: teleportCoordinate(target.worldZ, '最终Z坐标')
+    };
+  });
+}
+function isRejectedSafeDestination(error) {
+  return error?.code === 'RCON_COMMAND_FAILED' && !error?.uncertainDelivery && /no collision-safe destination was accepted/i.test(String(error?.message || ''));
+}
+function coordinateCommand(owner, destination) {
+  return `TeleportPlayerToCoordinates ${owner} ${destination.x.toFixed(3)} ${destination.y.toFixed(3)} ${destination.z.toFixed(3)} CONFIRM`;
+}
+function commandFor(owner, target, capabilities = {}) {
+  if (['player', 'owned_vehicle', 'territory_flag', 'fixed_location'].includes(target.targetType)) {
+    const destinations = finalDestinations(target);
+    return { command: coordinateCommand(owner, destinations[0]), destination: destinations[0], destinations };
+  }
+  if (target.targetType === 'vehicle_to_territory_flag') {
+    const commandName = capabilities.vehicleToTerritoryFlagCommand || 'TeleportOwnedVehicleToTerritoryFlag';
+    return { command: `${commandName} ${owner} ${target.nativeTargetId} CONFIRM`, vehicleExpected: { mode: 'territory_flag', vehicleEntityId: target.nativeTargetId, targetSteamId: owner } };
+  }
+  if (target.targetType === 'vehicle_to_player') {
+    const targetSteamId = String(target.targetSteamId || owner);
+    if (!isSteamId64(targetSteamId)) throw new ServiceError('载具目标玩家无效', 409, 'INVALID_DESTINATION');
+    const commandName = capabilities.vehicleToPlayerCommand || 'TeleportOwnedVehicleToPlayer';
+    return { command: `${commandName} ${targetSteamId} ${target.nativeTargetId} CONFIRM`, vehicleExpected: { mode: 'player', vehicleEntityId: target.nativeTargetId, targetSteamId } };
+  }
+  if (target.targetType === 'vehicle_to_fixed_location') {
+    const x = teleportCoordinate(target.destinationWorldX, '载具目的地X坐标');
+    const y = teleportCoordinate(target.destinationWorldY, '载具目的地Y坐标');
+    const z = teleportCoordinate(target.destinationWorldZ, '载具目的地Z坐标');
+    return { command: `TeleportOwnedVehicleToCoordinates ${owner} ${target.nativeTargetId} ${x.toFixed(3)} ${y.toFixed(3)} ${z.toFixed(3)} CONFIRM`, vehicleExpected: { mode: 'coordinates', vehicleEntityId: target.nativeTargetId, targetSteamId: owner } };
+  }
+  throw new ServiceError('传送目标无效', 400, 'INVALID_TARGET');
+}
+
+export class TeleportService {
+  constructor({ db, clients, membershipEntitlements, now = () => Date.now() }) {
+    this.db = db;
+    this.clients = clients;
+    this.membershipEntitlements = membershipEntitlements;
+    this.now = now;
+    this.quotes = new Map();
+  }
+
+  consumeQuote(owner, target, token) {
+    const safeToken = String(token || '').trim();
+    const quote = this.quotes.get(safeToken);
+    this.quotes.delete(safeToken);
+    if (!quote || quote.owner !== owner || quote.fingerprint !== fingerprint(owner, target) || quote.expiresAt <= this.now()) throw new ServiceError('传送报价已失效，请重新计算费用', 409, 'TELEPORT_QUOTE_EXPIRED');
+    return quote;
+  }
+
+  async settings(query = this.db) {
+    const result = rows(await query.query("SELECT `传送总开关` AS enabled,`角色计费方式` AS characterPricingMode,`角色固定价格` AS characterFixedPrice,`角色每公里价格` AS characterPerKilometerPrice,`角色每日次数` AS characterDailyLimit,`载具计费方式` AS vehiclePricingMode,`载具固定价格` AS vehicleFixedPrice,`载具每公里价格` AS vehiclePerKilometerPrice,`载具每日次数` AS vehicleDailyLimit,`载具传送间隔秒数` AS vehicleIntervalSeconds,`小队玩家互传` AS playerEnabled,`玩家到小队载具` AS ownedVehicleEnabled,`玩家到授权领地旗` AS territoryFlagEnabled,`固定位置传送` AS fixedLocationEnabled,`领地内载具到玩家` AS vehicleToTerritoryFlagEnabled,`远距离载具到玩家` AS vehicleToPlayerEnabled,`载具到固定位置` AS vehicleToFixedLocationEnabled,`同意请求有效秒数` AS consentExpirySeconds,`更新时间` AS updatedAt FROM `传送管理设置` WHERE `配置编号`=1"))[0] || {};
+    return {
+      characterPricingMode: result.characterPricingMode || 'fixed',
+      characterFixedPrice: Number(result.characterFixedPrice || 0),
+      characterPerKilometerPrice: Number(result.characterPerKilometerPrice || 0),
+      characterDailyLimit: Number(result.characterDailyLimit || 0),
+      vehiclePricingMode: result.vehiclePricingMode || 'fixed',
+      vehicleFixedPrice: Number(result.vehicleFixedPrice || 0),
+      vehiclePerKilometerPrice: Number(result.vehiclePerKilometerPrice || 0),
+      vehicleDailyLimit: Number(result.vehicleDailyLimit || 0),
+      vehicleIntervalSeconds: Number(result.vehicleIntervalSeconds || 0),
+      playerEnabled: Boolean(result.playerEnabled),
+      ownedVehicleEnabled: result.ownedVehicleEnabled === undefined ? true : Boolean(result.ownedVehicleEnabled),
+      territoryFlagEnabled: result.territoryFlagEnabled === undefined ? true : Boolean(result.territoryFlagEnabled),
+      fixedLocationEnabled: result.fixedLocationEnabled === undefined ? true : Boolean(result.fixedLocationEnabled),
+      vehicleToTerritoryFlagEnabled: result.vehicleToTerritoryFlagEnabled === undefined ? true : Boolean(result.vehicleToTerritoryFlagEnabled),
+      vehicleToPlayerEnabled: result.vehicleToPlayerEnabled === undefined ? true : Boolean(result.vehicleToPlayerEnabled),
+      vehicleToFixedLocationEnabled: result.vehicleToFixedLocationEnabled === undefined ? true : Boolean(result.vehicleToFixedLocationEnabled),
+      consentExpirySeconds: Math.max(60, Number(result.consentExpirySeconds || 300)),
+      updatedAt: result.updatedAt || null
+    };
+  }
+
+  async runtimeCapabilities() {
+    try {
+      const { ggcon } = await this.clients();
+      const raw = await ggcon.capabilities();
+      const coordinateTeleport = capabilityValue(raw, ['teleportPlayerToCoordinates', 'TeleportPlayerToCoordinates']);
+      const vehicleToTerritoryFlag = capabilityValue(raw, ['teleportOwnedVehicleToTerritoryFlag', 'TeleportOwnedVehicleToTerritoryFlag']);
+      const vehicleToPlayer = capabilityValue(raw, ['teleportOwnedVehicleToPlayer', 'TeleportOwnedVehicleToPlayer']);
+      const vehicleToFixedLocation = capabilityValue(raw, ['teleportOwnedVehicleToCoordinates', 'TeleportOwnedVehicleToCoordinates']);
+      return {
+        connected: true,
+        player: coordinateTeleport,
+        ownedVehicle: coordinateTeleport,
+        territoryFlag: coordinateTeleport && capabilityValue(raw, ['listFlags']),
+        vehicleToTerritoryFlag,
+        vehicleToPlayer,
+        vehicleToFixedLocation,
+        vehicleToTerritoryFlagCommand: 'TeleportOwnedVehicleToTerritoryFlag',
+        vehicleToPlayerCommand: 'TeleportOwnedVehicleToPlayer',
+        error: null
+      };
+    } catch (error) {
+      return { connected: false, player: false, ownedVehicle: false, territoryFlag: false, vehicleToTerritoryFlag: false, vehicleToPlayer: false, vehicleToFixedLocation: false, error: String(error?.message || 'RCON 能力读取失败') };
+    }
+  }
+
+  async saveSettings(input = {}, updatedByUserId = null) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ServiceError('传送设置格式无效', 400, 'INVALID_TELEPORT_SETTING');
+    const allowed = new Set(['characterPricingMode', 'characterFixedPrice', 'characterPerKilometerPrice', 'characterDailyLimit', 'vehiclePricingMode', 'vehicleFixedPrice', 'vehiclePerKilometerPrice', 'vehicleDailyLimit', 'vehicleIntervalSeconds', 'playerEnabled', 'ownedVehicleEnabled', 'territoryFlagEnabled', 'fixedLocationEnabled', 'vehicleToTerritoryFlagEnabled', 'vehicleToPlayerEnabled', 'vehicleToFixedLocationEnabled']);
+    if (Object.keys(input).some((key) => !allowed.has(key)) || [...allowed].some((key) => input[key] === undefined)) throw new ServiceError('传送设置字段不完整或包含未知字段', 400, 'INVALID_TELEPORT_SETTING');
+    const values = {
+      characterPricingMode: pricingMode(input.characterPricingMode, '角色计费方式'),
+      characterFixedPrice: boundedInteger(input.characterFixedPrice, '角色固定价格', 0, 1000000000),
+      characterPerKilometerPrice: boundedInteger(input.characterPerKilometerPrice, '角色每公里价格', 0, 1000000000),
+      characterDailyLimit: boundedInteger(input.characterDailyLimit, '角色每日次数', 0, 1000),
+      vehiclePricingMode: pricingMode(input.vehiclePricingMode, '载具计费方式'),
+      vehicleFixedPrice: boundedInteger(input.vehicleFixedPrice, '载具固定价格', 0, 1000000000),
+      vehiclePerKilometerPrice: boundedInteger(input.vehiclePerKilometerPrice, '载具每公里价格', 0, 1000000000),
+      vehicleDailyLimit: boundedInteger(input.vehicleDailyLimit, '载具每日次数', 0, 1000),
+      vehicleIntervalSeconds: boundedInteger(input.vehicleIntervalSeconds, '载具传送间隔秒数', 0, 86400),
+      playerEnabled: booleanSetting(input.playerEnabled, '玩家互传开关'),
+      ownedVehicleEnabled: booleanSetting(input.ownedVehicleEnabled, '上锁载具开关'),
+      territoryFlagEnabled: booleanSetting(input.territoryFlagEnabled, '领地旗开关'),
+      fixedLocationEnabled: booleanSetting(input.fixedLocationEnabled, '固定位置开关'),
+      vehicleToTerritoryFlagEnabled: booleanSetting(input.vehicleToTerritoryFlagEnabled, '载具到授权领地旗开关'),
+      vehicleToPlayerEnabled: booleanSetting(input.vehicleToPlayerEnabled, '载具到玩家位置开关'),
+      vehicleToFixedLocationEnabled: booleanSetting(input.vehicleToFixedLocationEnabled, '载具到固定位置开关')
+    };
+    await this.db.query('UPDATE `传送管理设置` SET `传送总开关`=1,`角色计费方式`=?,`角色固定价格`=?,`角色每公里价格`=?,`角色每日次数`=?,`载具计费方式`=?,`载具固定价格`=?,`载具每公里价格`=?,`载具每日次数`=?,`载具传送间隔秒数`=?,`小队玩家互传`=?,`玩家到小队载具`=?,`玩家到授权领地旗`=?,`固定位置传送`=?,`领地内载具到玩家`=?,`远距离载具到玩家`=?,`载具到固定位置`=?,`最后修改管理员编号`=? WHERE `配置编号`=1', [values.characterPricingMode, values.characterFixedPrice, values.characterPerKilometerPrice, values.characterDailyLimit, values.vehiclePricingMode, values.vehicleFixedPrice, values.vehiclePerKilometerPrice, values.vehicleDailyLimit, values.vehicleIntervalSeconds, values.playerEnabled ? 1 : 0, values.ownedVehicleEnabled ? 1 : 0, values.territoryFlagEnabled ? 1 : 0, values.fixedLocationEnabled ? 1 : 0, values.vehicleToTerritoryFlagEnabled ? 1 : 0, values.vehicleToPlayerEnabled ? 1 : 0, values.vehicleToFixedLocationEnabled ? 1 : 0, updatedByUserId || null]);
+    return this.settings();
+  }
+
+  async fixedLocations({ enabledOnly = false, ownerSteamId = null, query = this.db } = {}) {
+    const conditions = [];
+    const params = [];
+    if (enabledOnly) conditions.push("`是否启用`=1 AND `来源类型`='admin'");
+    if (ownerSteamId !== null) {
+      conditions.push("(`可见范围`='public' OR (`可见范围`='private' AND `归属SteamID`=?))");
+      params.push(String(ownerSteamId));
+    }
+    const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
+    return rows(await query.query(`SELECT \`位置编号\` AS id,\`位置名称\` AS name,\`世界X坐标\` AS worldX,\`世界Y坐标\` AS worldY,\`世界Z坐标\` AS worldZ,\`是否启用\` AS enabled,\`排序值\` AS sortOrder,\`来源类型\` AS sourceType,\`可见范围\` AS visibility,\`归属SteamID\` AS ownerSteamId,\`更新时间\` AS updatedAt FROM \`传送固定位置\`${where} ORDER BY \`排序值\`,\`位置编号\``, params)).map((item) => ({ ...item, id: Number(item.id), worldX: Number(item.worldX), worldY: Number(item.worldY), worldZ: Number(item.worldZ), enabled: Boolean(item.enabled), sortOrder: Number(item.sortOrder), ownerSteamId: item.ownerSteamId ? String(item.ownerSteamId) : null }));
+  }
+
+  fixedLocationInput(input = {}) {
+    const allowed = new Set(['name', 'coordinates', 'enabled', 'sortOrder', 'visibility', 'ownerSteamId']);
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => !allowed.has(key)) || [...allowed].some((key) => input[key] === undefined)) throw new ServiceError('固定位置字段不完整或包含未知字段', 400, 'INVALID_FIXED_LOCATION');
+    const name = String(input.name || '').trim();
+    if (!name || name.length > 100) throw new ServiceError('位置名称必填且不能超过100字', 400, 'INVALID_FIXED_LOCATION');
+    const [worldX, worldY, worldZ] = fixedLocationCoordinates(input.coordinates);
+    const visibility = String(input.visibility || '').trim();
+    if (!['public', 'private'].includes(visibility)) throw new ServiceError('可见范围必须为全部玩家或私人玩家', 400, 'INVALID_FIXED_LOCATION');
+    const ownerSteamId = String(input.ownerSteamId || '').trim();
+    if (visibility === 'private' && !isSteamId64(ownerSteamId)) throw new ServiceError('私人位置必须填写有效的17位 SteamID', 400, 'INVALID_FIXED_LOCATION');
+    if (visibility === 'public' && ownerSteamId) throw new ServiceError('全部玩家位置不能绑定私人玩家', 400, 'INVALID_FIXED_LOCATION');
+    return { name, worldX, worldY, worldZ, enabled: booleanSetting(input.enabled, '启用状态'), sortOrder: boundedInteger(input.sortOrder, '排序值', 0, 1000000), visibility, ownerSteamId: visibility === 'private' ? ownerSteamId : null };
+  }
+
+  async createFixedLocation(input, userId = null) {
+    const value = this.fixedLocationInput(input);
+    const result = await this.db.query("INSERT INTO `传送固定位置` (`位置名称`,`世界X坐标`,`世界Y坐标`,`世界Z坐标`,`是否启用`,`排序值`,`来源类型`,`可见范围`,`归属SteamID`,`创建管理员编号`,`最后修改管理员编号`) VALUES (?,?,?,?,?,?,'admin',?,?,?,?)", [value.name, value.worldX, value.worldY, value.worldZ, value.enabled ? 1 : 0, value.sortOrder, value.visibility, value.ownerSteamId, userId || null, userId || null]);
+    return { id: Number(result.insertId), ...value, sourceType: 'admin' };
+  }
+
+  async updateFixedLocation(idValue, input, userId = null) {
+    const id = boundedInteger(Number(idValue), '位置编号', 1, Number.MAX_SAFE_INTEGER);
+    const value = this.fixedLocationInput(input);
+    const result = await this.db.query("UPDATE `传送固定位置` SET `位置名称`=?,`世界X坐标`=?,`世界Y坐标`=?,`世界Z坐标`=?,`是否启用`=?,`排序值`=?,`可见范围`=?,`归属SteamID`=?,`最后修改管理员编号`=? WHERE `位置编号`=? AND `来源类型`='admin'", [value.name, value.worldX, value.worldY, value.worldZ, value.enabled ? 1 : 0, value.sortOrder, value.visibility, value.ownerSteamId, userId || null, id]);
+    if (Number(result.affectedRows) !== 1) throw new ServiceError('固定位置不存在', 404, 'FIXED_LOCATION_NOT_FOUND');
+    return { id, ...value, sourceType: 'admin' };
+  }
+
+  async removeFixedLocation(idValue) {
+    const id = boundedInteger(Number(idValue), '位置编号', 1, Number.MAX_SAFE_INTEGER);
+    const result = await this.db.query("DELETE FROM `传送固定位置` WHERE `位置编号`=? AND `来源类型`='admin'", [id]);
+    if (Number(result.affectedRows) !== 1) throw new ServiceError('固定位置不存在', 404, 'FIXED_LOCATION_NOT_FOUND');
+  }
+
+  async adminOverview() {
+    const [settings, fixedLocations, operations] = await Promise.all([
+      this.settings(),
+      this.fixedLocations(),
+      this.db.query("SELECT `记录编号` AS id,`发起玩家SteamID` AS steamId,`目标类型` AS targetType,`目标名称快照` AS targetName,`实扣商城币` AS chargedAmount,`执行状态` AS status,`错误代码` AS errorCode,`错误信息` AS errorMessage,`创建时间` AS createdAt,`完成时间` AS completedAt FROM `传送执行记录` ORDER BY `记录编号` DESC LIMIT 50")
+    ]);
+    return { settings, fixedLocations, operations: rows(operations), safety: { playerConsentRequired: false, initiatingPlayerOnlineRequired: true, targetPlayerOnlineRequired: false, realtimeVehicleRequired: true, lastKnownCoordinateHours: 24, uncertainDeliveryPolicy: 'manual_review', autoRetry: false, savedVehicleCoordinatesExecutable: false } };
+  }
+
+  async findOperation(key, query = this.db, lock = false) {
+    const suffix = lock ? ' FOR UPDATE' : '';
+    const sql = "SELECT `记录编号` AS id,`发起玩家SteamID` AS steamId,`请求幂等键` AS requestKey,`请求指纹` AS requestFingerprint,`目标类型` AS targetType,`目标引用` AS targetId,`目标名称快照` AS targetName,`游戏目标编号` AS nativeTargetId,`目标玩家SteamID` AS targetSteamId,`计费方式` AS pricingMode,`传送距离公里` AS kilometers,`基础价格` AS basePrice,`折扣百分比` AS discountPercent,`实扣商城币` AS chargedAmount,`扣款后余额` AS balanceAfter,`执行状态` AS status,`错误代码` AS errorCode,`错误信息` AS errorMessage,`创建时间` AS createdAt,`完成时间` AS completedAt FROM `传送执行记录` WHERE `请求幂等键`=? LIMIT 1" + suffix;
+    return operationRow(rows(await query.query(sql, [key]))[0]);
+  }
+
+  replay(operation, owner, target) {
+    if (String(operation.steamId) !== owner || operation.requestFingerprint !== fingerprint(owner, target)) throw new ServiceError('Idempotency-Key 已被其他传送请求使用', 409, 'IDEMPOTENCY_CONFLICT');
+    return publicOperation({ ...operation, idempotent: true });
+  }
+
+  async quota(owner, category, settings, entitlements, query = this.db) {
+    const vehicle = category === 'vehicle';
+    const typeClause = vehicle ? "`目标类型` IN ('vehicle_to_territory_flag','vehicle_to_player')" : "`目标类型` IN ('player','owned_vehicle','territory_flag','fixed_location')";
+    const result = rows(await query.query(`SELECT COUNT(*) AS used,MAX(\`创建时间\`) AS lastUsedAt FROM \`传送执行记录\` WHERE \`发起玩家SteamID\`=? AND ${typeClause} AND \`执行状态\` IN ('prepared','completed','manual_review','command_result_unknown','success_pending_persistence','verified') AND \`创建时间\`>=UTC_DATE() AND \`创建时间\`<UTC_DATE()+INTERVAL 1 DAY`, [owner]))[0] || {};
+    const included = Math.max(0, Number(entitlements.dailyTeleports || 0));
+    const base = Math.max(0, Number(vehicle ? settings.vehicleDailyLimit : settings.characterDailyLimit));
+    const total = base + included;
+    const used = Number(result.used || 0);
+    const intervalSeconds = vehicle ? Math.max(0, Number(settings.vehicleIntervalSeconds || 0)) : 0;
+    const lastUsedMs = result.lastUsedAt ? Date.parse(result.lastUsedAt) : NaN;
+    const intervalRemainingSeconds = Number.isFinite(lastUsedMs) ? Math.max(0, Math.ceil((lastUsedMs + intervalSeconds * 1000 - Date.now()) / 1000)) : 0;
+    return { date: new Date().toISOString().slice(0, 10), base, included, total, used, remaining: Math.max(0, total - used), intervalSeconds, intervalRemainingSeconds };
+  }
+
+  async onlinePlayers() {
+    const { ggcon } = await this.clients();
+    return rows(await ggcon.players({ priority: 'high' }));
+  }
+
+  async squadMemberIds(owner, query = this.db) {
+    const members = rows(await query.query("SELECT mate.`SteamID` AS steamId FROM `商城用户` self JOIN `商城用户` mate ON mate.`小队编号`=self.`小队编号` WHERE self.`SteamID`=? AND self.`小队编号`<>'' AND mate.`SteamID`<>self.`SteamID`", [owner]));
+    return new Set(members.map((member) => String(member.steamId || '')).filter(isSteamId64));
+  }
+
+  playerTargets(owner, players, squadMemberIds) {
+    const counts = new Map();
+    for (const player of players) {
+      const steamId = String(player?.steamId || '');
+      if (isSteamId64(steamId)) counts.set(steamId, (counts.get(steamId) || 0) + 1);
+    }
+    return players
+      .filter((player) => {
+        const steamId = String(player?.steamId || '');
+        return steamId !== owner && squadMemberIds.has(steamId) && isSteamId64(steamId) && counts.get(steamId) === 1;
+      })
+      .map((player) => ({ id: playerTargetId(player.steamId), type: 'player', name: playerTargetName(player) }))
+      .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'));
+  }
+
+  async overview(steamId) {
+    const owner = String(steamId || '');
+    if (!isSteamId64(owner)) throw new ServiceError('SteamID 格式无效', 400, 'INVALID_STEAM_ID');
+    const [settings, entitlements, vehicles, lastKnownPlayers, flags, fixedLocations, runtimeCapabilities] = await Promise.all([
+      this.settings(),
+      this.membershipEntitlements(owner),
+      this.db.query("SELECT v.`载具档案编号` AS id,COALESCE(NULLIF(v.`显示名称`,''),NULLIF(v.`型号名称`,''),NULLIF(v.`载具类型`,''),'已上锁载具') AS name,v.`车牌号` AS plateNumber,(v.`来源同步时间`>=DATE_SUB(NOW(),INTERVAL 5 MINUTE)) AS realtime FROM `载具档案` v WHERE (v.`车主SteamID`=? OR EXISTS (SELECT 1 FROM `商城用户` self JOIN `商城用户` vehicle_owner ON vehicle_owner.`小队编号`=self.`小队编号` WHERE self.`SteamID`=? AND self.`小队编号`<>'' AND vehicle_owner.`SteamID`=v.`车主SteamID`)) AND v.`来源类型`='scum_locked_vehicle' AND v.`来源同步状态`='present' AND v.`来源同步时间`>=DATE_SUB(NOW(),INTERVAL 24 HOUR) AND v.`世界X坐标` IS NOT NULL AND v.`世界Y坐标` IS NOT NULL AND v.`世界Z坐标` IS NOT NULL AND v.`来源锁槽数量`>0 AND v.`来源载具编号` IS NOT NULL AND v.`档案状态`='active' ORDER BY COALESCE(v.`显示名称`,v.`型号名称`,v.`载具类型`),v.`载具档案编号`", [owner, owner]),
+      this.db.query("SELECT mate.`SteamID` AS steamId,mate.`游戏名称` AS name,mate.`位置是否当前有效` AS online FROM `商城用户` mate JOIN `商城用户` self ON self.`小队编号`=mate.`小队编号` AND self.`SteamID`=? AND self.`小队编号`<>'' WHERE mate.`SteamID`<>? AND mate.`位置观测时间`>=DATE_SUB(NOW(),INTERVAL 24 HOUR) AND mate.`位置世界Z坐标` IS NOT NULL", [owner, owner]),
+      this.db.query("SELECT f.`实体标识` AS flagId,f.`显示名称` AS name FROM `传送位置快照` f WHERE f.`实体类型`='flag' AND f.`是否当前有效`=1 AND (f.`归属SteamID`=? OR EXISTS (SELECT 1 FROM `商城用户` self JOIN `商城用户` flag_owner ON flag_owner.`小队编号`=self.`小队编号` WHERE self.`SteamID`=? AND self.`小队编号`<>'' AND flag_owner.`SteamID`=f.`归属SteamID`)) ORDER BY f.`显示名称`,f.`实体标识`", [owner, owner]),
+      this.fixedLocations({ enabledOnly: true, ownerSteamId: owner }),
+      this.runtimeCapabilities()
+    ]);
+    let playerTargets = [];
+    let onlinePlayerTargets = [];
+    let playerTargetError = null;
+    if ((settings.playerEnabled && runtimeCapabilities.player) || (settings.vehicleToPlayerEnabled && runtimeCapabilities.vehicleToPlayer)) {
+      try {
+        const [players, squadMemberIds] = await Promise.all([this.onlinePlayers(), this.squadMemberIds(owner)]);
+        playerTargets = this.playerTargets(owner, players, squadMemberIds);
+        onlinePlayerTargets = [...playerTargets];
+        const liveTargetIds = new Set(playerTargets.map((item) => item.id));
+        for (const player of rows(lastKnownPlayers)) {
+          const id = playerTargetId(player.steamId);
+          if (!liveTargetIds.has(id) && squadMemberIds.has(String(player.steamId || ''))) playerTargets.push({ id, type: 'player', name: `${String(player.name || '小队成员')}（离线最后位置）`, lastKnown: true });
+        }
+        playerTargets.sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'));
+      } catch (error) {
+        playerTargetError = '在线玩家列表暂时不可用';
+      }
+    }
+    const [characterQuota, vehicleQuota] = await Promise.all([
+      this.quota(owner, 'character', settings, entitlements),
+      this.quota(owner, 'vehicle', settings, entitlements)
+    ]);
+    const characterQuote = priceFor(settings.characterFixedPrice, entitlements.teleportDiscount);
+    const vehicleQuote = priceFor(settings.vehicleFixedPrice, entitlements.teleportDiscount);
+    return {
+      capabilities: {
+        player: settings.playerEnabled && runtimeCapabilities.player && !playerTargetError,
+        ownedVehicle: settings.ownedVehicleEnabled && runtimeCapabilities.ownedVehicle,
+        territoryFlag: settings.territoryFlagEnabled && runtimeCapabilities.territoryFlag,
+        fixedLocation: settings.fixedLocationEnabled && runtimeCapabilities.player,
+        vehicleToTerritoryFlag: settings.vehicleToTerritoryFlagEnabled && runtimeCapabilities.vehicleToTerritoryFlag,
+        vehicleToPlayer: settings.vehicleToPlayerEnabled && runtimeCapabilities.vehicleToPlayer,
+        vehicleToFixedLocation: settings.vehicleToFixedLocationEnabled && runtimeCapabilities.vehicleToFixedLocation
+      },
+      capabilityStatus: runtimeCapabilities,
+      playerDisabledReason: !settings.playerEnabled ? '玩家互传当前未开放' : (!runtimeCapabilities.player ? '玩家互传管理命令不可用' : playerTargetError),
+      pricing: {
+        character: { mode: settings.characterPricingMode, fixedPrice: settings.characterFixedPrice, perKilometerPrice: settings.characterPerKilometerPrice, discountPercent: characterQuote.discount, price: characterQuote.chargedAmount },
+        vehicle: { mode: settings.vehiclePricingMode, fixedPrice: settings.vehicleFixedPrice, perKilometerPrice: settings.vehiclePerKilometerPrice, discountPercent: vehicleQuote.discount, price: vehicleQuote.chargedAmount }
+      },
+      quota: { character: characterQuota, vehicle: vehicleQuota },
+      membership: { memberLevel: Number(entitlements.memberLevel || 0), dailyTeleports: Math.max(0, Number(entitlements.dailyTeleports || 0)), teleportDiscount: characterQuote.discount },
+      targets: {
+        players: playerTargets,
+        onlinePlayers: onlinePlayerTargets,
+        vehicles: rows(vehicles).map((item) => ({ id: `vehicle:${item.id}`, type: 'owned_vehicle', name: Number(item.realtime) === 1 ? item.name : `${item.name}（离线最后位置）`, plateNumber: item.plateNumber || null, lastKnown: Number(item.realtime) !== 1 })),
+        realtimeVehicles: rows(vehicles).filter((item) => Number(item.realtime) === 1).map((item) => ({ id: `vehicle:${item.id}`, type: 'owned_vehicle', name: item.name, plateNumber: item.plateNumber || null })),
+        territoryFlags: rows(flags).map((item) => ({ id: flagTargetId(item.flagId), type: 'territory_flag', name: item.name || '本人或小队领地旗' })),
+        fixedLocations: settings.fixedLocationEnabled ? fixedLocations.map((item) => ({ id: fixedLocationTargetId(item.id), type: 'fixed_location', name: item.name })) : []
+      }
+    };
+  }
+
+  async ensureOnline(owner, target) {
+    const players = await this.onlinePlayers();
+    const ownerMatches = players.filter((player) => String(player.steamId || '') === owner);
+    if (ownerMatches.length !== 1) throw new ServiceError('当前玩家必须在线且唯一解析后才能传送', 409, 'TELEPORT_PLAYER_NOT_ONLINE');
+    const destinationId = target.targetType === 'player' ? target.targetId : target.targetType === 'vehicle_to_player' ? target.destinationId : null;
+    if (!destinationId || destinationId === 'player:self') return {};
+    if (!/^player:[0-9a-f]{32}$/i.test(destinationId)) throw new ServiceError('在线玩家目标无效，请刷新列表', 400, 'INVALID_PLAYER_TARGET');
+    const targetMatches = players.filter((player) => String(player.steamId || '') !== owner && playerTargetId(String(player.steamId || '')) === destinationId);
+    if (targetMatches.length > 1 || (targetMatches.length === 1 && !isSteamId64(String(targetMatches[0]?.steamId || '')))) throw new ServiceError('目标玩家在线数据无法唯一解析，请刷新列表', 409, 'TELEPORT_TARGET_NOT_ONLINE');
+    if (target.targetType === 'vehicle_to_player' && targetMatches.length !== 1) throw new ServiceError('载具只能传送到当前在线且唯一解析的队友', 409, 'TELEPORT_TARGET_NOT_ONLINE');
+    if (targetMatches.length === 1) {
+      const squadMemberIds = await this.squadMemberIds(owner);
+      if (!squadMemberIds.has(String(targetMatches[0].steamId))) throw new ServiceError('载具目标玩家仅允许当前小队成员', 409, 'TELEPORT_TARGET_NOT_SQUAD_MEMBER');
+    }
+    return target.targetType === 'vehicle_to_player' ? { vehicleTargetPlayer: targetMatches[0] } : { targetPlayer: targetMatches[0] || null };
+  }
+
+  async livePlayerLocation(steamId) {
+    const { ggcon } = await this.clients();
+    const result = await ggcon.command(`#Location ${steamId}`, { retry: false, priority: 'high', skipHealth: true });
+    return { steamId, ...parseTeleportLocationResponse(result) };
+  }
+
+  async liveVehicleLocation(vehicleEntityId) {
+    const { ggcon } = await this.clients();
+    const result = await ggcon.command(`QueryVehicleLocation ${vehicleEntityId}`, { retry: false, priority: 'high', skipHealth: true });
+    const location = parseVehicleLocation(result, vehicleEntityId);
+    if (location.locationSource !== 'rcon_live') throw new ServiceError('载具当前未实时加载，已取消传送', 409, 'TELEPORT_VEHICLE_NOT_REALTIME');
+    return location;
+  }
+
+  async attachLivePlayerLocations(owner, target, online, { ownerRequired = false } = {}) {
+    const requests = [];
+    if (ownerRequired || (target.targetType === 'vehicle_to_player' && target.destinationId === 'player:self')) {
+      requests.push(this.livePlayerLocation(owner).then((location) => { online.ownerLocation = location; }));
+    }
+    const targetPlayer = target.targetType === 'player' ? online.targetPlayer : online.vehicleTargetPlayer;
+    if (targetPlayer?.steamId) {
+      requests.push(this.livePlayerLocation(String(targetPlayer.steamId)).then((location) => {
+        const key = target.targetType === 'player' ? 'targetPlayer' : 'vehicleTargetPlayer';
+        online[key] = { ...targetPlayer, ...location };
+      }));
+    }
+    await Promise.all(requests);
+    return online;
+  }
+
+  async resolveTerritoryFlag(owner, target) {
+    if (!/^territory_flag:[0-9a-f]{32}$/i.test(target.targetId)) throw new ServiceError('领地旗目标无效，请刷新列表', 400, 'INVALID_TARGET');
+    const candidates = rows(await this.db.query("SELECT f.`实体标识` AS flagId,f.`显示名称` AS name,f.`世界X坐标` AS worldX,f.`世界Y坐标` AS worldY,f.`世界Z坐标` AS worldZ FROM `传送位置快照` f WHERE f.`实体类型`='flag' AND f.`是否当前有效`=1 AND f.`世界X坐标` IS NOT NULL AND f.`世界Y坐标` IS NOT NULL AND f.`世界Z坐标` IS NOT NULL AND (f.`归属SteamID`=? OR EXISTS (SELECT 1 FROM `商城用户` self JOIN `商城用户` flag_owner ON flag_owner.`小队编号`=self.`小队编号` WHERE self.`SteamID`=? AND self.`小队编号`<>'' AND flag_owner.`SteamID`=f.`归属SteamID`))", [owner, owner])).filter((flag) => flagTargetId(flag.flagId) === target.targetId);
+    if (candidates.length !== 1) throw new ServiceError('领地旗不存在、数据已失效或不属于本人及当前小队', 404, 'TARGET_NOT_AUTHORIZED');
+    const flag = candidates[0];
+    return { ...target, targetName: flag.name || '本人或小队领地旗', nativeTargetId: null, worldX: flag.worldX, worldY: flag.worldY, worldZ: flag.worldZ };
+  }
+
+  async requireUniqueVehicleTerritoryFlag(owner, destinationId, query = this.db) {
+    const flags = rows(await query.query("SELECT f.`实体标识` AS flagId,f.`显示名称` AS name,f.`世界X坐标` AS worldX,f.`世界Y坐标` AS worldY,f.`世界Z坐标` AS worldZ FROM `传送位置快照` f WHERE f.`实体类型`='flag' AND f.`是否当前有效`=1 AND f.`世界X坐标` IS NOT NULL AND f.`世界Y坐标` IS NOT NULL AND f.`世界Z坐标` IS NOT NULL AND (f.`归属SteamID`=? OR EXISTS (SELECT 1 FROM `商城用户` self JOIN `商城用户` flag_owner ON flag_owner.`小队编号`=self.`小队编号` WHERE self.`SteamID`=? AND self.`小队编号`<>'' AND flag_owner.`SteamID`=f.`归属SteamID`))", [owner, owner]));
+    if (flags.length !== 1) throw new ServiceError('载具传送到领地旗要求本人或当前小队恰好有一个有效授权领地旗', 409, 'VEHICLE_TERRITORY_FLAG_NOT_UNIQUE');
+    if (flagTargetId(flags[0].flagId) !== destinationId) throw new ServiceError('所选领地旗已失效，请刷新地图后重新选择', 409, 'TELEPORT_FLAG_TARGET_STALE');
+    return { id: destinationId, name: flags[0].name || '本人或小队领地旗', worldX: flags[0].worldX, worldY: flags[0].worldY, worldZ: flags[0].worldZ };
+  }
+
+  async resolveTarget(owner, target, query, online = {}, resolvedTerritoryFlag = null) {
+    if (target.targetType === 'player') {
+      const player = online.targetPlayer;
+      const onlineSteamId = String(player?.steamId || '');
+      if (player && (!isSteamId64(onlineSteamId) || onlineSteamId === owner || playerTargetId(onlineSteamId) !== target.targetId)) throw new ServiceError('在线玩家目标已失效，请刷新列表', 409, 'TELEPORT_TARGET_NOT_ONLINE');
+      const candidates = rows(await query.query("SELECT mate.`SteamID` AS steamId,mate.`游戏名称` AS name,mate.`位置世界X坐标` AS worldX,mate.`位置世界Y坐标` AS worldY,mate.`位置世界Z坐标` AS worldZ FROM `商城用户` mate JOIN `商城用户` self ON self.`小队编号`=mate.`小队编号` AND self.`SteamID`=? AND self.`小队编号`<>'' WHERE mate.`SteamID`<>? AND mate.`位置观测时间`>=DATE_SUB(NOW(),INTERVAL 24 HOUR) AND mate.`位置世界X坐标` IS NOT NULL AND mate.`位置世界Y坐标` IS NOT NULL AND mate.`位置世界Z坐标` IS NOT NULL", [owner, owner])).filter((item) => isSteamId64(String(item.steamId || '')) && playerTargetId(item.steamId) === target.targetId && (!player || String(item.steamId) === onlineSteamId));
+      if (candidates.length !== 1) throw new ServiceError(player ? '队友实时坐标尚未同步，请稍后重试' : '队友离线位置不存在、已超过24小时或小队关系已变化', 404, 'TARGET_NOT_AUTHORIZED');
+      const savedLocation = candidates[0];
+      const location = player && [player.worldX, player.worldY, player.worldZ].every((value) => Number.isFinite(Number(value))) ? player : savedLocation;
+      return { ...target, targetName: player ? playerTargetName(player) : `${savedLocation.name || '小队成员'}（离线最后位置）`, nativeTargetId: null, targetSteamId: String(savedLocation.steamId), worldX: location.worldX, worldY: location.worldY, worldZ: location.worldZ };
+    }
+    if (target.targetType === 'fixed_location') {
+      if (!/^fixed_location:[0-9a-f]{32}$/i.test(target.targetId)) throw new ServiceError('固定位置目标无效，请刷新列表', 400, 'INVALID_TARGET');
+      const candidates = (await this.fixedLocations({ enabledOnly: true, ownerSteamId: owner, query })).filter((item) => fixedLocationTargetId(item.id) === target.targetId);
+      if (candidates.length !== 1) throw new ServiceError('固定位置不存在或已停用', 404, 'TARGET_NOT_AUTHORIZED');
+      const location = candidates[0];
+      return { ...target, targetName: location.name, nativeTargetId: null, worldX: location.worldX, worldY: location.worldY, worldZ: location.worldZ };
+    }
+    if (target.targetType === 'territory_flag') {
+      if (!resolvedTerritoryFlag || resolvedTerritoryFlag.targetId !== target.targetId) throw new ServiceError('领地旗实时目标无效，请刷新列表', 409, 'TELEPORT_FLAG_TARGET_STALE');
+      return resolvedTerritoryFlag;
+    }
+    const match = /^vehicle:(\d+)$/.exec(target.targetId);
+    if (!match) throw new ServiceError('载具目标无效', 400, 'INVALID_TARGET');
+    const vehicleId = Number(match[1]);
+    if (!Number.isSafeInteger(vehicleId) || vehicleId < 1) throw new ServiceError('载具目标无效', 400, 'INVALID_TARGET');
+    const vehicle = rows(await query.query("SELECT v.`载具档案编号` AS id,v.`来源载具编号` AS nativeTargetId,COALESCE(NULLIF(v.`显示名称`,''),NULLIF(v.`型号名称`,''),NULLIF(v.`载具类型`,''),'已上锁载具') AS targetName,v.`世界X坐标` AS worldX,v.`世界Y坐标` AS worldY,v.`世界Z坐标` AS worldZ,(v.`来源同步时间`>=DATE_SUB(NOW(),INTERVAL 5 MINUTE)) AS realtime FROM `载具档案` v WHERE v.`载具档案编号`=? AND (v.`车主SteamID`=? OR EXISTS (SELECT 1 FROM `商城用户` self JOIN `商城用户` vehicle_owner ON vehicle_owner.`小队编号`=self.`小队编号` WHERE self.`SteamID`=? AND self.`小队编号`<>'' AND vehicle_owner.`SteamID`=v.`车主SteamID`)) AND v.`来源类型`='scum_locked_vehicle' AND v.`来源同步状态`='present' AND v.`来源同步时间`>=DATE_SUB(NOW(),INTERVAL 24 HOUR) AND v.`世界X坐标` IS NOT NULL AND v.`世界Y坐标` IS NOT NULL AND v.`世界Z坐标` IS NOT NULL AND v.`来源锁槽数量`>0 AND v.`来源载具编号` IS NOT NULL AND v.`档案状态`='active' LIMIT 1 FOR UPDATE", [vehicleId, owner, owner]))[0];
+    if (!vehicle) throw new ServiceError('该载具不存在、已失效、超过24小时或不属于本人及当前小队', 404, 'TARGET_NOT_AUTHORIZED');
+    const nativeTargetId = Number(vehicle.nativeTargetId);
+    if (!Number.isSafeInteger(nativeTargetId) || nativeTargetId < 1) throw new ServiceError('载具运行时标识无效，请等待数据重新同步', 409, 'TARGET_METADATA_INVALID');
+    const destinationPlayer = target.targetType === 'vehicle_to_player' ? online.vehicleTargetPlayer : null;
+    if (target.targetType === 'vehicle_to_player' && target.destinationId !== 'player:self' && !destinationPlayer) throw new ServiceError('载具目标队友已离线或小队关系已变化', 409, 'TELEPORT_TARGET_NOT_ONLINE');
+    const territoryFlag = target.targetType === 'vehicle_to_territory_flag' ? await this.requireUniqueVehicleTerritoryFlag(owner, target.destinationId, query) : null;
+    const fixedLocationCandidates = target.targetType === 'vehicle_to_fixed_location'
+      ? (await this.fixedLocations({ enabledOnly: true, ownerSteamId: owner, query })).filter((item) => fixedLocationTargetId(item.id) === target.destinationId)
+      : [];
+    if (target.targetType === 'vehicle_to_fixed_location' && fixedLocationCandidates.length !== 1) throw new ServiceError('固定位置不存在、不可见或已停用', 404, 'TARGET_NOT_AUTHORIZED');
+    const fixedLocation = fixedLocationCandidates[0] || null;
+    const targetSteamId = target.targetType === 'vehicle_to_player' ? String(destinationPlayer?.steamId || owner) : null;
+    if (target.targetType === 'owned_vehicle') return { ...target, targetName: `本人位置 → ${vehicle.targetName}`, nativeTargetId, targetSteamId: null, worldX: vehicle.worldX, worldY: vehicle.worldY, worldZ: vehicle.worldZ };
+    const destinationName = fixedLocation?.name || territoryFlag?.name || (destinationPlayer ? playerTargetName(destinationPlayer) : '本人位置');
+    const playerLocation = destinationPlayer || online.ownerLocation;
+    return { ...target, targetName: `${vehicle.targetName} → ${destinationName}`, nativeTargetId, targetSteamId, worldX: vehicle.worldX, worldY: vehicle.worldY, worldZ: vehicle.worldZ, destinationWorldX: fixedLocation?.worldX ?? territoryFlag?.worldX ?? playerLocation?.worldX, destinationWorldY: fixedLocation?.worldY ?? territoryFlag?.worldY ?? playerLocation?.worldY, destinationWorldZ: fixedLocation?.worldZ ?? territoryFlag?.worldZ ?? playerLocation?.worldZ };
+  }
+
+  async quote(steamId, input) {
+    const owner = String(steamId || '');
+    if (!isSteamId64(owner)) throw new ServiceError('SteamID 格式无效', 400, 'INVALID_STEAM_ID');
+    const target = targetInput(input);
+    const [settings, capabilities, entitlements] = await Promise.all([this.settings(), this.runtimeCapabilities(), this.membershipEntitlements(owner)]);
+    const modes = {
+      player: ['playerEnabled', 'player', '小队成员互传'],
+      owned_vehicle: ['ownedVehicleEnabled', 'ownedVehicle', '玩家传送到小队载具'],
+      territory_flag: ['territoryFlagEnabled', 'territoryFlag', '玩家传送到领地旗'],
+      fixed_location: ['fixedLocationEnabled', 'player', '玩家传送到固定位置'],
+      vehicle_to_territory_flag: ['vehicleToTerritoryFlagEnabled', 'vehicleToTerritoryFlag', '载具传送到授权领地旗'],
+      vehicle_to_player: ['vehicleToPlayerEnabled', 'vehicleToPlayer', '载具传送到玩家位置'],
+      vehicle_to_fixed_location: ['vehicleToFixedLocationEnabled', 'vehicleToFixedLocation', '载具传送到固定位置']
+    };
+    const mode = modes[target.targetType];
+    if (!settings[mode[0]]) throw new ServiceError(`${mode[2]}当前未开放`, 409, target.targetType === 'player' ? 'PLAYER_TELEPORT_DISABLED' : 'TELEPORT_MODE_DISABLED');
+    if (!capabilities[mode[1]]) throw new ServiceError(`${mode[2]}执行能力当前不可用`, 503, 'TELEPORT_CAPABILITY_UNAVAILABLE');
+    const category = teleportCategory(target.targetType);
+    const pricingModeValue = category === 'vehicle' ? settings.vehiclePricingMode : settings.characterPricingMode;
+    const online = await this.ensureOnline(owner, target);
+    await this.attachLivePlayerLocations(owner, target, online, { ownerRequired: category === 'character' });
+    const resolvedTerritoryFlag = target.targetType === 'territory_flag' ? await this.resolveTerritoryFlag(owner, target) : null;
+    if (target.targetType === 'vehicle_to_territory_flag') await this.requireUniqueVehicleTerritoryFlag(owner, target.destinationId);
+    let resolved = await this.resolveTarget(owner, target, this.db, online, resolvedTerritoryFlag);
+    if (category === 'vehicle' || target.targetType === 'owned_vehicle') {
+      const liveVehicle = await this.liveVehicleLocation(resolved.nativeTargetId);
+      resolved = { ...resolved, worldX: liveVehicle.worldX, worldY: liveVehicle.worldY, worldZ: liveVehicle.worldZ };
+    }
+    const fixedPrice = category === 'vehicle' ? settings.vehicleFixedPrice : settings.characterFixedPrice;
+    const perKilometerPrice = category === 'vehicle' ? settings.vehiclePerKilometerPrice : settings.characterPerKilometerPrice;
+    const source = category === 'character' ? online.ownerLocation : resolved;
+    const destination = { worldX: resolved.destinationWorldX ?? resolved.worldX, worldY: resolved.destinationWorldY ?? resolved.worldY };
+    const kilometers = distanceKilometers(source, destination);
+    const basePrice = pricingModeValue === 'distance' ? kilometers * perKilometerPrice : fixedPrice;
+    const calculated = priceFor(basePrice, entitlements.teleportDiscount);
+    const account = rows(await this.db.query('SELECT `商城币余额` AS balance FROM `商城用户` WHERE `SteamID`=? LIMIT 1', [owner]))[0] || { balance: 0 };
+    const balance = Number(account.balance || 0);
+    const quota = await this.quota(owner, category, settings, entitlements);
+    if (quota.total < 1 || quota.remaining < 1) throw new ServiceError(`今日${category === 'vehicle' ? '载具' : '角色'}传送次数已用完或尚未配置可用次数`, 409, 'TELEPORT_DAILY_LIMIT');
+    if (quota.intervalRemainingSeconds > 0) throw new ServiceError(`载具传送间隔中，请在 ${quota.intervalRemainingSeconds} 秒后重试`, 409, 'TELEPORT_INTERVAL');
+    if (balance < calculated.chargedAmount) throw new ServiceError('商城币余额不足', 409, 'INSUFFICIENT_BALANCE');
+    const token = randomUUID();
+    const expiresAt = this.now() + 60_000;
+    for (const [storedToken, storedQuote] of this.quotes) if (storedQuote.expiresAt <= this.now()) this.quotes.delete(storedToken);
+    this.quotes.set(token, { owner, fingerprint: fingerprint(owner, target), expiresAt, pricingMode: pricingModeValue, kilometers, basePrice, discountPercent: calculated.discount, chargedAmount: calculated.chargedAmount });
+    return { quoteToken: token, expiresAt: new Date(expiresAt).toISOString(), targetName: resolved.targetName, category, pricingMode: pricingModeValue, kilometers, perKilometerPrice, basePrice, discountPercent: calculated.discount, chargedAmount: calculated.chargedAmount, balance, balanceAfter: balance - calculated.chargedAmount };
+  }
+
+  async execute(steamId, input, keyValue, quoteToken = null) {
+    const owner = String(steamId || '');
+    if (!isSteamId64(owner)) throw new ServiceError('SteamID 格式无效', 400, 'INVALID_STEAM_ID');
+    const key = requestKey(keyValue);
+    const target = targetInput(input);
+    const existing = await this.findOperation(key);
+    if (existing) return this.replay(existing, owner, target);
+    const expectedQuote = quoteToken ? this.consumeQuote(owner, target, quoteToken) : null;
+    const [settings, capabilities] = await Promise.all([this.settings(), this.runtimeCapabilities()]);
+    const modes = {
+      player: ['playerEnabled', 'player', '小队成员互传'],
+      owned_vehicle: ['ownedVehicleEnabled', 'ownedVehicle', '玩家传送到小队载具'],
+      territory_flag: ['territoryFlagEnabled', 'territoryFlag', '玩家传送到领地旗'],
+      fixed_location: ['fixedLocationEnabled', 'player', '玩家传送到固定位置'],
+      vehicle_to_territory_flag: ['vehicleToTerritoryFlagEnabled', 'vehicleToTerritoryFlag', '载具传送到授权领地旗'],
+      vehicle_to_player: ['vehicleToPlayerEnabled', 'vehicleToPlayer', '载具传送到玩家位置'],
+      vehicle_to_fixed_location: ['vehicleToFixedLocationEnabled', 'vehicleToFixedLocation', '载具传送到固定位置']
+    };
+    const mode = modes[target.targetType];
+    if (!settings[mode[0]]) throw new ServiceError(`${mode[2]}当前未开放`, 409, target.targetType === 'player' ? 'PLAYER_TELEPORT_DISABLED' : 'TELEPORT_MODE_DISABLED');
+    if (!capabilities[mode[1]]) throw new ServiceError(`${mode[2]}执行能力当前不可用`, 503, 'TELEPORT_CAPABILITY_UNAVAILABLE');
+    const category = teleportCategory(target.targetType);
+    const online = await this.ensureOnline(owner, target);
+    await this.attachLivePlayerLocations(owner, target, online, { ownerRequired: category === 'character' });
+    const resolvedTerritoryFlag = target.targetType === 'territory_flag' ? await this.resolveTerritoryFlag(owner, target) : null;
+    if (target.targetType === 'vehicle_to_territory_flag') await this.requireUniqueVehicleTerritoryFlag(owner, target.destinationId);
+    const entitlements = await this.membershipEntitlements(owner);
+    let prepared;
+    try {
+      prepared = await this.db.transaction(async (tx) => {
+        const repeated = await this.findOperation(key, tx, true);
+        if (repeated) return this.replay(repeated, owner, target);
+        await tx.query('INSERT INTO \`商城用户\` (\`SteamID\`,\`商城币余额\`) VALUES (?,0) ON DUPLICATE KEY UPDATE \`SteamID\`=VALUES(\`SteamID\`)', [owner]);
+        const account = rows(await tx.query('SELECT \`商城币余额\` AS balance FROM \`商城用户\` WHERE \`SteamID\`=? FOR UPDATE', [owner]))[0] || { balance: 0 };
+        const serializedRepeated = await this.findOperation(key, tx, true);
+        if (serializedRepeated) return this.replay(serializedRepeated, owner, target);
+        const quota = await this.quota(owner, category, settings, entitlements, tx);
+        if (quota.total < 1 || quota.remaining < 1) throw new ServiceError(`今日${category === 'vehicle' ? '载具' : '角色'}传送次数已用完或尚未配置可用次数`, 409, 'TELEPORT_DAILY_LIMIT');
+        if (quota.intervalRemainingSeconds > 0) throw new ServiceError(`载具传送间隔中，请在 ${quota.intervalRemainingSeconds} 秒后重试`, 409, 'TELEPORT_INTERVAL');
+        let resolved = await this.resolveTarget(owner, target, tx, online, resolvedTerritoryFlag);
+        const liveVehicleSource = category === 'vehicle' || target.targetType === 'owned_vehicle' ? await this.liveVehicleLocation(resolved.nativeTargetId) : null;
+        if (liveVehicleSource) resolved = { ...resolved, worldX: liveVehicleSource.worldX, worldY: liveVehicleSource.worldY, worldZ: liveVehicleSource.worldZ };
+        const pricingModeValue = category === 'vehicle' ? settings.vehiclePricingMode : settings.characterPricingMode;
+        const fixedPrice = category === 'vehicle' ? settings.vehicleFixedPrice : settings.characterFixedPrice;
+        const perKilometerPrice = category === 'vehicle' ? settings.vehiclePerKilometerPrice : settings.characterPerKilometerPrice;
+        const source = category === 'character' ? online.ownerLocation : (liveVehicleSource || resolved);
+        const destination = { worldX: resolved.destinationWorldX ?? resolved.worldX, worldY: resolved.destinationWorldY ?? resolved.worldY };
+        const kilometers = distanceKilometers(source, destination);
+        const basePrice = pricingModeValue === 'distance' ? kilometers * perKilometerPrice : fixedPrice;
+        const quote = priceFor(basePrice, entitlements.teleportDiscount);
+        if (expectedQuote && (expectedQuote.pricingMode !== pricingModeValue || expectedQuote.kilometers !== kilometers || expectedQuote.basePrice !== basePrice || expectedQuote.discountPercent !== quote.discount || expectedQuote.chargedAmount !== quote.chargedAmount)) throw new ServiceError('传送距离或费用已变化，请重新计算后确认', 409, 'TELEPORT_QUOTE_CHANGED');
+        const balance = Number(account.balance || 0);
+        if (balance < quote.chargedAmount) throw new ServiceError('商城币余额不足', 409, 'INSUFFICIENT_BALANCE');
+        const balanceAfter = balance - quote.chargedAmount;
+        await tx.query('UPDATE \`商城用户\` SET \`商城币余额\`=? WHERE \`SteamID\`=?', [balanceAfter, owner]);
+        const targetSteamId = resolved.targetSteamId || (target.targetType.startsWith('vehicle_to_') ? owner : null);
+        const inserted = await tx.query("INSERT INTO `传送执行记录` (`发起玩家SteamID`,`请求幂等键`,`请求指纹`,`目标类型`,`目标引用`,`目标名称快照`,`游戏目标编号`,`目标玩家SteamID`,`计费方式`,`传送距离公里`,`基础价格`,`折扣百分比`,`实扣商城币`,`扣款后余额`,`执行状态`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'prepared')", [owner, key, fingerprint(owner, target), target.targetType, target.targetId, resolved.targetName, resolved.nativeTargetId, targetSteamId, pricingModeValue, kilometers, basePrice, quote.discount, quote.chargedAmount, balanceAfter]);
+        if (quote.chargedAmount > 0) await tx.query("INSERT INTO coin_ledger (steam_id,amount,balance_after,type,reference_type,reference_id,note) VALUES (?,?,?,'teleport_charge','teleport_charge',?,'商城传送余额预留')", [owner, -quote.chargedAmount, balanceAfter, String(inserted.insertId)]);
+        return { id: Number(inserted.insertId), steamId: owner, requestKey: key, requestFingerprint: fingerprint(owner, target), ...resolved, pricingMode: pricingModeValue, kilometers, basePrice, discountPercent: quote.discount, chargedAmount: quote.chargedAmount, balanceAfter, status: 'prepared', idempotent: false };
+      });
+    } catch (error) {
+      if (error?.code !== 'ER_DUP_ENTRY' && error?.errno !== 1062) throw error;
+      const repeated = await this.findOperation(key);
+      if (!repeated) throw error;
+      return this.replay(repeated, owner, target);
+    }
+    if (prepared.idempotent) return prepared;
+    let delivered = false;
+    let vehicleCommandAttempted = prepared.targetType.startsWith('vehicle_to_');
+    let vehicleTeleportSent = false;
+    try {
+      if (prepared.targetType === 'fixed_location') {
+        const currentFixedLocation = await this.resolveTarget(owner, target, this.db, online, null);
+        prepared = { ...prepared, worldX: currentFixedLocation.worldX, worldY: currentFixedLocation.worldY, worldZ: currentFixedLocation.worldZ, targetName: currentFixedLocation.targetName };
+      }
+      if (prepared.targetType === 'player') {
+        const currentSquadMemberIds = await this.squadMemberIds(owner);
+        if (!currentSquadMemberIds.has(String(prepared.targetSteamId || ''))) throw new ServiceError('小队关系已发生变化，已取消传送', 409, 'TELEPORT_TARGET_NOT_SQUAD_MEMBER');
+      }
+      if (prepared.targetType.startsWith('vehicle_to_')) {
+        if (prepared.targetType === 'vehicle_to_territory_flag') await this.requireUniqueVehicleTerritoryFlag(owner, target.destinationId);
+        const currentOnline = await this.ensureOnline(owner, target);
+        if (prepared.targetType === 'vehicle_to_player' && String(currentOnline.vehicleTargetPlayer?.steamId || owner) !== String(prepared.targetSteamId || '')) throw new ServiceError('目标玩家已离线或小队关系已变化，已取消传送', 409, 'TELEPORT_TARGET_NOT_ONLINE');
+        const currentSource = await this.resolveTarget(owner, target, this.db, currentOnline, null);
+        if (String(currentSource.nativeTargetId || '') !== String(prepared.nativeTargetId || '')) throw new ServiceError('源载具授权或实体标识已变化，已取消传送', 409, 'TELEPORT_VEHICLE_OWNERSHIP_CHANGED');
+        if (prepared.targetType === 'vehicle_to_fixed_location') prepared = { ...prepared, destinationWorldX: currentSource.destinationWorldX, destinationWorldY: currentSource.destinationWorldY, destinationWorldZ: currentSource.destinationWorldZ, targetName: currentSource.targetName };
+      }
+      const { ggcon } = await this.clients();
+      if (teleportCategory(prepared.targetType) === 'vehicle' || prepared.targetType === 'owned_vehicle') {
+        try {
+          const location = await this.liveVehicleLocation(prepared.nativeTargetId);
+          if (prepared.targetType === 'owned_vehicle') prepared = { ...prepared, worldX: location.worldX, worldY: location.worldY, worldZ: location.worldZ };
+        } catch (error) {
+          error.vehiclePreflightFailed = true;
+          throw error;
+        }
+      }
+      const commandSpec = commandFor(owner, prepared, capabilities);
+      vehicleCommandAttempted = Boolean(commandSpec.vehicleExpected);
+      vehicleTeleportSent = Boolean(commandSpec.vehicleExpected);
+      let vehicleReceipt = null;
+      if (commandSpec.destinations) {
+        let lastRejected;
+        for (const destination of commandSpec.destinations) {
+          try {
+            const result = await ggcon.command(coordinateCommand(owner, destination), { retry: false, priority: 'high' });
+            parseTeleportCoordinateResult(result?.response ?? result, destination);
+            lastRejected = null;
+            break;
+          } catch (error) {
+            if (isRejectedSafeDestination(error)) {
+              lastRejected = error;
+              continue;
+            }
+            if (error?.code !== 'RCON_COMMAND_FAILED') error.uncertainDelivery = true;
+            throw error;
+          }
+        }
+        if (lastRejected) throw lastRejected;
+      } else {
+        const result = await ggcon.command(commandSpec.command, { retry: false, priority: 'high' });
+        if (commandSpec.vehicleExpected) {
+          try {
+            vehicleReceipt = parseVehicleTeleportResult(result?.response ?? result, commandSpec.vehicleExpected);
+          } catch (error) {
+            if (error?.code !== 'RCON_COMMAND_FAILED') error.uncertainDelivery = true;
+            throw error;
+          }
+        }
+      }
+      delivered = true;
+      if (vehicleReceipt) {
+        const completion = await this.db.query("UPDATE `传送执行记录` SET `执行状态`='completed',`载具回执`=?,`载具目标X`=?,`载具目标Y`=?,`载具目标Z`=?,`载具命令完成时间`=CURRENT_TIMESTAMP(3),`载具复核次数`=0,`载具下次复核时间`=DATE_ADD(CURRENT_TIMESTAMP(3),INTERVAL 60 SECOND),`载具复核响应`=NULL,`载具复核租约时间`=NULL,`完成时间`=CURRENT_TIMESTAMP(3),`错误代码`=NULL,`错误信息`=NULL WHERE `记录编号`=? AND `执行状态`='prepared'", [vehicleReceipt.raw, vehicleReceipt.x, vehicleReceipt.y, vehicleReceipt.z, prepared.id]);
+        if (Number(completion?.affectedRows) !== 1) throw new Error('载具传送已成功，但完成状态未能唯一落库');
+        return publicOperation({ ...prepared, status: 'completed', completedAt: new Date().toISOString() });
+      }
+      const completion = await this.db.query("UPDATE `传送执行记录` SET `执行状态`='completed',`完成时间`=CURRENT_TIMESTAMP(3),`错误代码`=NULL,`错误信息`=NULL WHERE `记录编号`=? AND `执行状态`='prepared'", [prepared.id]);
+      if (Number(completion?.affectedRows) !== 1) throw new Error('传送命令已送达，但完成状态未能唯一落库');
+      return publicOperation({ ...prepared, status: 'completed', completedAt: new Date().toISOString() });
+    } catch (error) {
+      const message = String(error?.message || '传送命令执行失败').slice(0, 500);
+      if (delivered) {
+        await this.db.query("UPDATE `传送执行记录` SET `执行状态`='manual_review',`错误代码`='COMPLETION_PERSIST_FAILED',`错误信息`=? WHERE `记录编号`=? AND `执行状态`='prepared'", [message, prepared.id]);
+        return publicOperation({ ...prepared, status: 'manual_review', errorCode: 'COMPLETION_PERSIST_FAILED', errorMessage: '传送已成功，但完成状态未能落库，已转人工核查' });
+      }
+      if (vehicleTeleportSent && (error?.uncertainDelivery || error?.code !== 'RCON_COMMAND_FAILED')) {
+        await this.db.query("UPDATE `传送执行记录` SET `执行状态`='command_result_unknown',`错误代码`='COMMAND_RESULT_UNKNOWN',`错误信息`=? WHERE `记录编号`=? AND `执行状态`='prepared'", [message, prepared.id]);
+        return publicOperation({ ...prepared, status: 'command_result_unknown', errorCode: 'COMMAND_RESULT_UNKNOWN', errorMessage: '载具命令结果无法确认，未重试且未自动退款，已转人工核查' });
+      }
+      if (error?.uncertainDelivery && !error?.vehiclePreflightFailed) {
+        const uncertain = await this.db.transaction(async (tx) => {
+          const current = await this.findOperation(key, tx, true);
+          if (!current || current.status !== 'prepared') return current || prepared;
+          let balanceAfter = current.balanceAfter;
+          if (current.chargedAmount > 0) {
+            await tx.query('INSERT INTO \`商城用户\` (\`SteamID\`,\`商城币余额\`) VALUES (?,0) ON DUPLICATE KEY UPDATE \`SteamID\`=VALUES(\`SteamID\`)', [owner]);
+            const account = rows(await tx.query('SELECT \`商城币余额\` AS balance FROM \`商城用户\` WHERE \`SteamID\`=? FOR UPDATE', [owner]))[0] || { balance: 0 };
+            balanceAfter = Number(account.balance || 0) + current.chargedAmount;
+            await tx.query('UPDATE \`商城用户\` SET \`商城币余额\`=? WHERE \`SteamID\`=?', [balanceAfter, owner]);
+            await tx.query("INSERT INTO coin_ledger (steam_id,amount,balance_after,type,reference_type,reference_id,note) VALUES (?,?,?,'teleport_refund','teleport_refund',?,'商城传送结果不确定退款')", [owner, current.chargedAmount, balanceAfter, String(current.id)]);
+          }
+          await tx.query("UPDATE `传送执行记录` SET `执行状态`='manual_review',`扣款后余额`=?,`错误代码`='UNCERTAIN_DELIVERY',`错误信息`=? WHERE `记录编号`=? AND `执行状态`='prepared'", [balanceAfter, message, current.id]);
+          return { ...current, balanceAfter, status: 'manual_review', errorCode: 'UNCERTAIN_DELIVERY', errorMessage: '命令结果不确定，已退款、停止重试并转人工核查' };
+        });
+        return publicOperation(uncertain);
+      }
+      const failed = await this.db.transaction(async (tx) => {
+        const current = await this.findOperation(key, tx, true);
+        if (!current || current.status !== 'prepared') return current || prepared;
+        let balanceAfter = current.balanceAfter;
+        if (current.chargedAmount > 0) {
+          await tx.query('INSERT INTO \`商城用户\` (\`SteamID\`,\`商城币余额\`) VALUES (?,0) ON DUPLICATE KEY UPDATE \`SteamID\`=VALUES(\`SteamID\`)', [owner]);
+          const account = rows(await tx.query('SELECT \`商城币余额\` AS balance FROM \`商城用户\` WHERE \`SteamID\`=? FOR UPDATE', [owner]))[0] || { balance: 0 };
+          balanceAfter = Number(account.balance || 0) + current.chargedAmount;
+          await tx.query('UPDATE \`商城用户\` SET \`商城币余额\`=? WHERE \`SteamID\`=?', [balanceAfter, owner]);
+          await tx.query("INSERT INTO coin_ledger (steam_id,amount,balance_after,type,reference_type,reference_id,note) VALUES (?,?,?,'teleport_refund','teleport_refund',?,'商城传送明确失败退款')", [owner, current.chargedAmount, balanceAfter, String(current.id)]);
+        }
+        const finalStatus = vehicleCommandAttempted ? 'refunded' : 'failed';
+        await tx.query("UPDATE `传送执行记录` SET `执行状态`=?,`扣款后余额`=?,`错误代码`='COMMAND_FAILED',`错误信息`=?,`完成时间`=CURRENT_TIMESTAMP(3),`退款时间`=CASE WHEN ?='refunded' THEN CURRENT_TIMESTAMP(3) ELSE `退款时间` END,`退款原因`=CASE WHEN ?='refunded' THEN '载具传送命令明确失败' ELSE `退款原因` END WHERE `记录编号`=? AND `执行状态`='prepared'", [finalStatus, balanceAfter, message, finalStatus, finalStatus, current.id]);
+        return { ...current, balanceAfter, status: finalStatus, errorCode: 'COMMAND_FAILED', errorMessage: message };
+      });
+      return publicOperation(failed);
+    }
+  }
+}

@@ -1,0 +1,432 @@
+$('#resetChallengeButton').addEventListener('click', (event) => withBusy(event.currentTarget, async () => {
+  const form = $('#resetPasswordForm');
+  if (!form.elements.steamId.reportValidity()) return;
+  try {
+    await api('/api/shop/auth/password-challenge', { method: 'POST', body: JSON.stringify({ steamId: form.elements.steamId.value.trim() }) });
+    toast('验证码已发送，请回到游戏内查看消息');
+    form.elements.verificationCode.focus();
+  } catch (error) { toast(error.message, 'error'); }
+}));
+$('#resetPasswordForm').addEventListener('submit', (event) => { event.preventDefault(); savePassword(event.currentTarget, event.submitter, 'reset'); });
+$('#changePasswordForm').addEventListener('submit', (event) => { event.preventDefault(); savePassword(event.currentTarget, event.submitter, 'change'); });
+
+document.addEventListener('click', async (event) => {
+  const pageButton = event.target.closest('[data-page-list]');
+  if (pageButton) {
+    const name = pageButton.dataset.pageList;
+    state.pagination[name] = Math.max(0, (state.pagination[name] || 0) + Number(pageButton.dataset.pageStep || 0));
+    if (name === 'ledger') renderLedger(asList(state.account, ['ledger', 'transactions', 'items']));
+    else if (name === 'orders') renderOrders();
+    else if (name === 'rewards') renderRewards();
+    else if (name === 'holdings') renderHoldings();
+    else if (name === 'trades') renderTrades();
+    return;
+  }
+  const route = event.target.closest('[data-route]');
+  if (route) { event.preventDefault(); showRoute(route.dataset.route); return; }
+  const accountSection = event.target.closest('[data-account-section]');
+  if (accountSection) {
+    showAccountSection(accountSection.dataset.accountSection);
+    if (accountSection.dataset.accountSection === 'redeemSection') loadExchangeConfig();
+    return;
+  }
+  const cloudPage = event.target.closest('[data-cloud-page]');
+  if (cloudPage) { showCloudPage(cloudPage.dataset.cloudPage); return; }
+  const cloudInventoryPage = event.target.closest('[data-cloud-inventory-page]');
+  if (cloudInventoryPage) {
+    const list = $('[data-cloud-inventory-list]');
+    if (!list) return;
+    const direction = cloudInventoryPage.dataset.cloudInventoryPage === 'next' ? 1 : -1;
+    list.dataset.page = String(Math.max(0, Number(list.dataset.page || 0) + direction));
+    renderCloudInventoryPage();
+    return;
+  }
+  const cloudSelectionRow = event.target.closest('[data-cloud-inventory-row]');
+  if (cloudSelectionRow && !event.target.closest('button, a, input')) {
+    toggleCloudInventorySelection(cloudSelectionRow);
+    return;
+  }
+  const cloudInventoryDetail = event.target.closest('[data-cloud-inventory-detail]');
+  if (cloudInventoryDetail) { openCloudInventoryDetail(cloudInventoryDetail.dataset.cloudInventoryDetail); return; }
+  const cloudInventoryDetailPage = event.target.closest('[data-cloud-inventory-detail-page]');
+  if (cloudInventoryDetailPage) {
+    const modal = $('#cloudInventoryDetailModal');
+    const direction = cloudInventoryDetailPage.dataset.cloudInventoryDetailPage === 'next' ? 1 : -1;
+    modal.dataset.page = String(Math.max(0, Number(modal.dataset.page || 0) + direction));
+    renderCloudInventoryDetailPage();
+    return;
+  }
+  const cloudMarketDetail = event.target.closest('[data-cloud-market-detail]');
+  if (cloudMarketDetail) { openCloudMarketDetail(cloudMarketDetail.dataset.cloudMarketDetail); return; }
+  const cloudMarketDetailPage = event.target.closest('[data-cloud-market-detail-page]');
+  if (cloudMarketDetailPage) {
+    const modal = $('#cloudMarketDetailModal');
+    const direction = cloudMarketDetailPage.dataset.cloudMarketDetailPage === 'next' ? 1 : -1;
+    modal.dataset.page = String(Math.max(0, Number(modal.dataset.page || 0) + direction));
+    renderCloudMarketDetailPage();
+    return;
+  }
+  const cloudListAll = event.target.closest('[data-cloud-list-all]');
+  if (cloudListAll) {
+    const batches = state.cloudInventoryGroups?.[Number($('#cloudInventoryDetailModal').dataset.groupIndex)] || [];
+    const inventoryIds = cloudSelectedInventoryIds(cloudEligibleBatches(batches).map((item) => Number(item.id)));
+    if (!inventoryIds.length) { toast(state.cloudInventorySelection.size ? '选中的库存中没有可上架物品' : '当前没有可上架库存', 'error'); return; }
+    openCloudListingPrice(inventoryIds, batches[0]?.itemName, true);
+    return;
+  }
+  const cloudCancelAll = event.target.closest('[data-cloud-cancel-all]');
+  if (cloudCancelAll) {
+    const batches = state.cloudInventoryGroups?.[Number($('#cloudInventoryDetailModal').dataset.groupIndex)] || [];
+    const inventoryIds = new Set(batches.map((item) => Number(item.id)));
+    const listings = (state.cloudMarket || []).filter((item) => item.sellerSteamId === state.user?.steamId && inventoryIds.has(Number(item.inventoryId)));
+    if (!listings.length) { toast('当前没有已上架挂单', 'error'); return; }
+    try {
+      for (const listing of listings) await api(`/api/shop/cloud-listings/${listing.id}/cancel`, { method:'POST', body:'{}' });
+      toast('该物品已全部下架');
+      await Promise.all([loadCloudWarehouse(),loadCloudMarket()]);
+      refreshCloudInventoryDetailModal();
+    } catch (error) { toast(error.message,'error'); }
+    return;
+  }
+  const cloudRecycle = event.target.closest('[data-cloud-recycle]');
+  const cloudPassBuy = event.target.closest('[data-cloud-pass-buy]');
+  if (cloudPassBuy) {
+    const plan = state.cloudWarehouse?.passPlans?.find((item) => item.passType === cloudPassBuy.dataset.cloudPassBuy);
+    if (!plan?.enabled || !window.confirm(`确认支付 ${number(plan.price)} 商城币开通或续费 ${number(plan.durationDays)} 天？`)) return;
+    const requestKey = cloudPassBuy.dataset.requestKey || (cloudPassBuy.dataset.requestKey = uuid());
+    await withBusy(cloudPassBuy, async () => {
+      try { await api(`/api/shop/cloud-passes/${plan.passType}/buy`, { method: 'POST', headers: { 'Idempotency-Key': requestKey }, body: '{}' }); delete cloudPassBuy.dataset.requestKey; toast('云储证购买成功'); await Promise.all([loadCloudWarehouse(),loadAccount()]); }
+      catch (error) { toast(error.message, 'error'); }
+    });
+    return;
+  }
+  if (cloudRecycle) { openCloudRecycleModal(); return; }
+  const cloudRecycleConfirm = event.target.closest('[data-cloud-recycle-confirm], [data-cloud-recycle-query]');
+  if (cloudRecycleConfirm) { await queryCloudRecycleItem(cloudRecycleConfirm); return; }
+  const cloudRecycleSubmit = event.target.closest('[data-cloud-recycle-submit]');
+  if (cloudRecycleSubmit) { await confirmCloudRecycle(cloudRecycleSubmit); return; }
+  const cloudList = event.target.closest('[data-cloud-list]');
+  if (cloudList) {
+    const batches = state.cloudInventoryGroups?.[Number($('#cloudInventoryDetailModal').dataset.groupIndex)] || [];
+    const item = batches.find((batch) => Number(batch.id) === Number(cloudList.dataset.cloudList));
+    openCloudListingPrice(item ? [Number(item.id)] : [], cloudList.dataset.itemName, false);
+    return;
+  }
+  const confirmCloudListingPrice = event.target.closest('#confirmCloudListingPrice');
+  if (confirmCloudListingPrice) {
+    const modal = $('#cloudListingPriceModal');
+    const unitPrice = Number($('#cloudListingPriceInput').value);
+    const quantity = Number($('#cloudListingQuantityInput').value);
+    const inventoryIds = JSON.parse(modal.dataset.inventoryIds || '[]');
+    const feeBps = Number(state.cloudWarehouse?.settings?.feeBps || 0);
+    const minimumFee = feeBps > 0 ? Number(state.cloudWarehouse?.settings?.minimumFee || 0) : 0;
+    const expectedNet = unitPrice * quantity - Math.max(minimumFee, Math.ceil(unitPrice * feeBps / 100)) * quantity;
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > inventoryIds.length) { toast('上架数量不能超过当前库存', 'error'); return; }
+    if (!Number.isSafeInteger(unitPrice) || unitPrice < 2 || expectedNet < 1) { toast('上架价格最低为 2 商城币，预计到账不能为 0', 'error'); return; }
+    try {
+      for (const inventoryId of inventoryIds.slice(0, quantity)) await api(`/api/shop/cloud-inventory/${inventoryId}/list`, { method:'POST', body:JSON.stringify({unitPrice}) });
+      closeModal(modal);
+      toast('库存已上架');
+      await Promise.all([loadCloudWarehouse(),loadCloudMarket()]);
+      refreshCloudInventoryDetailModal();
+    } catch (error) { toast(error.message,'error'); }
+    return;
+  }
+  const cloudWithdrawAll = event.target.closest('[data-cloud-withdraw-all]');
+  if (cloudWithdrawAll) {
+    const eligibleIds = String(cloudWithdrawAll.dataset.cloudWithdrawAll || '').split(',').map(Number).filter(Number.isSafeInteger);
+    const inventoryIds = cloudWithdrawAll.closest('#cloudInventoryDetailModal') ? cloudSelectedInventoryIds(eligibleIds) : eligibleIds;
+    if (!inventoryIds.length) { toast('选中的库存中没有可取出物品', 'error'); return; }
+    await withBusy(cloudWithdrawAll, async () => {
+      try {
+        const body = JSON.stringify({ inventoryIds });
+        const preview = await api('/api/shop/cloud-inventory/bulk-withdraw-preview', { method:'POST', body });
+        if (!await confirmCloudBulk({ title: '确认一键取出', description: `一键取出「${preview.itemName || cloudWithdrawAll.dataset.itemName || '该物品'}」共 ${number(preview.itemCount)} 件。\n预计手续费：${number(preview.fee)} 商城币。`, confirmLabel: '确认取出' })) return;
+        const result = await api('/api/shop/cloud-inventory/bulk-withdraw', { method:'POST', body });
+        const extra = result.uncertain ? `，${number(result.uncertain)} 件待人工核验` : result.failed ? `，${number(result.failed)} 件失败` : '';
+        toast(`一键取出完成：成功 ${number(result.completed)} 件，手续费 ${number(result.fee)} 商城币${extra}`, result.failed || result.uncertain ? 'error' : 'success');
+        await Promise.all([loadCloudWarehouse(),loadAccount()]);
+        refreshCloudInventoryDetailModal();
+      } catch (error) { toast(error.message,'error'); }
+    });
+    return;
+  }
+  const cloudDestroyAll = event.target.closest('[data-cloud-destroy-all]');
+  if (cloudDestroyAll) {
+    const eligibleIds = String(cloudDestroyAll.dataset.cloudDestroyAll || '').split(',').map(Number).filter(Number.isSafeInteger);
+    const inventoryIds = cloudDestroyAll.closest('#cloudInventoryDetailModal') ? cloudSelectedInventoryIds(eligibleIds) : eligibleIds;
+    if (!inventoryIds.length) { toast('选中的库存中没有可销毁物品', 'error'); return; }
+    await withBusy(cloudDestroyAll, async () => {
+      try {
+        const body = JSON.stringify({ inventoryIds });
+        const preview = await api('/api/shop/cloud-inventory/bulk-destroy-preview', { method:'POST', body });
+        if (!await confirmCloudBulk({ title: '确认一键销毁', description: `一键销毁「${preview.itemName || cloudDestroyAll.dataset.itemName || '该物品'}」共 ${number(preview.itemCount)} 件。\n销毁后无法找回，预计合计返还 ${number(preview.refund)} 商城币。`, danger: true, confirmLabel: '继续销毁' })) return;
+        if (!await confirmCloudBulk({ title: '最终确认销毁', description: `永久销毁这 ${number(preview.itemCount)} 件物品？此操作无法撤销。`, danger: true, confirmLabel: '永久销毁' })) return;
+        const result = await api('/api/shop/cloud-inventory/bulk-destroy', { method:'POST', body });
+        toast(`一键销毁完成：成功 ${number(result.completed)} 件，返还 ${number(result.refund)} 商城币${result.failed ? `，${number(result.failed)} 件失败` : ''}`, result.failed ? 'error' : 'success');
+        await Promise.all([loadCloudWarehouse(),loadAccount()]);
+        refreshCloudInventoryDetailModal();
+      } catch (error) { toast(error.message,'error'); }
+    });
+    return;
+  }
+  const cloudWithdraw = event.target.closest('[data-cloud-withdraw]');
+  if (cloudWithdraw) {
+    const modal = $('#cloudWithdrawModal');
+    modal.dataset.inventoryId = cloudWithdraw.dataset.cloudWithdraw;
+    $('#cloudWithdrawFee').textContent = `${number(state.cloudWarehouse?.settings?.withdrawFee || 0)} 商城币`;
+    openModal(modal);
+    return;
+  }
+  const cloudDestroy = event.target.closest('[data-cloud-destroy]');
+  if (cloudDestroy) {
+    try {
+      const preview = await api(`/api/shop/cloud-inventory/${cloudDestroy.dataset.cloudDestroy}/destroy-preview`);
+      const basis = preview.priceBased ? `商城售价 ${number(preview.productPrice)}，按 ${number(preview.destroyRefundPercent)}% 和当前耐久折算` : `商城无有效售价，按固定 ${number(preview.destroyFallbackRefund)} 商城币返还`;
+      if (!window.confirm(`销毁后物品无法找回。\n${basis}\n预计返还：${number(preview.refund)} 商城币。\n是否继续？`)) return;
+      if (!window.confirm(`最终确认：永久销毁「${preview.itemName || preview.itemCode}」，返还 ${number(preview.refund)} 商城币？`)) return;
+      const result = await api(`/api/shop/cloud-inventory/${cloudDestroy.dataset.cloudDestroy}/destroy`, { method:'POST', body:'{}' });
+      toast(`物品已销毁，返还 ${number(result.refund)} 商城币`);
+      closeModal($('#cloudInventoryDetailModal'));
+      await Promise.all([loadCloudWarehouse(),loadAccount()]);
+    } catch (error) { toast(error.message,'error'); }
+    return;
+  }
+  const cloudBuy = event.target.closest('[data-cloud-buy]');
+  if (cloudBuy) {
+    const quantity = 1;
+    if (!window.confirm(`确认支付 ${number(Number(cloudBuy.dataset.price))} 商城币购买该物品？`)) return;
+    try { await api(`/api/shop/cloud-listings/${cloudBuy.dataset.cloudBuy}/buy`, { method:'POST', headers:{'Idempotency-Key':uuid()}, body:JSON.stringify({quantity}) }); toast('购买成功'); await Promise.all([loadAccount(),loadCloudWarehouse(),loadCloudMarket()]); }
+    catch (error) { toast(error.message,'error'); }
+    return;
+  }
+  const cloudCancel = event.target.closest('[data-cloud-cancel]');
+  if (cloudCancel) {
+    try { await api(`/api/shop/cloud-listings/${cloudCancel.dataset.cloudCancel}/cancel`, { method:'POST', body:'{}' }); toast('挂单已撤销'); await Promise.all([loadCloudWarehouse(),loadCloudMarket()]); refreshCloudInventoryDetailModal(); }
+    catch (error) { toast(error.message,'error'); }
+    return;
+  }
+  const attributeFilter = event.target.closest('[data-attribute-filter]');
+  if (attributeFilter) {
+    state.selectedAttribute = attributeFilter.dataset.attributeFilter;
+    $$('[data-attribute-filter]').forEach((button) => {
+      const active = button === attributeFilter;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    renderProfileSkills();
+    return;
+  }
+  const purchaseAttributeStep = event.target.closest('[data-purchase-attribute-step]');
+  if (purchaseAttributeStep) {
+    const item = purchaseAttributeStep.closest('[data-purchase-attribute]');
+    selectPurchaseAttribute(item.dataset.purchaseAttribute);
+    updatePurchaseAttributeQuantity(item, Number(purchaseAttributeStep.dataset.purchaseAttributeStep));
+    return;
+  }
+  const purchaseAttribute = event.target.closest('[data-purchase-attribute]');
+  if (purchaseAttribute) { selectPurchaseAttribute(purchaseAttribute.dataset.purchaseAttribute); return; }
+  if (event.target.closest('#purchaseAttributeButton')) { prepareAttributePurchase(); return; }
+  if (event.target.closest('#purchaseSkillButton')) { prepareSkillPurchase(); return; }
+  const activityTab = event.target.closest('[data-activity-panel]');
+  if (activityTab) { showActivityPanel(activityTab.dataset.activityPanel); return; }
+  const lotteryMode = event.target.closest('[data-lottery-mode]');
+  if (lotteryMode) { if(state.lotterySpinning)return; const key=lotteryMode.dataset.lotteryMode,pool=lotteryPools().find((item)=>lotteryPoolKey(item)===key),data=state.lotteryPoolData[key]; if(!pool||!data)return; state.lotteryModes[key]=state.lotteryModes[key]===10?1:10; renderLotteryPool(pool,data); return; }
+  const poolCard = event.target.closest('[data-lottery-pool]');
+  if (poolCard) {
+    if (state.lotterySpinning) return;
+    const pool = lotteryPools().find((item) => lotteryPoolKey(item) === poolCard.dataset.lotteryPool);
+    if (!pool || state.selectedLotteryPoolKey === lotteryPoolKey(pool)) return;
+    state.selectedLotteryPoolKey = lotteryPoolKey(pool);
+    $$('[data-lottery-pool]').forEach((button) => {
+      const active = button === poolCard;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    loadLotteryPool(pool);
+    return;
+  }
+  const draw = event.target.closest('[data-draw]');
+  if (draw) { drawLottery(draw.dataset.draw.split(':')[0], draw); return; }
+  const stockAnnouncement = event.target.closest('[data-stock-announcement-id]');
+  if (stockAnnouncement) { const item=asList(state.marketOverview,['announcements']).find((row)=>String(row.id)===stockAnnouncement.dataset.stockAnnouncementId); openStockAnnouncement(item); return; }
+  const stockTrade = event.target.closest('[data-stock-trade]');
+  if (stockTrade) { const [stockId, direction] = stockTrade.dataset.stockTrade.split(':'); openStockTrade(stockId, direction); return; }
+  const stockDetail = event.target.closest('[data-stock-detail]');
+  if (stockDetail) { openStockDetail(stockDetail.dataset.stockDetail); return; }
+  const stockCode = event.target.closest('[data-stock-code]');
+  if (stockCode) { selectMarketStock(stockCode.dataset.stockCode); return; }
+  if(event.target.closest('#stockHoldingHistoryButton')){renderTrades();openModal($('#stockTradeHistoryModal'));return;}
+  const tradeFilter = event.target.closest('[data-stock-trade-filter]');
+  if (tradeFilter) { state.stockTradeFilter = tradeFilter.dataset.stockTradeFilter; state.pagination.trades = 0; $$('[data-stock-trade-filter]').forEach((button) => button.classList.toggle('active', button === tradeFilter)); renderTrades(); return; }
+  const quoteFilter = event.target.closest('[data-stock-filter]');
+  if (quoteFilter) { state.stockQuoteFilter=quoteFilter.dataset.stockFilter; $$('[data-stock-filter]').forEach((button)=>button.classList.toggle('active',button===quoteFilter)); state.stockCarousels.quotes.page=0; renderQuotes(); return; }
+  const watch = event.target.closest('[data-stock-watch-modal]');
+  if (watch) { if(!state.user){openAuth('login');toast('登录后才能使用自选功能','error','需要登录');return;}const id=watch.dataset.stockWatchModal,watched=new Set(asList(state.marketOverview,['watchlist']).map(Number)); await withBusy(watch,async()=>{await api(`/api/shop/market/watchlist/${id}`,{method:watched.has(Number(id))?'DELETE':'PUT',body:'{}'});await loadMarket();renderStockDetailModal();}); return; }
+  const stockSelect = event.target.closest('[data-stock-select]');
+  if (stockSelect && !event.target.closest('button')) { selectMarketStock(stockSelect.dataset.stockSelect); return; }
+  const stockPeriod = event.target.closest('[data-stock-period]');
+  if (stockPeriod) { const period=stockPeriod.dataset.stockPeriod;if(period!==state.stockCandlePeriod){state.stockCandlePeriod=period;state.stockCandles=null;resetStockChartViews();renderStockCandles();loadStockCandles();} return; }
+  const stockChartExpand = event.target.closest('[data-stock-chart-expand]');
+  const chartZoom = event.target.closest('[data-chart-zoom]');
+  if (chartZoom) { adjustStockChartZoom(chartZoom.dataset.chartView, chartZoom.dataset.chartZoom); return; }
+  const chartIndicator = event.target.closest('[data-chart-indicator]');
+  if (chartIndicator) { state.stockChartIndicator = chartIndicator.dataset.chartIndicator; $$('[data-chart-indicator]').forEach((button) => button.classList.toggle('active', button.dataset.chartIndicator === state.stockChartIndicator)); renderStockCandles(); return; }
+  if (stockChartExpand) { openStockChartModal(); return; }
+  const stockChartOpen = event.target.closest('[data-stock-chart-open]');
+  if (stockChartOpen && !event.target.closest('.stockCandleMark')) { openStockChartModal(); return; }
+  const auth = event.target.closest('[data-auth-open]');
+  if (auth) { openAuth(auth.dataset.authOpen); return; }
+  const tab = event.target.closest('[data-auth-tab]');
+  if (tab) { switchAuth(tab.dataset.authTab); return; }
+  const close = event.target.closest('[data-modal-close]');
+  if (close) { closeModal(close.closest('.modal-backdrop')); return; }
+  const quantity = event.target.closest('[data-quantity]');
+  if (quantity) { updateQuantity(quantity.closest('.product-card'), quantity.dataset.quantity === 'plus' ? 1 : -1); return; }
+  const productPage = event.target.closest('[data-product-page]');
+  if (productPage) { state.productFilters.page += Number(productPage.dataset.productPage); renderProducts(); return; }
+  const parentTab = event.target.closest('[data-product-parent]');
+  if (parentTab) { state.productFilters.parent = parentTab.dataset.productParent; state.productFilters.category = ''; state.productFilters.page = 0; renderProducts(); return; }
+  const categoryTab = event.target.closest('[data-product-category]');
+  if (categoryTab) { state.productFilters.category = categoryTab.dataset.productCategory; state.productFilters.page = 0; renderProducts(); return; }
+  const buy = event.target.closest('[data-buy]');
+  if (buy) { preparePurchase(buy.dataset.buy, buy.closest('.product-card')); return; }
+  const gift = event.target.closest('[data-claim-gift]');
+  if (gift) { claimGift(gift.dataset.claimGift, gift); return; }
+  const membership = event.target.closest('[data-buy-membership]');
+  if (membership) { purchaseMembership(membership.dataset.buyMembership, membership); return; }
+  const order = event.target.closest('.order-summary');
+  if (order) toggleOrder(order.closest('.order-entry'));
+});
+
+$$('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('mousedown', (event) => { if (event.target === backdrop) closeModal(backdrop); }));
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { const modal = $$('.modal-backdrop:not([hidden])').pop(); if (modal) closeModal(modal); else setAccountMenu(false); } if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-stock-select]')) { event.preventDefault(); selectMarketStock(event.target.dataset.stockSelect); } if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-purchase-attribute]')) { event.preventDefault(); selectPurchaseAttribute(event.target.dataset.purchaseAttribute); } });
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const row = event.target.closest('[data-cloud-inventory-row]');
+  if (!row || event.target !== row) return;
+  event.preventDefault();
+  toggleCloudInventorySelection(row);
+});
+document.addEventListener('input', (event) => {
+  if (event.target.id === 'stockTradeQuantity') renderStockTradeEstimate();
+  if (event.target.id === 'cloudListingPriceInput') renderCloudListingEstimate();
+  if (event.target.id === 'cloudListingQuantityInput') renderCloudListingEstimate();
+  if (event.target.id === 'cloudRecycleItemId') {
+    delete $('#cloudRecycleModal').dataset.queried;
+    resetCloudRecycleModal({ clearInput: false });
+  }
+  if (event.target.matches('[data-product-search]')) {
+    if (event.isComposing) return;
+    const cursor = event.target.selectionStart;
+    state.productFilters.search = event.target.value;
+    state.productFilters.page = 0;
+    renderProducts();
+    const search = $('[data-product-search]');
+    if (search) { search.focus(); search.setSelectionRange(cursor, cursor); }
+  }
+});
+document.addEventListener('change', (event) => {
+  if (event.target.matches('[data-chart-average]')) { state.stockChartAverage = event.target.checked; $$('[data-chart-average]').forEach((input) => { input.checked = state.stockChartAverage; }); renderStockCandles(); return; }
+  if (event.target.matches('[data-purchase-skill]')) {
+    const skillKey = event.target.dataset.purchaseSkill;
+    if (event.target.checked) state.selectedPurchaseSkills.add(skillKey);
+    else state.selectedPurchaseSkills.delete(skillKey);
+    updateSkillPurchaseTotal();
+    return;
+  }
+});
+$$('[data-stock-carousel]').forEach((viewport)=>{const name=viewport.dataset.stockCarousel;viewport.addEventListener('wheel',(event)=>{if(scrollStockCarousel(name,event.deltaY))event.preventDefault();},{passive:false});});
+$('#menuToggle').addEventListener('click', () => { const open = $('#mainNav').classList.toggle('open'); $('#menuToggle').setAttribute('aria-expanded', String(open)); });
+$('#reloadProducts').addEventListener('click', (event) => withBusy(event.currentTarget, loadProducts));
+$('#productSearchButton').addEventListener('click', () => { const input = $('#productSearchInput'); state.productFilters.search = input?.value || ''; state.productFilters.page = 0; renderProducts(); });
+$('#reloadAccount').addEventListener('click', (event) => withBusy(event.currentTarget, loadAccount));
+$('#reloadCloudWarehouse').addEventListener('click', (event) => {
+  state.cloudInventorySearch = '';
+  $('#cloudInventorySearchInput').value = '';
+  const list = $('[data-cloud-inventory-list]');
+  if (list) list.dataset.page = '0';
+  withBusy(event.currentTarget, loadCloudWarehouse);
+});
+$('#cloudInventorySearchButton').addEventListener('click', () => { state.cloudInventorySearch = $('#cloudInventorySearchInput').value; renderCloudWarehouse(); });
+$('#reloadCloudMarket').addEventListener('click', (event) => withBusy(event.currentTarget, loadCloudMarket));
+$('#cloudMarketSearchButton').addEventListener('click', loadCloudMarket);
+$('#reloadOrders').addEventListener('click', (event) => withBusy(event.currentTarget, loadOrders));
+$('#lotteryReload').addEventListener('click', (event) => withBusy(event.currentTarget, loadLottery));
+$('#stockQuoteReload').addEventListener('click', (event) => withBusy(event.currentTarget, () => loadMarket()));
+$('#stockHoldingSort').addEventListener('change', (event) => { state.stockHoldingSort = event.currentTarget.value; state.pagination.holdings = 0; renderHoldings(); });
+$('#checkinButton').addEventListener('click', checkIn);
+$('#challengeButton').addEventListener('click', requestChallenge);
+$('#confirmPurchase').addEventListener('click', confirmPurchase);
+$('#confirmCloudWithdraw').addEventListener('click', async (event) => {
+  const modal = $('#cloudWithdrawModal');
+  const inventoryId = modal.dataset.inventoryId;
+  if (!inventoryId) return;
+  await withBusy(event.currentTarget, async () => {
+    try {
+      await api(`/api/shop/cloud-inventory/${inventoryId}/withdraw`, { method:'POST', body:JSON.stringify({quantity:1}) });
+      closeModal(modal);
+      toast('物品已在游戏内生成');
+      await Promise.all([loadCloudWarehouse(),loadAccount()]);
+    } catch (error) { toast(error.message,'error'); }
+  });
+});
+$('#confirmAttributePurchase').addEventListener('click', confirmAttributePurchase);
+$('#confirmSkillPurchase').addEventListener('click', confirmSkillPurchase);
+$('#confirmStockTrade').addEventListener('click', (event) => tradeStock(event.currentTarget));
+const headerAccount = $('#headerAccount');
+headerAccount.addEventListener('pointerenter', () => setAccountMenu(true));
+headerAccount.addEventListener('pointerleave', () => setAccountMenu(false));
+headerAccount.addEventListener('focusin', () => setAccountMenu(true));
+headerAccount.addEventListener('focusout', (event) => { if (!headerAccount.contains(event.relatedTarget)) setAccountMenu(false); });
+$('#accountMenuButton').addEventListener('click', () => setAccountMenu(true));
+document.addEventListener('click', (event) => { if (!event.target.closest('#headerAccount')) setAccountMenu(false); });
+$('#confirmCloudBulk').addEventListener('click', () => {
+  if (!pendingCloudBulkConfirm) return;
+  const resolve = pendingCloudBulkConfirm;
+  pendingCloudBulkConfirm = null;
+  closeModal($('#cloudBulkConfirmModal'));
+  resolve(true);
+});
+const SHOP_IDLE_LOGOUT_MS = 10 * 60 * 1000;
+const SHOP_ACTIVITY_HEARTBEAT_MS = 60 * 1000;
+let lastShopActivityAt = Date.now();
+let lastShopActivityHeartbeatAt = 0;
+let idleLogoutInFlight = false;
+const markShopActivity = () => {
+  lastShopActivityAt = Date.now();
+  if (!state.user || lastShopActivityAt - lastShopActivityHeartbeatAt < SHOP_ACTIVITY_HEARTBEAT_MS) return;
+  lastShopActivityHeartbeatAt = lastShopActivityAt;
+  void fetch('/api/shop/activity', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+};
+['pointerdown', 'keydown', 'touchstart', 'scroll', 'input'].forEach((eventName) => document.addEventListener(eventName, markShopActivity, { passive: true }));
+window.setInterval(async () => {
+  if (!state.user || idleLogoutInFlight || Date.now() - lastShopActivityAt < SHOP_IDLE_LOGOUT_MS) return;
+  idleLogoutInFlight = true;
+  try { await logout({ automatic: true }); }
+  finally { lastShopActivityAt = Date.now(); idleLogoutInFlight = false; }
+}, 10000);
+
+$('#logoutButton').addEventListener('click', logout);
+$('#loginForm').addEventListener('submit', (event) => { event.preventDefault(); login(event.currentTarget, event.submitter); });
+$('#registerForm').addEventListener('submit', (event) => { event.preventDefault(); register(event.currentTarget, event.submitter); });
+$('#redeemCodeForm').addEventListener('submit', (event) => { event.preventDefault(); claimRedeemCode(event.currentTarget, event.submitter); });
+$$('[data-exchange-form]').forEach((form) => {
+  form.addEventListener('submit', (event) => { event.preventDefault(); exchangeCurrency(event.currentTarget, event.submitter); });
+  form.elements.amount.addEventListener('input', renderExchange);
+});
+window.addEventListener('hashchange', () => showRoute(location.hash.slice(1) || 'store', false));
+
+syncActivityGuestView();
+
+(async function init() {
+  try {
+    const config = await api('/api/shop/config');
+    const image = config?.website?.backgroundImage;
+    if (image) document.body.style.setProperty('--site-background-image', `url("${image.replace(/"/g, '%22')}")`);
+    state.characterGrowthConfig = { ...state.characterGrowthConfig, ...(config?.characterGrowth || {}) };
+    renderCharacterPurchase();
+  } catch {}
+  await Promise.all([loadMe(), loadProducts()]);
+  showRoute(location.hash.slice(1) || 'store', false);
+})();

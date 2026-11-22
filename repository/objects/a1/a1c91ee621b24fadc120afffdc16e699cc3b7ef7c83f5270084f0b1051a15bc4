@@ -1,0 +1,32 @@
+export class StorefrontActivityGate {
+  constructor({ activeWindowMs = 600000, clock = () => Date.now() } = {}) {
+    this.activeWindowMs = Math.max(60000, Number(activeWindowMs) || 600000);
+    this.clock = clock;
+    this.lastActiveAt = null;
+    this.listeners = new Set();
+  }
+
+  isActive(at = this.clock()) {
+    return this.lastActiveAt !== null && at - this.lastActiveAt < this.activeWindowMs;
+  }
+
+  mark(at = this.clock()) {
+    const wasActive = this.isActive(at);
+    this.lastActiveAt = at;
+    if (!wasActive) for (const listener of this.listeners) listener();
+    return this.status(at);
+  }
+
+  onActivate(listener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  status(at = this.clock()) {
+    return {
+      active: this.isActive(at),
+      activeWindowMs: this.activeWindowMs,
+      lastActiveAt: this.lastActiveAt === null ? null : new Date(this.lastActiveAt).toISOString()
+    };
+  }
+}
