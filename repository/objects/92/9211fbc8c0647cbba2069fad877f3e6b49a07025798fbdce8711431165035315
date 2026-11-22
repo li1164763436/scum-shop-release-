@@ -1,0 +1,22 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ConfigStore } from '../src/services/config-store.js';
+import { RconPluginService } from '../src/services/rcon-plugin-service.js';
+
+export async function runRconPluginSyncWorker({ root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), service } = {}) {
+  const pluginService = service || new RconPluginService({
+    root,
+    store: new ConfigStore(path.join(root, 'data', 'config.json'))
+  });
+  return pluginService.resumePending({ wait: true });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const result = await runRconPluginSyncWorker();
+    process.exitCode = result.status === 'completed' || result.status === 'idle' ? 0 : 2;
+  } catch (error) {
+    console.error(error?.message || String(error));
+    process.exitCode = 1;
+  }
+}

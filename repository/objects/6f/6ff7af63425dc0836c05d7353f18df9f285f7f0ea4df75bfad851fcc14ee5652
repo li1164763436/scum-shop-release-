@@ -1,0 +1,447 @@
+const LOCK_NAME = 'scum_shop_account_schema_merge_v1';
+const TARGET_TABLE = '商城用户';
+const STAGING_TABLE = '商城用户_合并中间表';
+const PLAYER_BACKUP = '玩家账户_账号合并备份';
+const SHOP_BACKUP = '商城登录账户_账号合并备份';
+const STATE_TABLE = '账号表合并迁移状态';
+const FK_TABLE = '账号表合并外键记录';
+
+const accountTableStatement = `CREATE TABLE IF NOT EXISTS \`商城用户\` (\`商城用户编号\` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \`SteamID\` VARCHAR(17) NULL, \`登录账号\` VARCHAR(32) NULL, \`登录账号规范值\` VARCHAR(64) NULL INVISIBLE, \`密码哈希\` CHAR(128) NULL, \`密码盐\` CHAR(32) NULL INVISIBLE, \`用户角色\` VARCHAR(16) NOT NULL DEFAULT 'user' INVISIBLE, \`管理员权限\` JSON NULL INVISIBLE, \`管理员授权时间\` DATETIME(3) NULL, \`账户状态\` VARCHAR(16) NOT NULL DEFAULT 'active', \`会员等级\` INT NOT NULL DEFAULT 0, \`会员到期时间\` DATETIME(3) NULL, \`最后登录时间\` DATETIME(3) NULL, \`游戏名称\` VARCHAR(255) NULL, \`游戏币\` DECIMAL(20,2) NULL, \`游戏金条\` DECIMAL(20,2) NULL, \`最后游戏在线时间\` DATETIME(3) NULL, \`位置世界X坐标\` DECIMAL(20,6) NULL, \`位置世界Y坐标\` DECIMAL(20,6) NULL, \`位置世界Z坐标\` DECIMAL(20,6) NULL, \`位置数据来源\` VARCHAR(100) NULL, \`位置观测时间\` DATETIME(3) NULL, \`位置是否当前有效\` TINYINT(1) NULL, \`小队编号\` VARCHAR(100) NULL, \`小队名称\` VARCHAR(100) NULL, \`小队更新时间\` DATETIME(3) NULL, \`商城币余额\` BIGINT NOT NULL DEFAULT 0, \`商城账户创建时间\` DATETIME(3) NULL, UNIQUE KEY \`uk_商城用户_SteamID\` (\`SteamID\`), UNIQUE KEY \`uk_商城用户_登录账号规范值\` (\`登录账号规范值\`), CONSTRAINT \`chk_商城用户_登录凭据完整\` CHECK ((\`登录账号\` IS NULL AND \`登录账号规范值\` IS NULL AND \`密码哈希\` IS NULL AND \`密码盐\` IS NULL) OR (\`登录账号\` IS NOT NULL AND \`登录账号规范值\` IS NOT NULL AND \`密码哈希\` IS NOT NULL AND \`密码盐\` IS NOT NULL)), CONSTRAINT \`chk_商城用户_商城币余额\` CHECK (\`商城币余额\` >= 0), CONSTRAINT \`chk_商城用户_身份存在\` CHECK (\`SteamID\` IS NOT NULL OR \`登录账号\` IS NOT NULL)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`;
+
+function quoteIdentifier(value) {
+  const identifier = String(value || '');
+  if (!identifier || identifier.includes('`')) throw new Error(`非法数据库标识符: ${identifier}`);
+  return `\`${identifier}\``;
+}
+
+async function tableExists(db, table) {
+  const rows = await db.query('SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=? AND table_type=\'BASE TABLE\'', [table]);
+  return Number(rows?.[0]?.count || 0) > 0;
+}
+
+async function normalizeTargetColumns(db) {
+  if (await columnExists(db, TARGET_TABLE, '角色名称') && !(await columnExists(db, TARGET_TABLE, '游戏名称'))) {
+    await db.query('ALTER TABLE `商城用户` RENAME COLUMN `角色名称` TO `游戏名称`');
+  }
+  for (const column of ['玩家名称', '是否游戏管理员']) {
+    if (await columnExists(db, TARGET_TABLE, column)) await db.query(`ALTER TABLE \`商城用户\` DROP COLUMN ${quoteIdentifier(column)}`);
+  }
+}
+
+async function viewExists(db, view) {
+  const rows = await db.query('SELECT COUNT(*) AS count FROM information_schema.views WHERE table_schema=DATABASE() AND table_name=?', [view]);
+  return Number(rows?.[0]?.count || 0) > 0;
+}
+
+async function scalarCount(db, sql, params = []) {
+  const rows = await db.query(sql, params);
+  return Number(rows?.[0]?.count || 0);
+}
+
+async function foreignKeyExists(db, table, constraint) {
+  return (await scalarCount(db, 'SELECT COUNT(*) AS count FROM information_schema.referential_constraints WHERE constraint_schema=DATABASE() AND table_name=? AND constraint_name=?', [table, constraint])) > 0;
+}
+
+async function columnExists(db, table, column) {
+  return (await scalarCount(db, 'SELECT COUNT(*) AS count FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?', [table, column])) > 0;
+}
+
+async function ensureLegacySourceColumns(db) {
+  const additions = [
+    ['shop_users', 'admin_permissions_json', 'ALTER TABLE shop_users ADD COLUMN admin_permissions_json JSON NULL AFTER role'],
+    ['shop_users', 'admin_authorized_at', 'ALTER TABLE shop_users ADD COLUMN admin_authorized_at DATETIME(3) NULL AFTER admin_permissions_json'],
+    ['shop_users', 'member_level', 'ALTER TABLE shop_users ADD COLUMN member_level INT NOT NULL DEFAULT 0 AFTER status'],
+    ['shop_users', 'member_expires_at', 'ALTER TABLE shop_users ADD COLUMN member_expires_at DATETIME(3) NULL AFTER member_level'],
+    ['player_accounts', 'username', 'ALTER TABLE player_accounts ADD COLUMN username VARCHAR(32) NULL AFTER steam_id'],
+    ['player_accounts', 'role', 'ALTER TABLE player_accounts ADD COLUMN role VARCHAR(16) NULL AFTER username'],
+    ['player_accounts', 'status', 'ALTER TABLE player_accounts ADD COLUMN status VARCHAR(16) NULL AFTER role'],
+    ['player_accounts', 'member_level', 'ALTER TABLE player_accounts ADD COLUMN member_level INT NOT NULL DEFAULT 0 AFTER status'],
+    ['player_accounts', 'member_expires_at', 'ALTER TABLE player_accounts ADD COLUMN member_expires_at DATETIME(3) NULL AFTER member_level'],
+    ['player_accounts', 'character_name', 'ALTER TABLE player_accounts ADD COLUMN character_name VARCHAR(255) NULL AFTER member_expires_at'],
+    ['player_accounts', 'is_admin', 'ALTER TABLE player_accounts ADD COLUMN is_admin TINYINT(1) NOT NULL DEFAULT 0 AFTER character_name'],
+    ['player_accounts', 'game_money', 'ALTER TABLE player_accounts ADD COLUMN game_money DECIMAL(20,2) NULL AFTER is_admin'],
+    ['player_accounts', 'game_gold', 'ALTER TABLE player_accounts ADD COLUMN game_gold DECIMAL(20,2) NULL AFTER game_money'],
+    ['player_accounts', 'last_game_seen_at', 'ALTER TABLE player_accounts ADD COLUMN last_game_seen_at DATETIME(3) NULL AFTER game_gold']
+  ];
+  for (const [table, column, statement] of additions) {
+    if (!(await columnExists(db, table, column))) await db.query(statement);
+  }
+}
+
+async function freshAccountTableStatement(db) {
+  const rows = await db.query('SELECT @@character_set_server AS charset,@@collation_server AS collation');
+  const storage = rows?.[0];
+  if (storage?.charset !== 'utf8mb4' || !/^utf8mb4_[A-Za-z0-9_]+$/.test(storage?.collation || '')) {
+    throw new Error('首次建库要求 MySQL 服务器默认字符集为 utf8mb4');
+  }
+  return accountTableStatement.replace('COLLATE=utf8mb4_unicode_ci', `COLLATE=${storage.collation}`);
+}
+
+async function readSteamIdStorage(db) {
+  const rows = await db.query("SELECT table_name AS tableName,character_set_name AS charset,collation_name AS collation FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name IN ('shop_users','player_accounts') AND column_name='steam_id' ORDER BY table_name");
+  if (rows.length !== 2) throw new Error('账号表合并预检失败: 旧账号表缺少 steam_id 字段定义');
+  const [first, second] = rows;
+  if (!first.charset || !first.collation || first.charset !== second.charset || first.collation !== second.collation) {
+    throw new Error('账号表合并预检失败: 两张旧账号表的 SteamID 字符集或排序规则不一致');
+  }
+  if (!/^[A-Za-z0-9_]+$/.test(first.charset) || !/^[A-Za-z0-9_]+$/.test(first.collation)) throw new Error('账号表合并预检失败: SteamID 字符集定义无效');
+  return { charset: first.charset, collation: first.collation };
+}
+
+async function getState(db) {
+  const rows = await db.query(`SELECT \`迁移阶段\` AS phase FROM \`${STATE_TABLE}\` WHERE \`迁移名称\`='账号物理表合并' LIMIT 1`);
+  return rows?.[0]?.phase || null;
+}
+
+async function setState(db, phase, detail = null) {
+  await db.query(`INSERT INTO \`${STATE_TABLE}\` (\`迁移名称\`,\`迁移阶段\`,\`迁移详情\`) VALUES ('账号物理表合并',?,?) ON DUPLICATE KEY UPDATE \`迁移阶段\`=VALUES(\`迁移阶段\`),\`迁移详情\`=VALUES(\`迁移详情\`),\`更新时间\`=CURRENT_TIMESTAMP(3)`, [phase, detail]);
+}
+
+async function recordError(db, error) {
+  const detail = String(error?.message || error);
+  const state = await getState(db);
+  if (state) await db.query(`UPDATE \`${STATE_TABLE}\` SET \`迁移详情\`=?,\`更新时间\`=CURRENT_TIMESTAMP(3) WHERE \`迁移名称\`='账号物理表合并'`, [detail]);
+  else await setState(db, '失败', detail);
+}
+
+async function createMigrationTables(db) {
+  await db.query(`CREATE TABLE IF NOT EXISTS \`${STATE_TABLE}\` (\`迁移名称\` VARCHAR(64) PRIMARY KEY, \`迁移阶段\` VARCHAR(32) NOT NULL, \`迁移详情\` TEXT NULL, \`更新时间\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await db.query(`CREATE TABLE IF NOT EXISTS \`${FK_TABLE}\` (\`约束架构\` VARCHAR(64) NOT NULL, \`子表名称\` VARCHAR(64) NOT NULL, \`外键名称\` VARCHAR(64) NOT NULL, \`列序号\` INT UNSIGNED NOT NULL, \`子表列名\` VARCHAR(64) NOT NULL, \`原目标表\` VARCHAR(64) NOT NULL, \`原目标列\` VARCHAR(64) NOT NULL, \`删除规则\` VARCHAR(16) NOT NULL, \`更新规则\` VARCHAR(16) NOT NULL, \`是否已删除\` TINYINT(1) NOT NULL DEFAULT 0, \`是否已重建\` TINYINT(1) NOT NULL DEFAULT 0, PRIMARY KEY (\`约束架构\`,\`子表名称\`,\`外键名称\`,\`列序号\`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+}
+
+function conflictValue(value) {
+  if (value == null) return 'NULL';
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+async function preflight(db) {
+  const conflicts = [
+    ['用户角色', 's.role', 'p.role', "p.role IS NOT NULL AND s.role<>p.role"],
+    ['账户状态', 's.status', 'p.status', "p.status IS NOT NULL AND s.status<>p.status"],
+    ['会员等级', 's.member_level', 'p.member_level', 's.member_level<>p.member_level'],
+    ['会员到期时间', 's.member_expires_at', 'p.member_expires_at', 'NOT (s.member_expires_at <=> p.member_expires_at)']
+  ];
+  for (const [label, shopExpression, playerExpression, predicate] of conflicts) {
+    const rows = await db.query(`SELECT s.steam_id AS steamId,${shopExpression} AS shopValue,${playerExpression} AS playerValue FROM shop_users s JOIN player_accounts p ON BINARY p.steam_id=BINARY s.steam_id WHERE s.steam_id IS NOT NULL AND ${predicate} ORDER BY s.steam_id LIMIT 21`);
+    if (rows.length) {
+      const details = rows.slice(0, 20).map(row => `${row.steamId}:${label}[商城=${conflictValue(row.shopValue)},玩家=${conflictValue(row.playerValue)}]`).join('; ');
+      const suffix = rows.length > 20 ? '; 另有更多冲突' : '';
+      throw new Error(`账号表合并预检失败: ${details}${suffix}`);
+    }
+  }
+  const missing = await db.query('SELECT s.steam_id AS steamId FROM shop_users s LEFT JOIN player_accounts p ON BINARY p.steam_id=BINARY s.steam_id WHERE s.steam_id IS NOT NULL AND p.steam_id IS NULL ORDER BY s.steam_id LIMIT 21');
+  if (missing.length) {
+    const details = missing.slice(0, 20).map(row => row.steamId).join(',');
+    const suffix = missing.length > 20 ? ',另有更多记录' : '';
+    throw new Error(`账号表合并预检失败: 商城账号 SteamID 缺少玩家账号: ${details}${suffix}`);
+  }
+}
+
+const WRITE_BARRIER_TRIGGERS = [
+  ['账号合并锁_shop_users_insert', 'shop_users', 'INSERT'],
+  ['账号合并锁_shop_users_update', 'shop_users', 'UPDATE'],
+  ['账号合并锁_shop_users_delete', 'shop_users', 'DELETE'],
+  ['账号合并锁_player_accounts_insert', 'player_accounts', 'INSERT'],
+  ['账号合并锁_player_accounts_update', 'player_accounts', 'UPDATE'],
+  ['账号合并锁_player_accounts_delete', 'player_accounts', 'DELETE']
+];
+
+async function installWriteBarrier(db) {
+  for (const [name, table, event] of WRITE_BARRIER_TRIGGERS) {
+    const exists = await scalarCount(db, 'SELECT COUNT(*) AS count FROM information_schema.triggers WHERE trigger_schema=DATABASE() AND trigger_name=?', [name]);
+    if (!exists) await (db.rawQuery || db.query)(`CREATE TRIGGER ${quoteIdentifier(name)} BEFORE ${event} ON ${quoteIdentifier(table)} FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='账号表正在合并，暂时禁止写入'`);
+  }
+}
+
+async function removeWriteBarrier(db) {
+  for (const [name] of WRITE_BARRIER_TRIGGERS) await (db.rawQuery || db.query)(`DROP TRIGGER IF EXISTS ${quoteIdentifier(name)}`);
+}
+
+async function buildStagingTable(db, steamIdStorage) {
+  await db.query(`DROP TABLE IF EXISTS \`${STAGING_TABLE}\``);
+  const statement = accountTableStatement
+    .replace('IF NOT EXISTS `商城用户`', `\`${STAGING_TABLE}\``)
+    .replace('`SteamID` VARCHAR(17) NULL', `\`SteamID\` VARCHAR(17) CHARACTER SET ${steamIdStorage.charset} COLLATE ${steamIdStorage.collation} NULL`);
+  await db.query(statement);
+  await db.query(`INSERT INTO \`${STAGING_TABLE}\` (\`商城用户编号\`,\`SteamID\`,\`登录账号\`,\`登录账号规范值\`,\`密码哈希\`,\`密码盐\`,\`用户角色\`,\`管理员权限\`,\`管理员授权时间\`,\`账户状态\`,\`会员等级\`,\`会员到期时间\`,\`最后登录时间\`,\`游戏名称\`,\`游戏币\`,\`游戏金条\`,\`最后游戏在线时间\`,\`商城币余额\`,\`商城账户创建时间\`) SELECT s.id,s.steam_id,s.username,s.normalized,s.password_hash,s.password_salt,s.role,s.admin_permissions_json,s.admin_authorized_at,s.status,s.member_level,s.member_expires_at,s.last_login,p.character_name,p.game_money,p.game_gold,p.last_game_seen_at,COALESCE(p.balance,0),s.created_at FROM shop_users s LEFT JOIN player_accounts p ON p.steam_id=s.steam_id ORDER BY s.id`);
+  await db.query(`INSERT INTO \`${STAGING_TABLE}\` (\`SteamID\`,\`用户角色\`,\`账户状态\`,\`会员等级\`,\`会员到期时间\`,\`游戏名称\`,\`游戏币\`,\`游戏金条\`,\`最后游戏在线时间\`,\`商城币余额\`) SELECT p.steam_id,COALESCE(p.role,'user'),COALESCE(p.status,'active'),p.member_level,p.member_expires_at,p.character_name,p.game_money,p.game_gold,p.last_game_seen_at,p.balance FROM player_accounts p LEFT JOIN shop_users s ON s.steam_id=p.steam_id WHERE s.id IS NULL ORDER BY p.steam_id`);
+}
+
+async function captureIncomingForeignKeys(db) {
+  await db.query(`DELETE f FROM \`${FK_TABLE}\` f JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA=f.\`约束架构\` AND r.TABLE_NAME=f.\`子表名称\` AND r.CONSTRAINT_NAME=f.\`外键名称\` WHERE r.CONSTRAINT_SCHEMA=DATABASE()`);
+  await db.query(`INSERT IGNORE INTO \`${FK_TABLE}\` (\`约束架构\`,\`子表名称\`,\`外键名称\`,\`列序号\`,\`子表列名\`,\`原目标表\`,\`原目标列\`,\`删除规则\`,\`更新规则\`) SELECT k.CONSTRAINT_SCHEMA,k.TABLE_NAME,k.CONSTRAINT_NAME,k.ORDINAL_POSITION,k.COLUMN_NAME,k.REFERENCED_TABLE_NAME,k.REFERENCED_COLUMN_NAME,r.DELETE_RULE,r.UPDATE_RULE FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA=k.CONSTRAINT_SCHEMA AND r.TABLE_NAME=k.TABLE_NAME AND r.CONSTRAINT_NAME=k.CONSTRAINT_NAME WHERE k.CONSTRAINT_SCHEMA=DATABASE() AND k.REFERENCED_TABLE_NAME IN ('player_accounts','shop_users') AND k.TABLE_NAME NOT IN ('player_accounts','shop_users') ORDER BY k.TABLE_NAME,k.CONSTRAINT_NAME,k.ORDINAL_POSITION`);
+}
+
+async function groupedForeignKeys(db, condition) {
+  const rows = await db.query(`SELECT \`子表名称\` AS childTable,\`外键名称\` AS constraintName,MIN(\`原目标表\`) AS targetTable,MIN(\`删除规则\`) AS deleteRule,MIN(\`更新规则\`) AS updateRule,GROUP_CONCAT(\`子表列名\` ORDER BY \`列序号\` SEPARATOR '\\n') AS childColumns,GROUP_CONCAT(\`原目标列\` ORDER BY \`列序号\` SEPARATOR '\\n') AS targetColumns FROM \`${FK_TABLE}\` WHERE ${condition} GROUP BY \`子表名称\`,\`外键名称\` ORDER BY \`子表名称\`,\`外键名称\``);
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function dropIncomingForeignKeys(db) {
+  for (const fk of await groupedForeignKeys(db, '`是否已删除`=0')) {
+    if (await foreignKeyExists(db, fk.childTable, fk.constraintName)) {
+      await db.query(`ALTER TABLE ${quoteIdentifier(fk.childTable)} DROP FOREIGN KEY ${quoteIdentifier(fk.constraintName)}`);
+    }
+    await db.query(`UPDATE \`${FK_TABLE}\` SET \`是否已删除\`=1 WHERE \`子表名称\`=? AND \`外键名称\`=?`, [fk.childTable, fk.constraintName]);
+  }
+}
+
+function mappedTargetColumn(fk) {
+  const sourceColumns = String(fk.targetColumns).split('\n');
+  if (sourceColumns.length !== 1) throw new Error(`不支持复合账号外键: ${fk.childTable}.${fk.constraintName}`);
+  const source = `${fk.targetTable}.${sourceColumns[0]}`;
+  if (source === 'player_accounts.steam_id' || source === 'shop_users.steam_id') return 'SteamID';
+  if (source === 'shop_users.id') return '商城用户编号';
+  throw new Error(`不支持的账号外键目标: ${fk.childTable}.${fk.constraintName} -> ${source}`);
+}
+
+async function validateIncomingForeignKeys(db) {
+  for (const fk of await groupedForeignKeys(db, '1=1')) mappedTargetColumn(fk);
+}
+
+async function assertNoLegacyIncomingForeignKeys(db) {
+  const count = await scalarCount(db, "SELECT COUNT(*) AS count FROM information_schema.KEY_COLUMN_USAGE WHERE CONSTRAINT_SCHEMA=DATABASE() AND REFERENCED_TABLE_NAME IN ('player_accounts','shop_users') AND TABLE_NAME NOT IN ('player_accounts','shop_users')");
+  if (count) throw new Error(`账号表合并无法继续: ${count} 个旧账号外键未纳入切换`);
+}
+
+async function recreateIncomingForeignKeys(db) {
+  for (const fk of await groupedForeignKeys(db, '1=1')) {
+    const childColumns = String(fk.childColumns).split('\n').map(quoteIdentifier).join(',');
+    const targetColumn = mappedTargetColumn(fk);
+    const deleteRule = fk.deleteRule === 'RESTRICT' ? '' : ` ON DELETE ${fk.deleteRule}`;
+    const updateRule = fk.updateRule === 'RESTRICT' ? '' : ` ON UPDATE ${fk.updateRule}`;
+    if (await foreignKeyExists(db, fk.childTable, fk.constraintName)) {
+      const rows = await db.query(`SELECT k.REFERENCED_TABLE_NAME AS targetTable,GROUP_CONCAT(k.COLUMN_NAME ORDER BY k.ORDINAL_POSITION SEPARATOR '\n') AS childColumns,GROUP_CONCAT(k.REFERENCED_COLUMN_NAME ORDER BY k.ORDINAL_POSITION SEPARATOR '\n') AS targetColumns,MIN(r.DELETE_RULE) AS deleteRule,MIN(r.UPDATE_RULE) AS updateRule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA=k.CONSTRAINT_SCHEMA AND r.TABLE_NAME=k.TABLE_NAME AND r.CONSTRAINT_NAME=k.CONSTRAINT_NAME WHERE k.CONSTRAINT_SCHEMA=DATABASE() AND k.TABLE_NAME=? AND k.CONSTRAINT_NAME=? GROUP BY k.REFERENCED_TABLE_NAME`, [fk.childTable, fk.constraintName]);
+      const actual = rows?.[0];
+      if (!actual || actual.targetTable !== TARGET_TABLE || actual.childColumns !== fk.childColumns || actual.targetColumns !== targetColumn || actual.deleteRule !== fk.deleteRule || actual.updateRule !== fk.updateRule) throw new Error(`外键定义冲突: ${fk.childTable}.${fk.constraintName}`);
+    } else {
+      await db.query(`ALTER TABLE ${quoteIdentifier(fk.childTable)} ADD CONSTRAINT ${quoteIdentifier(fk.constraintName)} FOREIGN KEY (${childColumns}) REFERENCES \`${TARGET_TABLE}\` (${quoteIdentifier(targetColumn)})${deleteRule}${updateRule}`);
+    }
+    await db.query(`UPDATE \`${FK_TABLE}\` SET \`是否已重建\`=1 WHERE \`子表名称\`=? AND \`外键名称\`=?`, [fk.childTable, fk.constraintName]);
+  }
+}
+
+const accountColumnContract = [
+  ['商城用户编号', 'bigint unsigned', 'NO', null, 'BIGINT UNSIGNED AUTO_INCREMENT', true],
+  ['SteamID', 'varchar(17)', 'YES', null, 'VARCHAR(17) NULL', true],
+  ['登录账号', 'varchar(32)', 'YES', null, 'VARCHAR(32) NULL', true],
+  ['登录账号规范值', 'varchar(64)', 'YES', null, 'VARCHAR(64) NULL INVISIBLE'],
+  ['密码哈希', 'char(128)', 'YES', null, 'CHAR(128) NULL'],
+  ['密码盐', 'char(32)', 'YES', null, 'CHAR(32) NULL INVISIBLE'],
+  ['用户角色', 'varchar(16)', 'NO', 'user', "VARCHAR(16) NOT NULL DEFAULT 'user' INVISIBLE"],
+  ['管理员权限', 'json', 'YES', null, 'JSON NULL INVISIBLE'],
+  ['管理员授权时间', 'datetime(3)', 'YES', null, 'DATETIME(3) NULL'],
+  ['账户状态', 'varchar(16)', 'NO', 'active', "VARCHAR(16) NOT NULL DEFAULT 'active'", true],
+  ['会员等级', 'int', 'NO', '0', 'INT NOT NULL DEFAULT 0'],
+  ['会员到期时间', 'datetime(3)', 'YES', null, 'DATETIME(3) NULL'],
+  ['最后登录时间', 'datetime(3)', 'YES', null, 'DATETIME(3) NULL'],
+  ['游戏名称', 'varchar(255)', 'YES', null, 'VARCHAR(255) NULL'],
+  ['游戏币', 'decimal(20,2)', 'YES', null, 'DECIMAL(20,2) NULL'],
+  ['游戏金条', 'decimal(20,2)', 'YES', null, 'DECIMAL(20,2) NULL'],
+  ['最后游戏在线时间', 'datetime(3)', 'YES', null, 'DATETIME(3) NULL'],
+  ['位置世界X坐标', 'decimal(20,6)', 'YES', null, 'DECIMAL(20,6) NULL'],
+  ['位置世界Y坐标', 'decimal(20,6)', 'YES', null, 'DECIMAL(20,6) NULL'],
+  ['位置世界Z坐标', 'decimal(20,6)', 'YES', null, 'DECIMAL(20,6) NULL'],
+  ['位置数据来源', 'varchar(100)', 'YES', null, 'VARCHAR(100) NULL'],
+  ['位置观测时间', 'datetime(3)', 'YES', null, 'DATETIME(3) NULL'],
+  ['位置是否当前有效', 'tinyint(1)', 'YES', null, 'TINYINT(1) NULL'],
+  ['小队编号', 'varchar(100)', 'YES', null, 'VARCHAR(100) NULL'],
+  ['小队名称', 'varchar(100)', 'YES', null, 'VARCHAR(100) NULL'],
+  ['小队更新时间', 'datetime(3)', 'YES', null, 'DATETIME(3) NULL'],
+  ['商城币余额', 'bigint', 'NO', '0', 'BIGINT NOT NULL DEFAULT 0'],
+  ['商城账户创建时间', 'datetime(3)', 'YES', null, 'DATETIME(3) NULL']
+];
+
+async function ensureAccountIndex(db, name, columns) {
+  const rows = await db.query('SELECT column_name AS columnName,non_unique AS nonUnique FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=? AND index_name=? ORDER BY seq_in_index', [TARGET_TABLE, name]);
+  if (!rows.length) {
+    await db.query(`ALTER TABLE \`${TARGET_TABLE}\` ADD UNIQUE KEY ${quoteIdentifier(name)} (${columns.map(quoteIdentifier).join(',')})`);
+    return;
+  }
+  if (rows.some(row => Number(row.nonUnique) !== 0) || rows.map(row => row.columnName).join('\n') !== columns.join('\n')) throw new Error(`账号表合并无法继续: 商城用户索引 ${name} 定义不一致`);
+}
+
+async function ensureAccountCheck(db, name, clause) {
+  const rows = await db.query("SELECT c.check_clause AS checkClause FROM information_schema.check_constraints c JOIN information_schema.table_constraints t ON t.constraint_schema=c.constraint_schema AND t.constraint_name=c.constraint_name WHERE c.constraint_schema=DATABASE() AND t.table_name=? AND c.constraint_name=? AND t.constraint_type='CHECK'", [TARGET_TABLE, name]);
+  if (!rows.length) {
+    await db.query(`ALTER TABLE \`${TARGET_TABLE}\` ADD CONSTRAINT ${quoteIdentifier(name)} CHECK (${clause})`);
+    return;
+  }
+}
+
+async function validateAccountPrimaryKey(db) {
+  const rows = await db.query("SELECT column_name AS columnName FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=? AND index_name='PRIMARY' ORDER BY seq_in_index", [TARGET_TABLE]);
+  if (rows.map(row => row.columnName).join('\n') !== '商城用户编号') throw new Error('账号表合并无法继续: 商城用户主键定义不一致');
+}
+
+async function validateTargetLayout(db) {
+  for (const [column, type, nullable, defaultValue, definition, core] of accountColumnContract) {
+    const rows = await db.query('SELECT column_type AS columnType,is_nullable AS nullable,column_default AS defaultValue,extra AS extraValue FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?', [TARGET_TABLE, column]);
+    if (!rows.length) {
+      if (core) throw new Error(`账号表合并无法继续: 商城用户缺少核心字段 ${column}`);
+      await db.query(`ALTER TABLE \`${TARGET_TABLE}\` ADD COLUMN ${quoteIdentifier(column)} ${definition}`);
+      continue;
+    }
+    const actual = rows[0];
+    if (String(actual.columnType).toLowerCase() !== type || actual.nullable !== nullable || String(actual.defaultValue) !== String(defaultValue)) throw new Error(`账号表合并无法继续: 商城用户字段 ${column} 定义不一致`);
+    const shouldBeInvisible = / INVISIBLE$/.test(definition);
+    const isInvisible = /invisible/i.test(String(actual.extraValue || ''));
+    if (shouldBeInvisible !== isInvisible) await db.query(`ALTER TABLE \`${TARGET_TABLE}\` MODIFY COLUMN ${quoteIdentifier(column)} ${definition}`);
+    if (column === '商城用户编号' && !/auto_increment/i.test(String(actual.extraValue || ''))) throw new Error('账号表合并无法继续: 商城用户编号不是自增字段');
+  }
+  await validateAccountPrimaryKey(db);
+  await ensureAccountIndex(db, 'uk_商城用户_SteamID', ['SteamID']);
+  await ensureAccountIndex(db, 'uk_商城用户_登录账号规范值', ['登录账号规范值']);
+  await ensureAccountCheck(db, 'chk_商城用户_登录凭据完整', '(`登录账号` IS NULL AND `登录账号规范值` IS NULL AND `密码哈希` IS NULL AND `密码盐` IS NULL) OR (`登录账号` IS NOT NULL AND `登录账号规范值` IS NOT NULL AND `密码哈希` IS NOT NULL AND `密码盐` IS NOT NULL)');
+  await ensureAccountCheck(db, 'chk_商城用户_商城币余额', '`商城币余额` >= 0');
+  await ensureAccountCheck(db, 'chk_商城用户_身份存在', '`SteamID` IS NOT NULL OR `登录账号` IS NOT NULL');
+}
+
+async function validateCompletedLayout(db) {
+  await validateTargetLayout(db);
+  if (!(await tableExists(db, FK_TABLE))) return;
+  const pendingForeignKeys = await scalarCount(db, `SELECT COUNT(*) AS count FROM \`${FK_TABLE}\` WHERE \`是否已删除\`=1 AND \`是否已重建\`=0`);
+  if (pendingForeignKeys) throw new Error(`账号表合并无法继续: ${pendingForeignKeys} 个外键尚未重建`);
+}
+
+async function validateMerge(db, playerSource, shopSource, targetTable = TARGET_TABLE) {
+  const target = quoteIdentifier(targetTable);
+  const expectedRows = await scalarCount(db, `SELECT COUNT(*) AS count FROM (SELECT id FROM ${quoteIdentifier(shopSource)} UNION ALL SELECT p.steam_id FROM ${quoteIdentifier(playerSource)} p LEFT JOIN ${quoteIdentifier(shopSource)} s ON s.steam_id=p.steam_id WHERE s.id IS NULL) merged`);
+  const actualRows = await scalarCount(db, `SELECT COUNT(*) AS count FROM ${target}`);
+  if (actualRows !== expectedRows) throw new Error(`账号表合并校验失败: 行数 ${actualRows}/${expectedRows}`);
+  const idMismatch = await scalarCount(db, `SELECT COUNT(*) AS count FROM ${quoteIdentifier(shopSource)} s LEFT JOIN ${target} u ON u.\`商城用户编号\`=s.id WHERE u.\`商城用户编号\` IS NULL`);
+  if (idMismatch) throw new Error(`账号表合并校验失败: ${idMismatch} 个商城用户编号未保留`);
+  const steamMismatch = await scalarCount(db, `SELECT COUNT(*) AS count FROM ${quoteIdentifier(playerSource)} p LEFT JOIN ${target} u ON u.\`SteamID\`=p.steam_id WHERE u.\`SteamID\` IS NULL`);
+  if (steamMismatch) throw new Error(`账号表合并校验失败: ${steamMismatch} 个 SteamID 未保留`);
+  const shopMismatch = await scalarCount(db, `SELECT COUNT(*) AS count FROM ${quoteIdentifier(shopSource)} s JOIN ${target} u ON u.\`商城用户编号\`=s.id WHERE NOT (BINARY u.\`SteamID\`<=>BINARY s.steam_id) OR NOT (BINARY u.\`登录账号\`<=>BINARY s.username) OR NOT (BINARY u.\`登录账号规范值\`<=>BINARY s.normalized) OR NOT (BINARY u.\`密码哈希\`<=>BINARY s.password_hash) OR NOT (BINARY u.\`密码盐\`<=>BINARY s.password_salt) OR NOT (BINARY u.\`用户角色\`<=>BINARY s.role) OR NOT (BINARY u.\`管理员权限\`<=>BINARY s.admin_permissions_json) OR NOT (u.\`管理员授权时间\`<=>s.admin_authorized_at) OR NOT (BINARY u.\`账户状态\`<=>BINARY s.status) OR NOT (u.\`会员等级\`<=>s.member_level) OR NOT (u.\`会员到期时间\`<=>s.member_expires_at) OR NOT (u.\`最后登录时间\`<=>s.last_login) OR NOT (u.\`商城账户创建时间\`<=>s.created_at)`);
+  if (shopMismatch) throw new Error(`账号表合并校验失败: ${shopMismatch} 个商城登录账户字段不一致`);
+  const playerMismatch = await scalarCount(db, `SELECT COUNT(*) AS count FROM ${quoteIdentifier(playerSource)} p LEFT JOIN ${quoteIdentifier(shopSource)} s ON s.steam_id=p.steam_id JOIN ${target} u ON u.\`SteamID\`=p.steam_id WHERE NOT (BINARY u.\`用户角色\`<=>BINARY CASE WHEN s.id IS NULL THEN COALESCE(p.role,'user') ELSE s.role END) OR NOT (BINARY u.\`账户状态\`<=>BINARY CASE WHEN s.id IS NULL THEN COALESCE(p.status,'active') ELSE s.status END) OR NOT (u.\`会员等级\`<=>CASE WHEN s.id IS NULL THEN p.member_level ELSE s.member_level END) OR NOT (u.\`会员到期时间\`<=>CASE WHEN s.id IS NULL THEN p.member_expires_at ELSE s.member_expires_at END) OR NOT (BINARY u.\`游戏名称\`<=>BINARY p.character_name) OR NOT (u.\`游戏币\`<=>p.game_money) OR NOT (u.\`游戏金条\`<=>p.game_gold) OR NOT (u.\`最后游戏在线时间\`<=>p.last_game_seen_at) OR NOT (u.\`商城币余额\`<=>p.balance)`);
+  if (playerMismatch) throw new Error(`账号表合并校验失败: ${playerMismatch} 个玩家账户字段不一致`);
+}
+
+async function validateFinalizeCoverage(db) {
+  const idMismatch = await scalarCount(db, `SELECT COUNT(*) AS count FROM \`${SHOP_BACKUP}\` s LEFT JOIN \`${TARGET_TABLE}\` u ON u.\`商城用户编号\`=s.id WHERE u.\`商城用户编号\` IS NULL`);
+  if (idMismatch) throw new Error(`账号表合并无法收尾: ${idMismatch} 个商城用户编号未保留`);
+  const steamMismatch = await scalarCount(db, `SELECT COUNT(*) AS count FROM \`${PLAYER_BACKUP}\` p LEFT JOIN \`${TARGET_TABLE}\` u ON BINARY u.\`SteamID\`=BINARY p.steam_id WHERE u.\`SteamID\` IS NULL`);
+  if (steamMismatch) throw new Error(`账号表合并无法收尾: ${steamMismatch} 个 SteamID 未保留`);
+  const shopMismatch = await scalarCount(db, `SELECT COUNT(*) AS count FROM \`${SHOP_BACKUP}\` s JOIN \`${TARGET_TABLE}\` u ON u.\`商城用户编号\`=s.id WHERE (s.steam_id IS NOT NULL AND NOT (BINARY u.\`SteamID\`<=>BINARY s.steam_id)) OR (s.username IS NOT NULL AND NOT (BINARY u.\`登录账号\`<=>BINARY s.username)) OR (s.normalized IS NOT NULL AND NOT (BINARY u.\`登录账号规范值\`<=>BINARY s.normalized))`);
+  if (shopMismatch) throw new Error(`账号表合并无法收尾: ${shopMismatch} 个商城登录身份绑定不一致`);
+}
+
+async function recoverOrMigrate(db) {
+  const target = await tableExists(db, TARGET_TABLE);
+  const players = await tableExists(db, 'player_accounts');
+  const shops = await tableExists(db, 'shop_users');
+  const playerBackup = await tableExists(db, PLAYER_BACKUP);
+  const shopBackup = await tableExists(db, SHOP_BACKUP);
+
+  if (target && !players && !shops) {
+    if (playerBackup !== shopBackup) throw new Error('账号表合并无法继续: 账号备份表不完整');
+    if (!playerBackup) {
+      await validateCompletedLayout(db);
+      return;
+    }
+    if ((await getState(db)) !== '已完成') {
+      await recreateIncomingForeignKeys(db);
+      await validateCompletedLayout(db);
+      await removeWriteBarrier(db);
+      await setState(db, '已完成');
+    } else {
+      await validateCompletedLayout(db);
+    }
+    return;
+  }
+  if (!players && !shops && !playerBackup && !shopBackup) return;
+  if (!players || !shops) throw new Error('账号表合并无法继续: player_accounts 与 shop_users 必须同时存在');
+  if (target || playerBackup || shopBackup) throw new Error('账号表合并无法继续: 检测到不完整的目标表或备份表');
+
+  await setState(db, '预检中');
+  await ensureLegacySourceColumns(db);
+  const steamIdStorage = await readSteamIdStorage(db);
+  await preflight(db);
+  if (await viewExists(db, TARGET_TABLE)) await db.query(`DROP VIEW \`${TARGET_TABLE}\``);
+  await setState(db, '复制中');
+  await installWriteBarrier(db);
+  await buildStagingTable(db, steamIdStorage);
+  await captureIncomingForeignKeys(db);
+  await validateIncomingForeignKeys(db);
+  await setState(db, '切换中');
+  await dropIncomingForeignKeys(db);
+  await assertNoLegacyIncomingForeignKeys(db);
+  await validateMerge(db, 'player_accounts', 'shop_users', STAGING_TABLE);
+  await db.query(`RENAME TABLE \`player_accounts\` TO \`${PLAYER_BACKUP}\`, \`shop_users\` TO \`${SHOP_BACKUP}\`, \`${STAGING_TABLE}\` TO \`${TARGET_TABLE}\``);
+  await setState(db, '重建外键中');
+  await recreateIncomingForeignKeys(db);
+  await validateCompletedLayout(db);
+  await removeWriteBarrier(db);
+  await setState(db, '已完成');
+}
+
+async function inspectLayout(db) {
+  const [target, players, shops, playerBackup, shopBackup, staging] = await Promise.all([
+    tableExists(db, TARGET_TABLE),
+    tableExists(db, 'player_accounts'),
+    tableExists(db, 'shop_users'),
+    tableExists(db, PLAYER_BACKUP),
+    tableExists(db, SHOP_BACKUP),
+    tableExists(db, STAGING_TABLE)
+  ]);
+  return { target, players, shops, playerBackup, shopBackup, staging };
+}
+
+async function migrateOnConnection(db) {
+  const lockRows = await db.query('SELECT GET_LOCK(?, 60) AS acquired', [LOCK_NAME]);
+  if (Number(lockRows?.[0]?.acquired) !== 1) throw new Error('账号表合并迁移锁获取超时');
+  try {
+    const layout = await inspectLayout(db);
+    if (layout.target) await normalizeTargetColumns(db);
+    if (!layout.players && !layout.shops && !layout.playerBackup && !layout.shopBackup && !layout.staging) {
+      if (layout.target) await validateTargetLayout(db);
+      else await db.query(await freshAccountTableStatement(db));
+      return;
+    }
+    await createMigrationTables(db);
+    await recoverOrMigrate(db);
+  } catch (error) {
+    try { if (await tableExists(db, STATE_TABLE)) await recordError(db, error); } catch {}
+    throw error;
+  } finally {
+    await db.query('SELECT RELEASE_LOCK(?) AS released', [LOCK_NAME]);
+  }
+}
+
+async function finalizeOnConnection(db) {
+  const lockRows = await db.query('SELECT GET_LOCK(?, 60) AS acquired', [LOCK_NAME]);
+  if (Number(lockRows?.[0]?.acquired) !== 1) throw new Error('账号表合并收尾锁获取超时');
+  try {
+    const layout = await inspectLayout(db);
+    if (!layout.target || layout.players || layout.shops || layout.staging) throw new Error('账号表合并尚未处于可收尾状态');
+    if (layout.playerBackup !== layout.shopBackup) throw new Error('账号表合并无法收尾: 账号备份表不完整');
+    await validateTargetLayout(db);
+    if (layout.playerBackup) {
+      if (!(await tableExists(db, STATE_TABLE)) || (await getState(db)) !== '已完成') throw new Error('账号表合并无法收尾: 迁移状态不是已完成');
+      await validateCompletedLayout(db);
+      await validateFinalizeCoverage(db);
+      const externalReferences = await scalarCount(db, `SELECT COUNT(*) AS count FROM information_schema.KEY_COLUMN_USAGE WHERE CONSTRAINT_SCHEMA=DATABASE() AND REFERENCED_TABLE_NAME IN (?,?) AND TABLE_NAME NOT IN (?,?)`, [PLAYER_BACKUP, SHOP_BACKUP, PLAYER_BACKUP, SHOP_BACKUP]);
+      if (externalReferences) throw new Error(`账号表合并无法收尾: ${externalReferences} 个业务外键仍指向备份表`);
+    }
+    await removeWriteBarrier(db);
+    await db.query(`DROP TABLE IF EXISTS \`${SHOP_BACKUP}\`,\`${PLAYER_BACKUP}\`,\`${FK_TABLE}\`,\`${STATE_TABLE}\``);
+    return { finalized: true };
+  } finally {
+    await db.query('SELECT RELEASE_LOCK(?) AS released', [LOCK_NAME]);
+  }
+}
+
+async function migrateAccountSchema(db) {
+  if (typeof db.withConnection === 'function') return db.withConnection(session => migrateOnConnection(session));
+  return migrateOnConnection(db);
+}
+
+async function finalizeAccountSchemaMigration(db) {
+  if (typeof db.withConnection === 'function') return db.withConnection(session => finalizeOnConnection(session));
+  return finalizeOnConnection(db);
+}
+
+export { accountTableStatement, finalizeAccountSchemaMigration, migrateAccountSchema };

@@ -1,0 +1,498 @@
+import crypto from 'node:crypto';
+import fsSync, { createReadStream } from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { ServiceError } from './commerce-service.js';
+import {
+  downloadVerifiedFile,
+  fetchJsonFromMirrors,
+  requireUpdateUrl,
+  splitUrlList,
+  updateTransportOptions,
+  verifyReleaseManifestSignature
+} from './update-transport.js';
+
+const PLUGIN_NAMES = ['version.dll', 'SCUMRCON.dll', 'SCUMRCONAdapter.dll'];
+const execFileAsync = promisify(execFile);
+
+function normalizedExecutable(value) {
+  return path.resolve(String(value || '')).replaceAll('/', '\\').toLowerCase();
+}
+
+function processIdentity(item) {
+  return `${Number(item.pid)}:${String(item.creationDate || '')}`;
+}
+
+export function selectScumServerProcesses(parsed, executable) {
+  const expected = normalizedExecutable(executable);
+  const matches = [];
+  for (const item of (Array.isArray(parsed) ? parsed : [parsed])) {
+    const pid = Number(item?.ProcessId);
+    const creationDate = String(item?.CreationDate || '');
+    const executablePath = String(item?.ExecutablePath || '');
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !creationDate || !executablePath) {
+      throw new ServiceError('发现无法确认完整身份的 SCUMServer.exe 进程，禁止替换插件', 503, 'PLUGIN_PROCESS_IDENTITY_UNAVAILABLE');
+    }
+    if (normalizedExecutable(executablePath) === expected) matches.push({ pid, creationDate, executablePath: path.resolve(executablePath) });
+  }
+  return matches;
+}
+
+export async function listScumServerProcesses(executable) {
+  if (process.platform !== 'win32') return [];
+  const script = "$items=@(Get-CimInstance Win32_Process -Filter \"Name='SCUMServer.exe'\" | Select-Object ProcessId,CreationDate,ExecutablePath); if($items.Count){$items|ConvertTo-Json -Compress}";
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 10000, maxBuffer: 1024 * 1024 });
+  const text = String(stdout || '').trim();
+  if (!text) return [];
+  return selectScumServerProcesses(JSON.parse(text), executable);
+}
+
+async function fileSha256(file) {
+  const hash = crypto.createHash('sha256');
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+function requireDirectory(value) {
+  const directory = String(value || '').trim();
+  if (!directory || directory.includes('\0')) throw new ServiceError('请先填写有效的 SCUM 游戏主目录', 400, 'INVALID_GAME_DIRECTORY');
+  return path.resolve(directory);
+}
+
+function targetDirectory(value) {
+  const directory = requireDirectory(value);
+  const parts = directory.split(path.sep).map((item) => item.toLowerCase());
+  return parts.at(-1) === 'win64' && parts.at(-2) === 'binaries' ? directory : path.join(directory, 'Binaries', 'Win64');
+}
+
+export class RconPluginService {
+  constructor({ root, store, sourceRoot, cacheRoot, manifestUrls, transportOptions, statusFile, lockFile, processProvider = listScumServerProcesses, pollIntervalMs = 1000, settleIntervalMs = 2000, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+    this.root = root;
+    this.store = store;
+    this.processProvider = processProvider;
+    this.pollIntervalMs = pollIntervalMs;
+    this.settleIntervalMs = settleIntervalMs;
+    this.sleep = sleep;
+    this.manifestUrls = splitUrlList(manifestUrls || process.env.VERSION_UPDATE_MANIFEST_URLS || process.env.VERSION_UPDATE_MANIFEST_URL || [
+      'https://update.scum0.cn/release-v1/version.json',
+      'https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/version.json'
+    ]);
+    this.manifestUrl = this.manifestUrls[0] || '';
+    this.transport = { ...updateTransportOptions(), ...transportOptions };
+    this.validateUpdateUrl = value => requireUpdateUrl(value, {
+      allowHttp: this.transport.allowHttp,
+      allowedHosts: this.transport.allowedHosts,
+      name: '插件更新地址'
+    });
+    const bundledRoot = path.join(root, 'resources', 'scum-rcon');
+    this.sourceRoot = sourceRoot || (fsSync.existsSync(bundledRoot) ? bundledRoot : path.join(root, 'src', 'resources', 'scum-rcon'));
+    this.cacheRoot = cacheRoot || path.join(root, 'data', 'updates', 'repository', 'objects');
+    this.statusFile = statusFile || path.join(root, 'data', 'rcon-plugin-sync-status.json');
+    this.lockFile = lockFile || path.join(root, 'data', 'rcon-plugin-sync.lock');
+    this.statusWriteQueue = Promise.resolve();
+  }
+
+  async status() {
+    try { return JSON.parse((await fs.readFile(this.statusFile, 'utf8')).replace(/^\uFEFF/, '')); }
+    catch (error) {
+      if (error?.code === 'ENOENT') return { status: 'idle', message: '暂无插件同步任务', updatedAt: null };
+      return { status: 'failed', reason: 'status-read-failed', message: '插件同步状态读取失败', updatedAt: null };
+    }
+  }
+
+  writeStatus(value) {
+    const operation = async () => {
+      await fs.mkdir(path.dirname(this.statusFile), { recursive: true });
+      const temporary = `${this.statusFile}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      await fs.writeFile(temporary, JSON.stringify({ ...value, updatedAt: new Date().toISOString() }, null, 2));
+      try { await fs.rename(temporary, this.statusFile); }
+      finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
+    };
+    const pending = this.statusWriteQueue.then(operation, operation);
+    this.statusWriteQueue = pending.catch(() => {});
+    return pending;
+  }
+
+  async resolveTarget(input) {
+    const config = await this.store.read();
+    return targetDirectory(input || config.ggcon?.serverDirectory);
+  }
+
+  async fileInfo(file) {
+    try {
+      const stat = await fs.stat(file);
+      if (!stat.isFile()) return { exists: false, size: 0, modifiedAt: null, sha256: null };
+      return { exists: true, size: stat.size, modifiedAt: stat.mtime.toISOString(), sha256: await fileSha256(file) };
+    } catch (error) {
+      if (['ENOENT', 'ENOTDIR'].includes(error.code)) return { exists: false, size: 0, modifiedAt: null, sha256: null };
+      throw error;
+    }
+  }
+
+  cacheFile(sha256) {
+    return path.join(this.cacheRoot, sha256.slice(0, 2), sha256);
+  }
+
+  async inspect(input) {
+    const directory = await this.resolveTarget(input);
+    let manifest;
+    let manifestSource;
+    try {
+      const result = await fetchJsonFromMirrors(splitUrlList([this.manifestUrl, ...this.manifestUrls]), {
+        label: '插件版本清单读取',
+        retries: this.transport.retries,
+        retryDelayMs: this.transport.retryDelayMs,
+        timeoutMs: Math.min(this.transport.requestTimeoutMs, 30000),
+        validateUrl: this.validateUpdateUrl
+      });
+      manifest = result.value;
+      manifestSource = result.url;
+    } catch (error) {
+      throw new ServiceError(error.message || '插件版本清单读取失败', 502, 'PLUGIN_MANIFEST_FAILED');
+    }
+    const remoteFiles = manifest.plugins?.files;
+    if (!Array.isArray(remoteFiles)) throw new ServiceError('版本更新清单尚未发布插件明细，无法比较插件版本', 409, 'PLUGIN_MANIFEST_MISSING');
+    const contractEntry = Array.isArray(manifest.files) ? manifest.files.find(file => file.path === '.scum-release-manifest.json') : null;
+    if (!contractEntry || !/^[a-f0-9]{64}$/i.test(contractEntry.sha256) || !Number.isSafeInteger(contractEntry.size) || contractEntry.size <= 0 || contractEntry.size > 64 * 1024 * 1024) {
+      throw new ServiceError('插件发布缺少签名完整性清单', 502, 'PLUGIN_SIGNATURE_INVALID');
+    }
+    const contractUrls = splitUrlList([contractEntry.url, ...(Array.isArray(contractEntry.urls) ? contractEntry.urls : [])]).map(value => new URL(value, manifestSource).href);
+    const contractPath = this.cacheFile(contractEntry.sha256.toLowerCase());
+    try {
+      await downloadVerifiedFile({
+        urls: contractUrls,
+        destination: contractPath,
+        expectedSize: contractEntry.size,
+        expectedSha256: contractEntry.sha256.toLowerCase(),
+        label: '插件发布完整性清单',
+        retries: this.transport.retries,
+        retryDelayMs: this.transport.retryDelayMs,
+        timeoutMs: this.transport.requestTimeoutMs,
+        validateUrl: this.validateUpdateUrl
+      });
+      const contract = JSON.parse(await fs.readFile(contractPath, 'utf8'));
+      verifyReleaseManifestSignature(contract, { publicKeys: this.transport.publicKeys, requireSignature: true });
+      if (contract.version !== manifest.version || Number(contract.releaseRevision || 0) !== Number(manifest.releaseRevision || 0)) throw new Error('发布身份不匹配');
+      const contractFiles = new Map(contract.files.map(file => [file.path, file]));
+      for (const remote of remoteFiles) {
+        const entry = contractFiles.get(remote.path);
+        if (!entry || entry.sha256 !== remote.sha256 || entry.size !== remote.size) throw new Error(`插件文件不在签名契约中：${remote.name || remote.path}`);
+      }
+    } catch (error) {
+      throw new ServiceError(`插件发布签名验证失败：${error.message}`, 502, 'PLUGIN_SIGNATURE_INVALID');
+    }
+    const files = [];
+    for (const name of PLUGIN_NAMES) {
+      const remote = remoteFiles.find(file => file.name === name);
+      if (!remote || !/^[a-f0-9]{64}$/i.test(remote.sha256) || !Number.isSafeInteger(remote.size) || remote.size <= 0 || remote.size > 64 * 1024 * 1024) throw new ServiceError('插件版本清单无效', 502, 'PLUGIN_MANIFEST_INVALID');
+      const urls = splitUrlList([remote.url, ...(Array.isArray(remote.urls) ? remote.urls : [])]).map(value => {
+        try { return new URL(value, manifestSource).href; } catch { throw new ServiceError('插件下载地址无效', 502, 'PLUGIN_MANIFEST_INVALID'); }
+      });
+      if (!urls.length) throw new ServiceError('插件下载地址无效', 502, 'PLUGIN_MANIFEST_INVALID');
+      for (const url of urls) {
+        try { this.validateUpdateUrl(url); } catch { throw new ServiceError('插件下载地址无效', 502, 'PLUGIN_MANIFEST_INVALID'); }
+      }
+      const expectedSha256 = remote.sha256.toLowerCase();
+      const applicationEntry = Array.isArray(manifest.files) ? manifest.files.find(file => file.path === `resources/scum-rcon/${name}`) : null;
+      if (!applicationEntry || applicationEntry.sha256?.toLowerCase() !== expectedSha256 || applicationEntry.size !== remote.size) throw new ServiceError('插件未使用统一内容仓库', 502, 'PLUGIN_REPOSITORY_MISMATCH');
+      const applicationUrls = splitUrlList([applicationEntry.url, ...(Array.isArray(applicationEntry.urls) ? applicationEntry.urls : [])]).map(value => new URL(value, manifestSource).href);
+      const [installed, cached] = await Promise.all([
+        this.fileInfo(path.join(directory, name)),
+        this.fileInfo(this.cacheFile(expectedSha256))
+      ]);
+      files.push({
+        name,
+        installed: installed.exists,
+        size: installed.size,
+        modifiedAt: installed.modifiedAt,
+        sha256: installed.sha256,
+        available: true,
+        url: urls[0],
+        urls: splitUrlList([...urls, ...applicationUrls]),
+        downloaded: Boolean(cached.exists && cached.size === remote.size && expectedSha256 && cached.sha256 === expectedSha256),
+        matches: Boolean(installed.exists && expectedSha256 && installed.sha256 === expectedSha256),
+        expectedSize: remote.size,
+        expectedSha256
+      });
+    }
+    return { directory, files, version: manifest.plugins.version || manifest.version };
+  }
+
+  async download(input) {
+    const before = await this.inspect(input);
+    const directory = before.directory;
+    await fs.mkdir(this.cacheRoot, { recursive: true });
+    for (const file of before.files) {
+      if (file.downloaded) continue;
+      const cached = this.cacheFile(file.expectedSha256);
+      await fs.mkdir(path.dirname(cached), { recursive: true });
+      if (file.matches) {
+        const temporary = `${cached}.${process.pid}.${Date.now()}.tmp`;
+        try {
+          await fs.copyFile(path.join(directory, file.name), temporary);
+          await fs.rename(temporary, cached).catch(async error => {
+            const existing = await this.fileInfo(cached);
+            if (existing.size !== file.expectedSize || existing.sha256 !== file.expectedSha256) throw error;
+          });
+        } finally {
+          await fs.rm(temporary, { force: true }).catch(() => {});
+        }
+      } else {
+        await this.downloadFile(file, cached);
+      }
+      const verified = await this.fileInfo(cached);
+      if (verified.size !== file.expectedSize || verified.sha256 !== file.expectedSha256) throw new ServiceError(`插件校验失败：${file.name}`, 502, 'PLUGIN_HASH_MISMATCH');
+    }
+    return this.inspect(directory);
+  }
+
+  async downloadFile(file, destination = this.cacheFile(file.expectedSha256)) {
+    try {
+      return await downloadVerifiedFile({
+        urls: file.urls || [file.url],
+        destination,
+        expectedSize: file.expectedSize,
+        expectedSha256: file.expectedSha256,
+        label: `插件 ${file.name}`,
+        retries: this.transport.retries,
+        retryDelayMs: this.transport.retryDelayMs,
+        timeoutMs: this.transport.requestTimeoutMs,
+        validateUrl: this.validateUpdateUrl
+      });
+    } catch (error) {
+      throw new ServiceError(error.message || `插件下载失败：${file.name}`, 502, 'PLUGIN_DOWNLOAD_FAILED');
+    }
+  }
+
+  async stageSync(inspection) {
+    const invalid = inspection.files.find(file => !file.downloaded);
+    if (invalid) throw new ServiceError(`请先下载插件文件：${invalid.name}`, 409, 'PLUGIN_NOT_DOWNLOADED');
+    const release = await this.acquireApplyLock();
+    if (!release) throw new ServiceError('另一个插件同步任务正在处理，请稍后重试', 409, 'PLUGIN_SYNC_ACTIVE');
+    try {
+      const active = await this.status();
+      if (active.status === 'pending' || active.status === 'applying') {
+        if (normalizedExecutable(active.directory) === normalizedExecutable(inspection.directory)) return active;
+        throw new ServiceError('另一游戏目录已有待处理插件同步任务', 409, 'PLUGIN_SYNC_ACTIVE');
+      }
+      const taskId = crypto.randomUUID();
+      const files = inspection.files.map(file => ({ name: file.name, size: file.expectedSize, sha256: file.expectedSha256 }));
+      const executable = path.join(inspection.directory, 'SCUMServer.exe');
+      const processes = await this.checkedProcesses(executable);
+      const state = {
+        schemaVersion: 1,
+        taskId,
+        status: 'pending',
+        reason: processes.length ? 'server-running' : 'ready',
+        message: processes.length ? '插件已下载并校验，正在等待当前 SCUM 服务器退出' : '插件已下载并校验，等待替换',
+        directory: inspection.directory,
+        executable,
+        version: inspection.version,
+        files,
+        processes
+      };
+      await this.writeStatus(state);
+      return state;
+    } finally { await release(); }
+  }
+
+  async prepareSync(input) {
+    const inspection = await this.download(input);
+    await this.stageSync(inspection);
+    const sync = await this.resumePending({ wait: false });
+    const view = sync.status === 'completed' ? await this.inspect(inspection.directory) : inspection;
+    return { ...view, sync };
+  }
+
+  async acquireApplyLock() {
+    await fs.mkdir(path.dirname(this.lockFile), { recursive: true });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const token = crypto.randomUUID();
+      try {
+        const handle = await fs.open(this.lockFile, 'wx');
+        await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), token }));
+        await handle.sync();
+        await handle.close();
+        return async () => {
+          try {
+            const current = JSON.parse(await fs.readFile(this.lockFile, 'utf8'));
+            if (current.token === token) await fs.rm(this.lockFile, { force: true });
+          } catch {}
+        };
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        let stale = false;
+        try {
+          const lock = JSON.parse(await fs.readFile(this.lockFile, 'utf8'));
+          const age = Date.now() - Date.parse(lock.createdAt);
+          if (!lock.token || !Number.isSafeInteger(lock.pid) || lock.pid <= 0 || !Number.isFinite(age)) {
+            const stat = await fs.stat(this.lockFile);
+            stale = Number.isFinite(age) ? age > 30000 : Date.now() - stat.mtimeMs > 30000;
+          } else if (age > 30 * 60 * 1000) stale = true;
+          else {
+            try { process.kill(lock.pid, 0); }
+            catch (probeError) { stale = probeError?.code === 'ESRCH'; }
+          }
+        } catch {
+          try { stale = Date.now() - (await fs.stat(this.lockFile)).mtimeMs > 30000; }
+          catch { continue; }
+        }
+        if (!stale) return null;
+        const abandoned = `${this.lockFile}.${crypto.randomUUID()}.stale`;
+        try {
+          await fs.rename(this.lockFile, abandoned);
+          await fs.rm(abandoned, { force: true });
+        } catch (reclaimError) {
+          if (reclaimError?.code !== 'ENOENT') return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  async checkedProcesses(executable) {
+    try { return await this.processProvider(executable); }
+    catch (error) { throw new ServiceError(`无法检查 SCUMServer.exe 进程：${error.message}`, 503, 'PLUGIN_PROCESS_CHECK_FAILED'); }
+  }
+
+  async rollbackTransaction(transaction) {
+    for (const { target, backup, existed } of [...(transaction?.replacements || [])].reverse()) {
+      if (existed && (await this.fileInfo(backup)).exists) await fs.copyFile(backup, target);
+      else if (!existed) await fs.rm(target, { force: true });
+    }
+  }
+
+  async applyPending(task) {
+    await fs.mkdir(task.directory, { recursive: true });
+    for (const file of task.files) {
+      file.temporary ||= path.join(task.directory, `.${file.name}.${task.taskId}.pending`);
+      let temporary = await this.fileInfo(file.temporary);
+      if (temporary.size !== file.size || temporary.sha256 !== file.sha256) {
+        await fs.copyFile(this.cacheFile(file.sha256), file.temporary);
+        temporary = await this.fileInfo(file.temporary);
+      }
+      if (temporary.size !== file.size || temporary.sha256 !== file.sha256) throw new ServiceError(`插件校验失败：${file.name}`, 502, 'PLUGIN_HASH_MISMATCH');
+    }
+    const installed = await Promise.all(task.files.map(file => this.fileInfo(path.join(task.directory, file.name))));
+    if (installed.every((file, index) => file.size === task.files[index].size && file.sha256 === task.files[index].sha256)) return;
+    const backupSuffix = new Date().toISOString().replace(/[-:.TZ]/g, '');
+    const replacements = [];
+    try {
+      for (const file of task.files) {
+        const target = path.join(task.directory, file.name);
+        const backup = `${target}.bak.${backupSuffix}`;
+        const existed = (await this.fileInfo(target)).exists;
+        if (existed) await fs.copyFile(target, backup);
+        replacements.push({ target, backup, existed });
+      }
+      await this.writeStatus({ ...task, status: 'applying', transaction: { phase: 'backed-up', replacements } });
+      if ((await this.checkedProcesses(task.executable)).length) throw new ServiceError('SCUM 服务器已重新启动，插件保持待处理状态', 409, 'PLUGIN_SERVER_RESTARTED');
+      for (const [index, file] of task.files.entries()) {
+        if (index && (await this.checkedProcesses(task.executable)).length) throw new ServiceError('SCUM 服务器已重新启动，插件保持待处理状态', 409, 'PLUGIN_SERVER_RESTARTED');
+        await fs.rename(file.temporary, path.join(task.directory, file.name));
+      }
+      if ((await this.checkedProcesses(task.executable)).length) throw new ServiceError('替换期间 SCUM 服务器已启动，已回滚插件并等待下一次停机', 409, 'PLUGIN_SERVER_RESTARTED');
+    } catch (error) {
+      try { await this.rollbackTransaction({ replacements }); }
+      catch (rollbackError) {
+        throw new ServiceError(`插件替换失败且回滚尚未完成：${rollbackError.message}`, 500, 'PLUGIN_ROLLBACK_PENDING');
+      }
+      throw error;
+    }
+  }
+
+  async resumePending({ wait = false, signal } = {}) {
+    while (true) {
+      const task = await this.status();
+      if (task.status === 'idle' || task.status === 'completed') return task;
+      if (task.status !== 'pending' && task.status !== 'applying') return task;
+      if (signal?.aborted) return task;
+      const current = await this.checkedProcesses(task.executable);
+      const captured = new Set((task.processes || []).map(processIdentity));
+      const originalStillRunning = current.some(item => captured.has(processIdentity(item)));
+      if (originalStillRunning) {
+        if (!wait) return task;
+        await this.sleep(this.pollIntervalMs);
+        continue;
+      }
+      if (current.length) {
+        if (task.transaction) {
+          if (!wait) return task;
+          await this.sleep(this.pollIntervalMs);
+          continue;
+        }
+        const restarted = { ...task, status: 'pending', reason: 'server-restarted', message: '外部重启已占用替换窗口，插件保持待处理状态', processes: current };
+        await this.writeStatus(restarted);
+        if (!wait) return restarted;
+        await this.sleep(this.pollIntervalMs);
+        continue;
+      }
+      const release = await this.acquireApplyLock();
+      if (!release) {
+        if (!wait) return { ...task, reason: 'worker-active', message: '另一个插件同步任务正在处理' };
+        await this.sleep(this.pollIntervalMs);
+        continue;
+      }
+      try {
+        const latest = await this.status();
+        if (latest.taskId !== task.taskId) continue;
+        if (latest.status === 'applying' && latest.transaction) {
+          await this.rollbackTransaction(latest.transaction);
+          const recovered = { ...latest, status: 'pending', reason: 'transaction-recovered', message: '已恢复中断前的插件版本，等待重新应用', transaction: undefined, processes: [] };
+          await this.writeStatus(recovered);
+          if (!wait) return recovered;
+          continue;
+        }
+        let raced = await this.checkedProcesses(task.executable);
+        if (!raced.length && this.settleIntervalMs > 0) {
+          await this.sleep(this.settleIntervalMs);
+          raced = await this.checkedProcesses(task.executable);
+        }
+        if (raced.length) {
+          const pending = { ...task, status: 'pending', reason: 'server-restarted', message: '外部重启已占用替换窗口，插件保持待处理状态', processes: raced };
+          await this.writeStatus(pending);
+          if (!wait) return pending;
+          continue;
+        }
+        await this.writeStatus({ ...task, status: 'applying', reason: 'server-stopped', message: 'SCUM 服务器已稳定退出，正在备份并替换插件' });
+        try { await this.applyPending(task); }
+        catch (error) {
+          if (error?.code === 'PLUGIN_ROLLBACK_PENDING') {
+            const persisted = await this.status();
+            const recovering = { ...persisted, status: 'applying', reason: 'rollback-pending', message: error.message, processes: [] };
+            await this.writeStatus(recovering);
+            if (wait) continue;
+            return recovering;
+          }
+          const retryable = error?.code === 'PLUGIN_SERVER_RESTARTED';
+          const pending = { ...task, status: retryable ? 'pending' : 'failed', reason: retryable ? 'server-restarted' : 'replace-failed', message: error.message, processes: retryable ? await this.checkedProcesses(task.executable).catch(() => []) : [] };
+          await this.writeStatus(pending);
+          if (retryable && wait) continue;
+          return pending;
+        }
+        const finalProcesses = await this.checkedProcesses(task.executable);
+        if (finalProcesses.length) {
+          const pending = { ...task, status: 'pending', reason: 'server-restarted', message: '替换期间 SCUM 服务器已启动，等待下一次停机复核', processes: finalProcesses };
+          await this.writeStatus(pending);
+          if (wait) continue;
+          return pending;
+        }
+        const installed = await Promise.all(task.files.map(file => this.fileInfo(path.join(task.directory, file.name))));
+        if (!installed.every((file, index) => file.size === task.files[index].size && file.sha256 === task.files[index].sha256)) throw new ServiceError('插件替换后校验失败', 500, 'PLUGIN_REPLACE_VERIFY_FAILED');
+        const completed = { ...task, status: 'completed', reason: 'installed', message: '插件文件已备份、替换并校验', processes: [] };
+        await this.writeStatus(completed);
+        return completed;
+      } finally { await release(); }
+    }
+  }
+
+  async replace(input) {
+    const before = await this.inspect(input);
+    await this.stageSync(before);
+    const sync = await this.resumePending({ wait: false });
+    const view = sync.status === 'completed' ? await this.inspect(before.directory) : before;
+    return { ...view, sync };
+  }
+}

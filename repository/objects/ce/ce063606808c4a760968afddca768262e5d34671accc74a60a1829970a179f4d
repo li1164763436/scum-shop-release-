@@ -1,0 +1,185 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { setDefaultResultOrder } from 'node:dns';
+import { fileURLToPath } from 'node:url';
+import { createApp } from './app.js';
+import { ConfigStore } from './services/config-store.js';
+import { createDatabase } from './services/database.js';
+import { ensureSchema } from './services/schema.js';
+import { FulfillmentWorker } from './services/fulfillment-worker.js';
+import { AnnouncementWorker } from './services/announcement-worker.js';
+import { Gsm3Client } from './services/gsm3-client.js';
+import { GgconClient } from './services/ggcon-client.js';
+import { createLogger } from './services/logger.js';
+import { AuthService } from './services/auth-service.js';
+import { importLegacyGifts } from './services/gift-service.js';
+import { RedeemCodeService } from './services/redeem-code-service.js';
+import { RewardService } from './services/reward-service.js';
+import { ServerMonitorWorker } from './services/server-monitor-worker.js';
+import { MonitorService } from './services/monitor-service.js';
+import { MaintenanceService } from './services/maintenance-service.js';
+import { MaintenanceWorker } from './services/maintenance-worker.js';
+import { GiftService } from './services/gift-service.js';
+import { ActivityService } from './services/activity-service.js';
+import { LotteryService } from './services/lottery-service.js';
+import { StockMarketService } from './services/stock-market-service.js';
+import { CloudWarehouseService } from './services/cloud-warehouse-service.js';
+import { StockMarketWorker } from './services/stock-market-worker.js';
+import { PlayerAdminCapabilityService } from './services/player-admin-capability-service.js';
+import { PlayerAdminService } from './services/player-admin-service.js';
+import { TemporaryBanWorker } from './services/temporary-ban-worker.js';
+import { ScumLogWorker } from './services/scum-log-worker.js';
+import { ScumCategoryLogWorker } from './services/scum-category-log-worker.js';
+import { KillRankingService } from './services/kill-ranking-service.js';
+import { ChatGiftClaimService } from './services/chat-gift-claim-service.js';
+import { ChatLogWorker } from './services/chat-log-worker.js';
+import { ChatAutoReplyService } from './services/chat-auto-reply-service.js';
+import { LicenseStore } from './services/license-store.js';
+import { assertStartupAllowed, createLicensedDatabase, formatLicenseStartupError } from './services/license-client.js';
+import { assertInitialSuperAdminBinding } from './services/initial-super-admin-service.js';
+import { createLicenseGuide } from './services/license-guide.js';
+import { importReleaseProductCatalog } from './services/release-product-catalog.js';
+import { LicenseRuntime } from './services/license-runtime.js';
+import { ScumLockedVehicleReader } from './services/scum-locked-vehicle-reader.js';
+import { VehicleSyncService } from './services/vehicle-sync-service.js';
+import { VehicleSyncWorker } from './services/vehicle-sync-worker.js';
+import { TeleportMapService } from './services/teleport-map-service.js';
+import { TeleportEntitySnapshotStore } from './services/teleport-entity-snapshot-store.js';
+import { TeleportEntitySnapshotWorker } from './services/teleport-entity-snapshot-worker.js';
+import { TeleportPlayerLocationProvider } from './services/teleport-player-location-provider.js';
+import { TeleportFlagLocationProvider } from './services/teleport-flag-location-provider.js';
+import { ScumTeleportEntityReader } from './services/scum-teleport-entity-reader.js';
+import { VehicleTeleportVerificationService } from './services/vehicle-teleport-verification-service.js';
+import { VehicleTeleportVerificationWorker } from './services/vehicle-teleport-verification-worker.js';
+import { DomainTunnelService } from './services/domain-tunnel-service.js';
+import { StorefrontActivityGate } from './services/storefront-activity-gate.js';
+
+export async function startApplication({ root, port, host, appVersion, releaseRevision, store, logger, licenseStore, runtime, onLicenseInvalid }) {
+  const config = await store.read();
+  const db = await createDatabase(config.mysql);
+  try {
+    await ensureSchema(db);
+    await importReleaseProductCatalog(db, root, appVersion, logger);
+    await importLegacyGifts(db, config.starterGifts, logger);
+  } catch (error) { await db.close(); throw error; }
+  const auth = new AuthService(db, { challengeSecret: process.env.AUTH_CHALLENGE_SECRET });
+  const redeemCodes = new RedeemCodeService(db);
+  const rewards = new RewardService(db);
+  const gifts = new GiftService(db);
+  const activities = new ActivityService(db, gifts);
+  const lottery = new LotteryService(db);
+  const stockMarket = new StockMarketService(db, { store });
+  let cached = null;
+  let signature = '';
+  const clients = async () => {
+    const current = await store.read();
+    const nextSignature = JSON.stringify({ gsm3: current.gsm3, ggcon: current.ggcon, reconnect: current.reconnect, instanceId: current.fulfillment.instanceId });
+    if (!cached || signature !== nextSignature) {
+      cached?.ggcon.close();
+      const gsm3 = new Gsm3Client(current.gsm3, current.reconnect);
+      cached = { gsm3, ggcon: new GgconClient(current.ggcon, current.reconnect, { gsm3, instanceId: current.fulfillment.instanceId, logger }) };
+      signature = nextSignature;
+    }
+    return { config: current, ...cached };
+  };
+  const storefrontActivity = new StorefrontActivityGate({ activeWindowMs: 600000 });
+  const maintenanceService = new MaintenanceService({ db, store });
+  const worker = new FulfillmentWorker({ db, store, clients, logger, maintenanceService });
+  const announcementWorker = new AnnouncementWorker({ db, store, clients, logger });
+  const monitorWorker = new ServerMonitorWorker({ db, store, clients, logger, rewardService: rewards, fulfillmentWorkerStatus: () => worker.status(), activityGate: storefrontActivity });
+  const monitorService = new MonitorService({ db, store });
+  const maintenanceWorker = new MaintenanceWorker({ db, store, service: maintenanceService, clients, logger });
+  const stockMarketWorker = new StockMarketWorker({ db, store, logger });
+  const playerAdminCapabilities = new PlayerAdminCapabilityService({ db, clients });
+  const playerAdmin = new PlayerAdminService({ db, clients, capabilityService: playerAdminCapabilities });
+  const temporaryBanWorker = new TemporaryBanWorker({ db, playerAdminService: playerAdmin, capabilityService: playerAdminCapabilities, logger });
+  const scumLogWorker = new ScumLogWorker({ db, store, logger });
+  const scumCategoryLogWorker = new ScumCategoryLogWorker({ db, store, logger });
+  const killRanking = new KillRankingService({ db });
+  const cloudWarehouse = new CloudWarehouseService(db, { clients, logger });
+  const chatGiftClaims = new ChatGiftClaimService({ db, gifts, cloudWarehouse });
+  const chatAutoReplies = new ChatAutoReplyService({ db, store, clients, logger });
+  const chatLogWorker = new ChatLogWorker({ db, store, claimService: chatGiftClaims, replyService: chatAutoReplies, logger });
+  const vehicleSyncService = new VehicleSyncService({ db, reader: new ScumLockedVehicleReader({ root }), clients, logger });
+  const vehicleSyncWorker = new VehicleSyncWorker({ service: vehicleSyncService, activityGate: storefrontActivity, logger });
+  const vehicleTeleportVerificationWorker = new VehicleTeleportVerificationWorker({ service: new VehicleTeleportVerificationService({ db, clients, logger }), logger });
+  const teleportSnapshotStore = new TeleportEntitySnapshotStore({ db });
+  const scumTeleportEntityReader = new ScumTeleportEntityReader({ root });
+  const teleportSnapshotWorker = new TeleportEntitySnapshotWorker({ store: teleportSnapshotStore, playerProvider: new TeleportPlayerLocationProvider({ clients, reader: scumTeleportEntityReader, logger }), flagProvider: new TeleportFlagLocationProvider({ clients, reader: scumTeleportEntityReader, logger }), activityGate: storefrontActivity, playerIntervalMs: 15000, flagIntervalMs: 60000, logger });
+  let teleportMapProfile;
+  const teleportMapProfileFile = path.join(root, 'data', 'teleport-map-calibration.json');
+  if (fs.existsSync(teleportMapProfileFile)) {
+    try {
+      const candidate = JSON.parse(fs.readFileSync(teleportMapProfileFile, 'utf8').replace(/^\uFEFF/, ''));
+      new TeleportMapService({ db, profile: candidate });
+      teleportMapProfile = candidate;
+    } catch (error) { logger.error('传送地图校准文件无效，继续使用未验证初始范围', { component: 'teleport-map', errorCode: error?.code || error?.name || 'CALIBRATION_FILE_INVALID' }); }
+  }
+  const domainTunnel = new DomainTunnelService({ root, localPort: port, licenseStore, logger });
+  const rconPluginSyncController = new AbortController();
+  const app = createApp({
+    root, appVersion, releaseRevision, store, licenseStore, logger, db, auth, gifts, redeemCodes, rewards, activities, lottery, stockMarket, cloudWarehouse, killRanking, chatGiftClaims, chatAutoReplies, playerAdminCapabilities, playerAdmin, clients, announcementWorker, monitorService, maintenanceService, maintenanceWorker, teleportMapProfile, teleportSnapshotStore, storefrontActivity, secureCookies: process.env.COOKIE_SECURE === 'true', rconPluginAutoResume: true, rconPluginSyncSignal: rconPluginSyncController.signal,
+    verifyAdminAccess: async () => {
+      const identity = await assertStartupAllowed({ store: licenseStore });
+      return assertInitialSuperAdminBinding(db, identity, { allowLegacy: false });
+    },
+    workerStatus: () => worker.status(), monitorStatus: () => monitorWorker.status(), maintenanceStatus: () => maintenanceWorker.status(), stockMarketStatus: () => stockMarketWorker.status(), temporaryBanStatus: () => temporaryBanWorker.status(), scumLogStatus: () => scumLogWorker.status(), scumCategoryLogStatus: () => scumCategoryLogWorker.status(), chatLogStatus: () => chatLogWorker.status(), vehicleSyncStatus: () => vehicleSyncWorker.status(), domainAccessStatus: () => domainTunnel.domainStatus(), onConfigSaved: async () => { cached?.ggcon.close(); cached = null; signature = ''; await worker.reconfigure(); await announcementWorker.reconfigure(); await monitorWorker.reconfigure(); await maintenanceWorker.reconfigure(); await stockMarketWorker.reconfigure(); await temporaryBanWorker.reconfigure(); await scumLogWorker.reconfigure(); await scumCategoryLogWorker.reconfigure(); await chatLogWorker.reconfigure(); }
+  });
+  const server = await new Promise((resolve, reject) => {
+    const listening = app.listen(0, '127.0.0.1', () => { console.log(`SCUM RCON 控制台已启动：http://${host}:${port}`); resolve(listening); });
+    listening.once('error', reject);
+  });
+  domainTunnel.start();
+  try { await worker.start(); await announcementWorker.start(); }
+  catch (error) { await domainTunnel.stop(); await worker.stopAndDrain(); await announcementWorker.stopAndDrain(); await new Promise(resolve => server.close(resolve)); await db.close(); throw error; }
+  const backgroundWorkerNames = ['monitor', 'maintenance', 'stock-market', 'temporary-ban', 'scum-log', 'scum-category-log', 'chat-log', 'vehicle-sync', 'vehicle-teleport-verification', 'teleport-snapshot'];
+  const backgroundStarts = await Promise.allSettled([
+    monitorWorker.start(), maintenanceWorker.start(), stockMarketWorker.start(), temporaryBanWorker.start(), scumLogWorker.start(), scumCategoryLogWorker.start(), chatLogWorker.start(), vehicleSyncWorker.start(), vehicleTeleportVerificationWorker.start(), teleportSnapshotWorker.start()
+  ]);
+  const degradedWorkers = [];
+  for (let index = 0; index < backgroundStarts.length; index += 1) {
+    const result = backgroundStarts[index];
+    if (result.status !== 'rejected') continue;
+    degradedWorkers.push(backgroundWorkerNames[index]);
+    logger.error('后台 Worker 启动失败', { component: backgroundWorkerNames[index], errorCode: result.reason?.code || result.reason?.name || 'WORKER_START_FAILED' });
+  }
+  runtime.attach(server.address().port, degradedWorkers);
+
+  const licenseRuntime = new LicenseRuntime({
+    store: licenseStore,
+    onInvalid: async (error) => {
+      console.error(formatLicenseStartupError(error));
+      await shutdown(1, false);
+      runtime.fail(error);
+      await onLicenseInvalid();
+    }
+  });
+  licenseRuntime.start();
+
+  let shuttingDown = false;
+  async function shutdown(exitCode = 0, terminate = true) {
+    runtime.detach();
+    if (shuttingDown) return;
+    shuttingDown = true;
+    licenseRuntime.stop();
+    rconPluginSyncController.abort();
+    await domainTunnel.stop();
+    await maintenanceWorker.stopAndDrain();
+    await stockMarketWorker.stopAndDrain();
+    await temporaryBanWorker.stopAndDrain();
+    await scumLogWorker.stopAndDrain();
+    await scumCategoryLogWorker.stopAndDrain();
+    await chatLogWorker.stopAndDrain();
+    await vehicleSyncWorker.stopAndDrain();
+    await vehicleTeleportVerificationWorker.stopAndDrain();
+    await teleportSnapshotWorker.stopAndDrain();
+    await worker.stopAndDrain();
+    await announcementWorker.stopAndDrain();
+    await monitorWorker.stopAndDrain();
+    cached?.ggcon.close();
+    await new Promise((resolve) => server.close(resolve));
+    if (terminate) await db.close();
+
+  }
+  return { stop: () => shutdown(0, false), close: () => shutdown(0, true) };
+}
