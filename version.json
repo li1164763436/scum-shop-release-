@@ -1,24 +1,24 @@
 {
   "schemaVersion": 2,
   "version": "1.0.1",
-  "releaseRevision": 15,
-  "releaseId": "1.0.1-r15",
+  "releaseRevision": 16,
+  "releaseId": "1.0.1-r16",
   "repository": {
     "format": "sha256-v1",
     "releaseBaseUrl": "https://update.scum0.cn/release-v1",
     "objectBaseUrl": "https://update.scum0.cn/release-v1/repository/objects",
     "indexUrl": "https://update.scum0.cn/release-v1/repository/index.json",
-    "manifestUrl": "https://update.scum0.cn/release-v1/repository/manifests/1.0.1-r15.json"
+    "manifestUrl": "https://update.scum0.cn/release-v1/repository/manifests/1.0.1-r16.json"
   },
   "files": [
     {
       "path": ".scum-release-manifest.json",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/2f/2f81d9d654b3e4f363f8651ae6da5475894c5543f47f2f7703f3d1b0d6f07d0c",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/c1/c1633a33a238dfd66c76eb27f88c0a6e208a3c4cda715ce77fbe8d1990ec28e0",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/2f/2f81d9d654b3e4f363f8651ae6da5475894c5543f47f2f7703f3d1b0d6f07d0c",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/2f/2f81d9d654b3e4f363f8651ae6da5475894c5543f47f2f7703f3d1b0d6f07d0c"
+        "https://update.scum0.cn/release-v1/repository/objects/c1/c1633a33a238dfd66c76eb27f88c0a6e208a3c4cda715ce77fbe8d1990ec28e0",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/c1/c1633a33a238dfd66c76eb27f88c0a6e208a3c4cda715ce77fbe8d1990ec28e0"
       ],
-      "sha256": "2f81d9d654b3e4f363f8651ae6da5475894c5543f47f2f7703f3d1b0d6f07d0c",
+      "sha256": "c1633a33a238dfd66c76eb27f88c0a6e208a3c4cda715ce77fbe8d1990ec28e0",
       "size": 327586
     },
     {
@@ -16153,12 +16153,12 @@
     },
     {
       "path": "package.json",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/d2/d259035cc413f82b724f8e9a167aebd36bf92d610368c35dc32f3b0eeaaae042",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/cd/cd99ad7b149ae0550c5a01008b13de2166f812af765e4822d0549f1eb8793814",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/d2/d259035cc413f82b724f8e9a167aebd36bf92d610368c35dc32f3b0eeaaae042",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/d2/d259035cc413f82b724f8e9a167aebd36bf92d610368c35dc32f3b0eeaaae042"
+        "https://update.scum0.cn/release-v1/repository/objects/cd/cd99ad7b149ae0550c5a01008b13de2166f812af765e4822d0549f1eb8793814",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/cd/cd99ad7b149ae0550c5a01008b13de2166f812af765e4822d0549f1eb8793814"
       ],
-      "sha256": "d259035cc413f82b724f8e9a167aebd36bf92d610368c35dc32f3b0eeaaae042",
+      "sha256": "cd99ad7b149ae0550c5a01008b13de2166f812af765e4822d0549f1eb8793814",
       "size": 2404
     },
     {
@@ -16173,13 +16173,13 @@
     },
     {
       "path": "public/app.js",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/20/20dcb4a6c553597c748d5e534078adaefa8361f3c11c68ee0ffe777c5431e1f3",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/8a/8a930a9a667aa6764cd05f13f55bdc23bf1f5bb53372905be01f55a030355fab",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/20/20dcb4a6c553597c748d5e534078adaefa8361f3c11c68ee0ffe777c5431e1f3",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/20/20dcb4a6c553597c748d5e534078adaefa8361f3c11c68ee0ffe777c5431e1f3"
+        "https://update.scum0.cn/release-v1/repository/objects/8a/8a930a9a667aa6764cd05f13f55bdc23bf1f5bb53372905be01f55a030355fab",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/8a/8a930a9a667aa6764cd05f13f55bdc23bf1f5bb53372905be01f55a030355fab"
       ],
-      "sha256": "20dcb4a6c553597c748d5e534078adaefa8361f3c11c68ee0ffe777c5431e1f3",
-      "size": 3678
+      "sha256": "8a930a9a667aa6764cd05f13f55bdc23bf1f5bb53372905be01f55a030355fab",
+      "size": 3833
     },
     {
       "path": "public/css/admin-unified.css",
@@ -16393,12 +16393,12 @@
     },
     {
       "path": "public/index.html",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/ff/ffa150cd2dd1c6e9d396c95dc7de7c2802b2ed6f75459a696be2f8f8a7c34c5f",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/9a/9a109294487dbd5da9b467c1000c7db966dbafb48c0a62fb50d96daee26f7930",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/ff/ffa150cd2dd1c6e9d396c95dc7de7c2802b2ed6f75459a696be2f8f8a7c34c5f",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/ff/ffa150cd2dd1c6e9d396c95dc7de7c2802b2ed6f75459a696be2f8f8a7c34c5f"
+        "https://update.scum0.cn/release-v1/repository/objects/9a/9a109294487dbd5da9b467c1000c7db966dbafb48c0a62fb50d96daee26f7930",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/9a/9a109294487dbd5da9b467c1000c7db966dbafb48c0a62fb50d96daee26f7930"
       ],
-      "sha256": "ffa150cd2dd1c6e9d396c95dc7de7c2802b2ed6f75459a696be2f8f8a7c34c5f",
+      "sha256": "9a109294487dbd5da9b467c1000c7db966dbafb48c0a62fb50d96daee26f7930",
       "size": 9176
     },
     {
@@ -16483,13 +16483,13 @@
     },
     {
       "path": "public/js/core-events.js",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/c6/c6572cdcb2d2f8609054c8b738ee9fc3a426cf44c98d028f1b7fda59e8d5214e",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/36/363daa4794b97f7e3d83c11ea8d5e7fba0b47474dbf8da13c829c2ffed27b298",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/c6/c6572cdcb2d2f8609054c8b738ee9fc3a426cf44c98d028f1b7fda59e8d5214e",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/c6/c6572cdcb2d2f8609054c8b738ee9fc3a426cf44c98d028f1b7fda59e8d5214e"
+        "https://update.scum0.cn/release-v1/repository/objects/36/363daa4794b97f7e3d83c11ea8d5e7fba0b47474dbf8da13c829c2ffed27b298",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/36/363daa4794b97f7e3d83c11ea8d5e7fba0b47474dbf8da13c829c2ffed27b298"
       ],
-      "sha256": "c6572cdcb2d2f8609054c8b738ee9fc3a426cf44c98d028f1b7fda59e8d5214e",
-      "size": 2673
+      "sha256": "363daa4794b97f7e3d83c11ea8d5e7fba0b47474dbf8da13c829c2ffed27b298",
+      "size": 3491
     },
     {
       "path": "public/js/fulfillment/announcements.js",
@@ -16623,13 +16623,13 @@
     },
     {
       "path": "public/page-loader.js",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/1c/1cd900c95738bd55a92d83ed020ebbdc8daf2ed56a4156bbfa1897b823ac4db5",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/6d/6db8ab4f8fda06173d4c4ea8ed479fb4eff1f9dce9b793ddf5395639ba19467a",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/1c/1cd900c95738bd55a92d83ed020ebbdc8daf2ed56a4156bbfa1897b823ac4db5",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/1c/1cd900c95738bd55a92d83ed020ebbdc8daf2ed56a4156bbfa1897b823ac4db5"
+        "https://update.scum0.cn/release-v1/repository/objects/6d/6db8ab4f8fda06173d4c4ea8ed479fb4eff1f9dce9b793ddf5395639ba19467a",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/6d/6db8ab4f8fda06173d4c4ea8ed479fb4eff1f9dce9b793ddf5395639ba19467a"
       ],
-      "sha256": "1cd900c95738bd55a92d83ed020ebbdc8daf2ed56a4156bbfa1897b823ac4db5",
-      "size": 3343
+      "sha256": "6db8ab4f8fda06173d4c4ea8ed479fb4eff1f9dce9b793ddf5395639ba19467a",
+      "size": 3891
     },
     {
       "path": "public/pages/commerce/activities-lottery.html",
@@ -16873,23 +16873,23 @@
     },
     {
       "path": "public/shop/css/errors.css",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/b6/b64a9fdb97946fb5e5ab3fa02fdc411605cfe3e2acda51e9abfeefa715fba984",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/05/0552111e35affe708e7345dca28821e01df9a9d7a74fdb01b7e092f0448d59b5",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/b6/b64a9fdb97946fb5e5ab3fa02fdc411605cfe3e2acda51e9abfeefa715fba984",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/b6/b64a9fdb97946fb5e5ab3fa02fdc411605cfe3e2acda51e9abfeefa715fba984"
+        "https://update.scum0.cn/release-v1/repository/objects/05/0552111e35affe708e7345dca28821e01df9a9d7a74fdb01b7e092f0448d59b5",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/05/0552111e35affe708e7345dca28821e01df9a9d7a74fdb01b7e092f0448d59b5"
       ],
-      "sha256": "b64a9fdb97946fb5e5ab3fa02fdc411605cfe3e2acda51e9abfeefa715fba984",
-      "size": 5500
+      "sha256": "0552111e35affe708e7345dca28821e01df9a9d7a74fdb01b7e092f0448d59b5",
+      "size": 5372
     },
     {
       "path": "public/shop/css/insurance.css",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/76/76e9f6738a66bc0efb66340595308928a339b0df38f48b14152a65f50731540b",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/68/68bbedd79493392cde48ec71e0b50cc53224108fb02bdc4aaac5e1df3ce140a5",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/76/76e9f6738a66bc0efb66340595308928a339b0df38f48b14152a65f50731540b",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/76/76e9f6738a66bc0efb66340595308928a339b0df38f48b14152a65f50731540b"
+        "https://update.scum0.cn/release-v1/repository/objects/68/68bbedd79493392cde48ec71e0b50cc53224108fb02bdc4aaac5e1df3ce140a5",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/68/68bbedd79493392cde48ec71e0b50cc53224108fb02bdc4aaac5e1df3ce140a5"
       ],
-      "sha256": "76e9f6738a66bc0efb66340595308928a339b0df38f48b14152a65f50731540b",
-      "size": 31708
+      "sha256": "68bbedd79493392cde48ec71e0b50cc53224108fb02bdc4aaac5e1df3ce140a5",
+      "size": 31919
     },
     {
       "path": "public/shop/css/membership.css",
@@ -16923,12 +16923,12 @@
     },
     {
       "path": "public/shop/index.html",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/ac/acffd3ab38f6867bee1323ac40d18b379868bac299815ba3b133f78534a31445",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/9a/9a598972b80ba56a49c574d72f6e6e2ef96d0fcaef6d3e2feb53252c9e01b34d",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/ac/acffd3ab38f6867bee1323ac40d18b379868bac299815ba3b133f78534a31445",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/ac/acffd3ab38f6867bee1323ac40d18b379868bac299815ba3b133f78534a31445"
+        "https://update.scum0.cn/release-v1/repository/objects/9a/9a598972b80ba56a49c574d72f6e6e2ef96d0fcaef6d3e2feb53252c9e01b34d",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/9a/9a598972b80ba56a49c574d72f6e6e2ef96d0fcaef6d3e2feb53252c9e01b34d"
       ],
-      "sha256": "acffd3ab38f6867bee1323ac40d18b379868bac299815ba3b133f78534a31445",
+      "sha256": "9a598972b80ba56a49c574d72f6e6e2ef96d0fcaef6d3e2feb53252c9e01b34d",
       "size": 3538
     },
     {
@@ -16943,33 +16943,33 @@
     },
     {
       "path": "public/shop/js/activity.js",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/4e/4ecc5db0aafb69400cd6dc04f25b616be2237539704944b89fac95d6c0cf2341",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/40/400dab605c3bbd1e7a130bb7a88e7f6ffe9d05161fd3ca4e653dcebbdfa122a3",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/4e/4ecc5db0aafb69400cd6dc04f25b616be2237539704944b89fac95d6c0cf2341",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/4e/4ecc5db0aafb69400cd6dc04f25b616be2237539704944b89fac95d6c0cf2341"
+        "https://update.scum0.cn/release-v1/repository/objects/40/400dab605c3bbd1e7a130bb7a88e7f6ffe9d05161fd3ca4e653dcebbdfa122a3",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/40/400dab605c3bbd1e7a130bb7a88e7f6ffe9d05161fd3ca4e653dcebbdfa122a3"
       ],
-      "sha256": "4ecc5db0aafb69400cd6dc04f25b616be2237539704944b89fac95d6c0cf2341",
-      "size": 88276
+      "sha256": "400dab605c3bbd1e7a130bb7a88e7f6ffe9d05161fd3ca4e653dcebbdfa122a3",
+      "size": 88396
     },
     {
       "path": "public/shop/js/core.js",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/da/da5769dd5c5bca3d6ad21994b8520d05e5efcd189766581a549a92d0404ca98d",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/59/59db3a65e5504f9a720933f45d8b89abc49027920dec40ef85d313932d84949e",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/da/da5769dd5c5bca3d6ad21994b8520d05e5efcd189766581a549a92d0404ca98d",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/da/da5769dd5c5bca3d6ad21994b8520d05e5efcd189766581a549a92d0404ca98d"
+        "https://update.scum0.cn/release-v1/repository/objects/59/59db3a65e5504f9a720933f45d8b89abc49027920dec40ef85d313932d84949e",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/59/59db3a65e5504f9a720933f45d8b89abc49027920dec40ef85d313932d84949e"
       ],
-      "sha256": "da5769dd5c5bca3d6ad21994b8520d05e5efcd189766581a549a92d0404ca98d",
-      "size": 30697
+      "sha256": "59db3a65e5504f9a720933f45d8b89abc49027920dec40ef85d313932d84949e",
+      "size": 31366
     },
     {
       "path": "public/shop/js/core-events.js",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/16/164c28ff2a19453e25e1f2b9bddc1350dbe1921c5e8c563fe6cf44240e697431",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/0b/0b2870504c400cdaf81fe4bbc3c28c0acb419d7f8bb94ec384557155210bb020",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/16/164c28ff2a19453e25e1f2b9bddc1350dbe1921c5e8c563fe6cf44240e697431",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/16/164c28ff2a19453e25e1f2b9bddc1350dbe1921c5e8c563fe6cf44240e697431"
+        "https://update.scum0.cn/release-v1/repository/objects/0b/0b2870504c400cdaf81fe4bbc3c28c0acb419d7f8bb94ec384557155210bb020",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/0b/0b2870504c400cdaf81fe4bbc3c28c0acb419d7f8bb94ec384557155210bb020"
       ],
-      "sha256": "164c28ff2a19453e25e1f2b9bddc1350dbe1921c5e8c563fe6cf44240e697431",
-      "size": 30470
+      "sha256": "0b2870504c400cdaf81fe4bbc3c28c0acb419d7f8bb94ec384557155210bb020",
+      "size": 31215
     },
     {
       "path": "public/shop/js/errors.js",
@@ -17023,13 +17023,13 @@
     },
     {
       "path": "public/shop/page-loader.js",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/e6/e6cc16e3d2c9a6df0cff61fba54e34ba4e4a90aa0ef3121e1b65dbcd64b86369",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/a7/a7cfbaaf5b131d2138bc382b6e5e432a5d6fd1497b41bf8cf2beced65e95f880",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/e6/e6cc16e3d2c9a6df0cff61fba54e34ba4e4a90aa0ef3121e1b65dbcd64b86369",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/e6/e6cc16e3d2c9a6df0cff61fba54e34ba4e4a90aa0ef3121e1b65dbcd64b86369"
+        "https://update.scum0.cn/release-v1/repository/objects/a7/a7cfbaaf5b131d2138bc382b6e5e432a5d6fd1497b41bf8cf2beced65e95f880",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/a7/a7cfbaaf5b131d2138bc382b6e5e432a5d6fd1497b41bf8cf2beced65e95f880"
       ],
-      "sha256": "e6cc16e3d2c9a6df0cff61fba54e34ba4e4a90aa0ef3121e1b65dbcd64b86369",
-      "size": 7954
+      "sha256": "a7cfbaaf5b131d2138bc382b6e5e432a5d6fd1497b41bf8cf2beced65e95f880",
+      "size": 8451
     },
     {
       "path": "public/shop/pages/account/index.html",
@@ -17083,23 +17083,23 @@
     },
     {
       "path": "public/shop/pages/activity/modals.html",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/4a/4a72595cce10298f37ddb410b27ff84b32db5258de340d55b40d3e7d11fad355",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/a7/a77137de3d915bcc3ab735a49bdf535ce046f22f06bfd321827c521efbd6ece1",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/4a/4a72595cce10298f37ddb410b27ff84b32db5258de340d55b40d3e7d11fad355",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/4a/4a72595cce10298f37ddb410b27ff84b32db5258de340d55b40d3e7d11fad355"
+        "https://update.scum0.cn/release-v1/repository/objects/a7/a77137de3d915bcc3ab735a49bdf535ce046f22f06bfd321827c521efbd6ece1",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/a7/a77137de3d915bcc3ab735a49bdf535ce046f22f06bfd321827c521efbd6ece1"
       ],
-      "sha256": "4a72595cce10298f37ddb410b27ff84b32db5258de340d55b40d3e7d11fad355",
-      "size": 16357
+      "sha256": "a77137de3d915bcc3ab735a49bdf535ce046f22f06bfd321827c521efbd6ece1",
+      "size": 16394
     },
     {
       "path": "public/shop/pages/activity/teleport/index.html",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/6f/6facf147d1f9584ecd8477b30fe83faac685593ac7892e1bb23210ef85249b05",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/2e/2e84ef1c525344bbe2c7b455ab08222c42accb3268e88a1b4460c24fa18c7f85",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/6f/6facf147d1f9584ecd8477b30fe83faac685593ac7892e1bb23210ef85249b05",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/6f/6facf147d1f9584ecd8477b30fe83faac685593ac7892e1bb23210ef85249b05"
+        "https://update.scum0.cn/release-v1/repository/objects/2e/2e84ef1c525344bbe2c7b455ab08222c42accb3268e88a1b4460c24fa18c7f85",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/2e/2e84ef1c525344bbe2c7b455ab08222c42accb3268e88a1b4460c24fa18c7f85"
       ],
-      "sha256": "6facf147d1f9584ecd8477b30fe83faac685593ac7892e1bb23210ef85249b05",
-      "size": 6345
+      "sha256": "2e84ef1c525344bbe2c7b455ab08222c42accb3268e88a1b4460c24fa18c7f85",
+      "size": 6367
     },
     {
       "path": "public/shop/pages/activity/teleport/modals.html",
@@ -17183,23 +17183,23 @@
     },
     {
       "path": "public/shop/styles.css",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/74/7460b2394d18a26f4b5a962ddbcb0c3babd086d7177f26394050af50f99b0771",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/b2/b2602eefc0c97960a5a3800ace7b63def0b718443c1a44094e87970fb5e48e92",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/74/7460b2394d18a26f4b5a962ddbcb0c3babd086d7177f26394050af50f99b0771",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/74/7460b2394d18a26f4b5a962ddbcb0c3babd086d7177f26394050af50f99b0771"
+        "https://update.scum0.cn/release-v1/repository/objects/b2/b2602eefc0c97960a5a3800ace7b63def0b718443c1a44094e87970fb5e48e92",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/b2/b2602eefc0c97960a5a3800ace7b63def0b718443c1a44094e87970fb5e48e92"
       ],
-      "sha256": "7460b2394d18a26f4b5a962ddbcb0c3babd086d7177f26394050af50f99b0771",
-      "size": 162433
+      "sha256": "b2602eefc0c97960a5a3800ace7b63def0b718443c1a44094e87970fb5e48e92",
+      "size": 164087
     },
     {
       "path": "public/styles.css",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/4f/4f8dd448d2e7ffd7270567338b82637864068d7a3fc280b39885c84e83ead174",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/ad/ad58030bed39b5a0daaf553d591834bd2ce5107c0798de5111f2e3ad83b31236",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/4f/4f8dd448d2e7ffd7270567338b82637864068d7a3fc280b39885c84e83ead174",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/4f/4f8dd448d2e7ffd7270567338b82637864068d7a3fc280b39885c84e83ead174"
+        "https://update.scum0.cn/release-v1/repository/objects/ad/ad58030bed39b5a0daaf553d591834bd2ce5107c0798de5111f2e3ad83b31236",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/ad/ad58030bed39b5a0daaf553d591834bd2ce5107c0798de5111f2e3ad83b31236"
       ],
-      "sha256": "4f8dd448d2e7ffd7270567338b82637864068d7a3fc280b39885c84e83ead174",
-      "size": 83313
+      "sha256": "ad58030bed39b5a0daaf553d591834bd2ce5107c0798de5111f2e3ad83b31236",
+      "size": 84414
     },
     {
       "path": "resources/scum-rcon/SCUMRCON.dll",
@@ -17963,12 +17963,12 @@
     },
     {
       "path": "src/app.js",
-      "url": "https://update.scum0.cn/release-v1/repository/objects/70/702597a45e602f3c280f78074f7a1b04f991a40ad50b18871288846aa72dbb58",
+      "url": "https://update.scum0.cn/release-v1/repository/objects/ca/ca470e9986b968e1246fa9bec625b79e843063331301a70c38cb67425760f20a",
       "urls": [
-        "https://update.scum0.cn/release-v1/repository/objects/70/702597a45e602f3c280f78074f7a1b04f991a40ad50b18871288846aa72dbb58",
-        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/70/702597a45e602f3c280f78074f7a1b04f991a40ad50b18871288846aa72dbb58"
+        "https://update.scum0.cn/release-v1/repository/objects/ca/ca470e9986b968e1246fa9bec625b79e843063331301a70c38cb67425760f20a",
+        "https://raw.githubusercontent.com/li1164763436/scum-shop-release-/main/repository/objects/ca/ca470e9986b968e1246fa9bec625b79e843063331301a70c38cb67425760f20a"
       ],
-      "sha256": "702597a45e602f3c280f78074f7a1b04f991a40ad50b18871288846aa72dbb58",
+      "sha256": "ca470e9986b968e1246fa9bec625b79e843063331301a70c38cb67425760f20a",
       "size": 104562
     },
     {
@@ -19031,7 +19031,9 @@
     ]
   },
   "notes": [
-    "载具保险独立保单与销售解耦"
+    "修复商城前台刷新非首页时等待接口期间停留首页的问题。",
+    "修复管理后台刷新非运行总览页面时短暂显示默认页面的问题。",
+    "保持认证、权限、业务请求、客户数据、固定更新器和服务配置不变。"
   ],
   "notices": [
     "日常在线更新只下载本地校验码不一致的对象，校验码一致的文件不会重复下载。",
@@ -19041,9 +19043,9 @@
     "发布顺序固定为对象、版本清单、完整版 ZIP、version.json，任何校验失败都不会切换正式版本。"
   ],
   "full": {
-    "url": "https://update.scum0.cn/release-v1/full/scum-shop-1.0.1-r15.zip",
-    "sha256": "1dede1675b0d628a6b27571ecb659cdb3627502f57dbf4d94bdd93c20fb3a402",
-    "size": 57219416,
+    "url": "https://update.scum0.cn/release-v1/full/scum-shop-1.0.1-r16.zip",
+    "sha256": "f62c3127708ceaf82049fc52090052db4ffa10ad335aa331778a935a7f204add",
+    "size": 57225865,
     "fileCount": 1898,
     "purpose": "fresh-install-or-repair"
   }
