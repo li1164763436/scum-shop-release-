@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "version": "1.0.1",
-  "releaseRevision": 16,
+  "releaseRevision": 18,
   "files": [
     {
       "path": "SCUM商城控制台.bat",
@@ -10,8 +10,8 @@
     },
     {
       "path": "ScumShopLauncher.exe",
-      "size": 277504,
-      "sha256": "183e1687f0b97bb720ec4e1fee65ea5663df12d3b6e649df31c8dccbf297135b"
+      "size": 286208,
+      "sha256": "5d086cb85575fd8c61e2b9762a395f88d7ef0a300576ffeea5ef84e9c3f36531"
     },
     {
       "path": "data/release-catalog-1.0.0/products.json",
@@ -8085,8 +8085,8 @@
     },
     {
       "path": "package.json",
-      "size": 2404,
-      "sha256": "cd99ad7b149ae0550c5a01008b13de2166f812af765e4822d0549f1eb8793814"
+      "size": 3019,
+      "sha256": "a705b4909932fcf402d3edc7c75cef60533328e9d14a644c5c0f94e121ebb8fb"
     },
     {
       "path": "public/app.js",
@@ -8201,7 +8201,7 @@
     {
       "path": "public/index.html",
       "size": 9176,
-      "sha256": "9a109294487dbd5da9b467c1000c7db966dbafb48c0a62fb50d96daee26f7930"
+      "sha256": "fe9dcbf8822163c279f94a0246ba6099674dd4f48200fa2c92ef35c130ddb088"
     },
     {
       "path": "public/js/commerce/activities-lottery.js",
@@ -8285,8 +8285,8 @@
     },
     {
       "path": "public/js/players/accounts.js",
-      "size": 21790,
-      "sha256": "8983ab826a7d25e96313ebbb3593d1381989c5e8a59a9223646ed7654d6b1e84"
+      "size": 21912,
+      "sha256": "bf6c39a1cdc502a572b04cc70656e96384009fcbdd9d94bb1b8553823e478d1f"
     },
     {
       "path": "public/js/players/membership.js",
@@ -8316,7 +8316,7 @@
     {
       "path": "public/page-loader.js",
       "size": 3891,
-      "sha256": "6db8ab4f8fda06173d4c4ea8ed479fb4eff1f9dce9b793ddf5395639ba19467a"
+      "sha256": "c427fbbc2086a55c44ac1e0f127d70d5f276e37570d09511ad1484eb18884639"
     },
     {
       "path": "public/pages/commerce/activities-lottery.html",
@@ -8460,8 +8460,8 @@
     },
     {
       "path": "public/shop/css/teleport.css",
-      "size": 14921,
-      "sha256": "828837f7199aafc8d7cf537789903d1e79b6a1fefffc3a48d61dbdb587d39188"
+      "size": 14817,
+      "sha256": "3d12eecd5ed88cbce915b71963a1d5f9f92c521d1801c464dcb55a394f2c3577"
     },
     {
       "path": "public/shop/index.html",
@@ -8610,8 +8610,8 @@
     },
     {
       "path": "resources/scum-rcon/SCUMRCONAdapter.dll",
-      "size": 508928,
-      "sha256": "ebcc19623438bc1439affe7ca048a2ba7de6ba2f95dca6d11d0d8baab53b31ef"
+      "size": 511488,
+      "sha256": "a261785ef51e5803f93543737edeef9f117fa67e828d40e2ce1861ce7366bbe4"
     },
     {
       "path": "resources/scum-rcon/version.dll",
@@ -8620,8 +8620,8 @@
     },
     {
       "path": "scripts/apply-version-update.ps1",
-      "size": 11493,
-      "sha256": "6f5e507386f2435138b7a11d06f77b7673e19eec9891a9ef6f2dc660daf0db32"
+      "size": 11587,
+      "sha256": "45ce5a9e20f68ff4079ec3709da07c05fc13216d680257675468862cadd8743c"
     },
     {
       "path": "scripts/audit-account-migration.js",
@@ -8635,8 +8635,8 @@
     },
     {
       "path": "scripts/build-brand-icons.ps1",
-      "size": 1684,
-      "sha256": "09a95c856e456b168e970f904795a0f925686f6e214db521c67b556a87551cc7"
+      "size": 1712,
+      "sha256": "115639057555a1c5f05c3c892dbea5b496b1c1a92040c531ec09a650bbc629ee"
     },
     {
       "path": "scripts/calibrate-teleport-map.js",
@@ -8644,14 +8644,19 @@
       "sha256": "f99e0f47c7025c4aba063694580d73edc3a5f6e85e06479f4a248c0104ec50ab"
     },
     {
+      "path": "scripts/complete-installed-migration.ps1",
+      "size": 245,
+      "sha256": "718ea6267667af31e49d8aa18809606bd8840143dbf7b60ca872883b26ed6b75"
+    },
+    {
       "path": "scripts/control-services.ps1",
       "size": 9229,
-      "sha256": "1f12993e3ebf9230a551e2074f97bfca565047584bf46aa363e45f7b02da7d9f"
+      "sha256": "9fbf8ea65c61f2aa5c2bc4397764fc9598bfc68ff725e989c7ac707e3cfaf9b4"
     },
     {
       "path": "scripts/database-control.js",
-      "size": 1866,
-      "sha256": "4730fa3cd6f3b4246e053e8d8137955eebf326c45f730d107bb104054648512d"
+      "size": 1804,
+      "sha256": "6e7b3c35f4219fcabd6049f4481551a940171db8a7bc32277365c848eb96c8ae"
     },
     {
       "path": "scripts/export-current-product-catalog.mjs",
@@ -8685,8 +8690,8 @@
     },
     {
       "path": "scripts/import-one-handed-items.js",
-      "size": 6851,
-      "sha256": "aae12abcd6737cb2fff33d5022ad194c074015ed801458604f8c12d304a475c6"
+      "size": 6742,
+      "sha256": "8c53b209aad3e0ae306a60be979b5cfea713d95128abb7b32b7d2ad875b9dc97"
     },
     {
       "path": "scripts/import-scum8-admin-commands.js",
@@ -8695,8 +8700,8 @@
     },
     {
       "path": "scripts/import-scum8-all.js",
-      "size": 5988,
-      "sha256": "62c415156f268f3f5f314a994ce9f118b354ba32e70337a01abfdb8105cbd621"
+      "size": 5943,
+      "sha256": "426b8b8ce6c35e02c394bfc8421ea42c65addf8dcab934ceb3aaa346af6c0fe0"
     },
     {
       "path": "scripts/inspect-teleport-consent-table.js",
@@ -8725,8 +8730,8 @@
     },
     {
       "path": "scripts/migrate-product-images-by-category.js",
-      "size": 4265,
-      "sha256": "14ddc2f27d33dfbc0e6608f7086bfb9ec974bbead09a8966f93a4e3a7d90faa6"
+      "size": 4220,
+      "sha256": "8078736fbbf253f34679356d3694dba8ef637a5ec910c06655dc2303e44cfb99"
     },
     {
       "path": "scripts/migrate-schema.js",
@@ -8760,8 +8765,8 @@
     },
     {
       "path": "scripts/python/LICENSE.txt",
-      "size": 36874,
-      "sha256": "e502c6b880ff58d614901495a9009c136539cd0b1e2a2abb8fc00b934c203419"
+      "size": 36937,
+      "sha256": "8bfef083a7b907c6f7f719e1105c661d9cdf33a57d2022ec5bf4f645262f160a"
     },
     {
       "path": "scripts/python/_asyncio.pyd",
@@ -8955,8 +8960,13 @@
     },
     {
       "path": "scripts/restart-store.ps1",
-      "size": 3852,
-      "sha256": "7d022f0c5194a28c4e0d7e0d73690e05e9f89a746276ec75a079bf72c99ab23d"
+      "size": 3818,
+      "sha256": "1c7fe94b2cc3376b10f59c88f79d92d3801b728c6e616ef69827ef6eb930e724"
+    },
+    {
+      "path": "scripts/rollback-to-legacy-runtime.ps1",
+      "size": 236,
+      "sha256": "0a0839f7728563f039b4e9b9869647a3aa5b09fa2501509ee824b6cbced011c6"
     },
     {
       "path": "scripts/sign-release-manifest.js",
@@ -8964,9 +8974,19 @@
       "sha256": "b52f591552f6c75233ff8b3e74b998f8d5f9c4ee73e79a6b55370b73906339af"
     },
     {
+      "path": "scripts/sync-build-workspace.ps1",
+      "size": 2332,
+      "sha256": "b744623cae434ccc79c500086e858427e0662a6e21d7a30926639065d9fdbd27"
+    },
+    {
       "path": "scripts/update-insurance-catalog-categories.js",
       "size": 1388,
       "sha256": "e2cc2c2a3c70a6d70924e3b10b1fe59528bcbb4dac6549b0c21b33a5fba26565"
+    },
+    {
+      "path": "scripts/verify-installed-runtime.ps1",
+      "size": 2140,
+      "sha256": "e6442b5dfbd56194cdeb3dbe27bda259707534d2d1f5b7fcca09f8a83bc31936"
     },
     {
       "path": "scripts/verify-vehicle-compatibility-views.js",
@@ -8980,8 +9000,8 @@
     },
     {
       "path": "src/business-runtime.js",
-      "size": 13331,
-      "sha256": "ce063606808c4a760968afddca768262e5d34671accc74a60a1829970a179f4d"
+      "size": 13837,
+      "sha256": "1a34899f793ac450078dd769006acc17d1e7456f7f789e604f96dfc74e442059"
     },
     {
       "path": "src/resources/scum-rcon/SCUMRCON.dll",
@@ -8990,8 +9010,8 @@
     },
     {
       "path": "src/resources/scum-rcon/SCUMRCONAdapter.dll",
-      "size": 508928,
-      "sha256": "ebcc19623438bc1439affe7ca048a2ba7de6ba2f95dca6d11d0d8baab53b31ef"
+      "size": 511488,
+      "sha256": "a261785ef51e5803f93543737edeef9f117fa67e828d40e2ce1861ce7366bbe4"
     },
     {
       "path": "src/resources/scum-rcon/version.dll",
@@ -9060,8 +9080,8 @@
     },
     {
       "path": "src/services/commerce-service.js",
-      "size": 110984,
-      "sha256": "40dcb9845908d4c2a0f4a2f023d96edbdd24727e0b528c109900e7d28cda3127"
+      "size": 111032,
+      "sha256": "644cb34ad3260fc014ada4dd101bbcaa9b68345fc31a595413067739acb0e8d5"
     },
     {
       "path": "src/services/config-store.js",
@@ -9070,8 +9090,8 @@
     },
     {
       "path": "src/services/database-backups.js",
-      "size": 13698,
-      "sha256": "6023037bd51c50c447c8a54b5bf76b29480c7fc7fdc3f9594d391396d83b393d"
+      "size": 13570,
+      "sha256": "15b5862c00cd5ea44f9e8e26bf5dd3c831872c8e4c8e41a7dfaffdaa497ee030"
     },
     {
       "path": "src/services/database.js",
@@ -9080,8 +9100,8 @@
     },
     {
       "path": "src/services/deletion-service.js",
-      "size": 12613,
-      "sha256": "d86f1740ec82365614485f913b824f3f3326b60fa93bee104e4e5fed070c4dba"
+      "size": 12431,
+      "sha256": "d45f169074682593be075989ce963dc334c35f6755ef01ee9b75c1424717331a"
     },
     {
       "path": "src/services/delivery-notification.js",
@@ -9095,8 +9115,8 @@
     },
     {
       "path": "src/services/domain-tunnel-service.js",
-      "size": 20379,
-      "sha256": "08261a2e585d974606dd83146fe574139d50be540b5857723315d15804bdd29a"
+      "size": 20636,
+      "sha256": "a73d8e0bbcb707470ceb51bb6e28a41d44ab5ac21784d98fc2d97b4d3c4a40a3"
     },
     {
       "path": "src/services/fulfillment-worker.js",
@@ -9165,13 +9185,13 @@
     },
     {
       "path": "src/services/license-runtime.js",
-      "size": 1359,
-      "sha256": "199eac6a4b13cdc9edd1574b035c71b730800d4486210afc0b5a3f662f0b7fb4"
+      "size": 1317,
+      "sha256": "05f5be7412e310e0749c078ca2186e77b446fdb1cb0c220b52c95719fbc09947"
     },
     {
       "path": "src/services/license-store.js",
-      "size": 3437,
-      "sha256": "ea9cff38620764166ab7fda04ceef0f0418b9be8f32dce8f23be7e55f220a7fe"
+      "size": 3350,
+      "sha256": "787eb580cb5e92704155ba6cf1e790e195c768cd8610726ceab4584b35e01cad"
     },
     {
       "path": "src/services/license-trust.js",
@@ -9265,8 +9285,8 @@
     },
     {
       "path": "src/services/runtime-host.js",
-      "size": 8113,
-      "sha256": "cbb54a844617251cae9659165c74eeb537ffaadb0b0e9aa8d311131fa2d0aa45"
+      "size": 8323,
+      "sha256": "c568ff39b51fee717ad03e1267bed6d9f4ea903e41d95653dae147a254dafa21"
     },
     {
       "path": "src/services/schema.js",
@@ -9492,6 +9512,6 @@
   "signature": {
     "algorithm": "ecdsa-p256-sha256",
     "keyId": "release-2026-01",
-    "value": "FeZ1AJ7j07AQEKBX154/4WENCSCjBzNr1+OQOx1ipNhKSyppOKU5N8Dq28hq/F5lsBeLkOXsM1I02/DZPH266Q=="
+    "value": "rk+mz1J82JTdmhUO6KL1I6e1tgCT3GGhbf9TJ0N2YZVBWh3pdWIvZ3xvrOZ681HfKP3IFHKTp4iaqrJNVSHK/Q=="
   }
 }
