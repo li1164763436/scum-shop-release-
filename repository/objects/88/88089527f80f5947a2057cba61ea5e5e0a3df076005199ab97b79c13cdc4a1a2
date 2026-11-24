@@ -1,0 +1,258 @@
+import net from 'node:net';
+
+const TYPE_RESPONSE = 0;
+const TYPE_COMMAND = 2;
+const TYPE_AUTH = 3;
+const MIN_PACKET_SIZE = 10;
+
+export function encodeRconPacket(id, type, body = '', maxPacketSize = 1024 * 1024) {
+  const text = Buffer.from(String(body), 'utf8');
+  const size = text.length + 10;
+  if (size > maxPacketSize) throw new Error('RCON 数据包超过最大限制');
+  const packet = Buffer.allocUnsafe(size + 4);
+  packet.writeInt32LE(size, 0);
+  packet.writeInt32LE(id, 4);
+  packet.writeInt32LE(type, 8);
+  text.copy(packet, 12);
+  packet.writeInt16LE(0, packet.length - 2);
+  return packet;
+}
+
+export function decodeRconPackets(buffer, maxPacketSize = 1024 * 1024) {
+  const packets = [];
+  let offset = 0;
+  while (buffer.length - offset >= 4) {
+    const size = buffer.readInt32LE(offset);
+    if (size < MIN_PACKET_SIZE) throw new Error('RCON 数据包长度无效');
+    if (size > maxPacketSize) throw new Error('RCON 数据包超过最大限制');
+    if (buffer.length - offset < size + 4) break;
+    const end = offset + size + 4;
+    if (buffer[end - 2] !== 0 || buffer[end - 1] !== 0) throw new Error('RCON 数据包终止符无效');
+    packets.push({
+      id: buffer.readInt32LE(offset + 4),
+      type: buffer.readInt32LE(offset + 8),
+      body: buffer.toString('utf8', offset + 12, end - 2)
+    });
+    offset = end;
+  }
+  return { packets, remaining: buffer.subarray(offset) };
+}
+
+function timeoutError(message) {
+  return Object.assign(new Error(message), { code: 'ETIMEDOUT' });
+}
+
+export class SourceRconClient {
+  constructor(config = {}, reconnect = {}) {
+    this.config = {
+      host: '127.0.0.1',
+      connectTimeoutMs: 5000,
+      authTimeoutMs: 5000,
+      commandTimeoutMs: 5000,
+      maxPacketSize: 1024 * 1024,
+      responseQuietMs: 100,
+      ...config
+    };
+    this.reconnect = reconnect;
+    this.socket = null;
+    this.buffer = Buffer.alloc(0);
+    this.pending = null;
+    this.authenticated = false;
+    this.nextId = 1;
+    this.highPriorityQueue = [];
+    this.normalPriorityQueue = [];
+    this.queueRunning = false;
+    this.closed = false;
+  }
+
+  enqueue(operation, priority = 'normal') {
+    const pending = new Promise((resolve, reject) => {
+      const queue = priority === 'high' ? this.highPriorityQueue : this.normalPriorityQueue;
+      queue.push({ operation, resolve, reject });
+      this.drainQueue();
+    });
+    pending.catch(() => {});
+    return pending;
+  }
+
+  async drainQueue() {
+    if (this.queueRunning) return;
+    this.queueRunning = true;
+    try {
+      while (this.highPriorityQueue.length || this.normalPriorityQueue.length) {
+        const item = this.highPriorityQueue.shift() || this.normalPriorityQueue.shift();
+        try { item.resolve(await item.operation()); }
+        catch (error) { item.reject(error); }
+      }
+    } finally {
+      this.queueRunning = false;
+      if (this.highPriorityQueue.length || this.normalPriorityQueue.length) this.drainQueue();
+    }
+  }
+
+  async connect() {
+    if (this.authenticated && this.socket && !this.socket.destroyed) return;
+    if (!this.config.noPasswordAuth && !this.config.password) throw new Error('RCON 密码未配置');
+    this.closed = false;
+    await this.openSocket();
+    if (!this.config.noPasswordAuth) await this.authenticate();
+    else this.authenticated = true;
+  }
+
+  openSocket() {
+    return new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: this.config.host, port: this.config.port });
+      this.socket = socket;
+      this.buffer = Buffer.alloc(0);
+      let settled = false;
+      const timer = setTimeout(() => finish(timeoutError('RCON 连接超时')), this.config.connectTimeoutMs);
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.off('connect', onConnect);
+        socket.off('error', onInitialError);
+        if (error) { socket.destroy(); reject(error); } else resolve();
+      };
+      const onConnect = () => finish();
+      const onInitialError = (error) => finish(error);
+      socket.once('connect', onConnect);
+      socket.once('error', onInitialError);
+      socket.on('data', (chunk) => { if (this.socket === socket) this.onData(chunk); });
+      socket.on('error', (error) => { if (this.socket === socket) this.onSocketFailure(error); });
+      socket.on('close', () => { if (this.socket === socket) this.onSocketFailure(Object.assign(new Error('RCON 连接已关闭'), { code: 'ECONNRESET' })); });
+    });
+  }
+
+  onData(chunk) {
+    try {
+      this.buffer = Buffer.concat([this.buffer, chunk]);
+      const decoded = decodeRconPackets(this.buffer, this.config.maxPacketSize);
+      this.buffer = decoded.remaining;
+      for (const packet of decoded.packets) this.onPacket(packet);
+    } catch (error) {
+      this.onSocketFailure(error);
+      this.socket?.destroy();
+    }
+  }
+
+  onPacket(packet) {
+    const pending = this.pending;
+    if (!pending) return;
+    if (pending.kind === 'auth') {
+      if (packet.type !== TYPE_COMMAND) return;
+      if (packet.id === -1) return pending.reject(new Error('RCON 认证失败：密码错误；若刚生成并保存新密钥，请先重启 SCUM 游戏服务端'));
+      if (packet.id === pending.id) pending.resolve(packet);
+      return;
+    }
+    if (packet.id !== pending.id || ![TYPE_RESPONSE, TYPE_COMMAND].includes(packet.type)) return;
+    pending.parts.push(packet.body);
+    clearTimeout(pending.quietTimer);
+    pending.quietTimer = setTimeout(() => pending.resolve(pending.parts.join('')), this.config.responseQuietMs);
+  }
+
+  onSocketFailure(error) {
+    this.authenticated = false;
+    if (this.pending) this.pending.reject(error);
+  }
+
+  waitFor(kind, id, timeoutMs) {
+    if (this.pending) throw new Error('RCON 内部状态冲突');
+    const response = new Promise((resolve, reject) => {
+      const pending = { kind, id, parts: [], quietTimer: null, settled: false };
+      const finish = (handler, value) => {
+        if (pending.settled) return;
+        pending.settled = true;
+        clearTimeout(pending.timer);
+        clearTimeout(pending.quietTimer);
+        if (this.pending === pending) this.pending = null;
+        handler(value);
+      };
+      pending.resolve = (value) => finish(resolve, value);
+      pending.reject = (error) => finish(reject, error);
+      pending.timer = setTimeout(() => pending.reject(timeoutError(kind === 'auth' ? 'RCON 认证超时' : 'RCON 命令响应超时')), timeoutMs);
+      this.pending = pending;
+    });
+    response.catch(() => {});
+    return response;
+  }
+
+  async writePacket(id, type, body) {
+    const socket = this.socket;
+    if (!socket || socket.destroyed || socket.writableEnded || !socket.writable) {
+      throw Object.assign(new Error('RCON 连接已关闭'), { code: 'ECONNRESET' });
+    }
+    const packet = encodeRconPacket(id, type, body, this.config.maxPacketSize);
+    await new Promise((resolve, reject) => socket.write(packet, (error) => error ? reject(error) : resolve()));
+  }
+
+  async authenticate() {
+    const id = this.nextRequestId();
+    const response = this.waitFor('auth', id, this.config.authTimeoutMs);
+    try {
+      await this.writePacket(id, TYPE_AUTH, this.config.password);
+      await response;
+      this.authenticated = true;
+    } catch (error) {
+      this.pending?.reject(error);
+      this.socket?.destroy();
+      throw error;
+    }
+  }
+
+  nextRequestId() {
+    const id = this.nextId;
+    this.nextId = this.nextId >= 0x7ffffffe ? 1 : this.nextId + 1;
+    return id;
+  }
+
+  command(command, options = {}) {
+    return this.enqueue(() => this.executeWithReconnect(command, options), options.priority);
+  }
+
+  async executeWithReconnect(command, { retry = true, timeoutMs = this.config.commandTimeoutMs } = {}) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('RCON 命令超时配置无效');
+    const attempts = retry && this.reconnect.enabled !== false ? (this.reconnect.maxAttempts || 2) : 1;
+    let lastError;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      let written = false;
+      try {
+        await this.connect();
+        const id = this.nextRequestId();
+        const response = this.waitFor('command', id, timeoutMs);
+        try {
+          await this.writePacket(id, TYPE_COMMAND, command);
+          written = true;
+          return await response;
+        } catch (error) {
+          this.pending?.reject(error);
+          throw error;
+        }
+      } catch (error) {
+        lastError = error;
+        this.socket?.destroy();
+        this.socket = null;
+        this.authenticated = false;
+        if (!retry && written) {
+          error.uncertainDelivery = true;
+          error.message = `RCON 命令已写入但结果不确定：${error.message}`;
+          throw error;
+        }
+        if (attempt >= attempts) throw error;
+      }
+    }
+    throw lastError;
+  }
+
+  close() {
+    this.closed = true;
+    this.authenticated = false;
+    this.pending?.reject(new Error('RCON 客户端已关闭'));
+    this.socket?.destroy();
+    this.socket = null;
+    const error = new Error('RCON 客户端已关闭');
+    for (const item of [...this.highPriorityQueue, ...this.normalPriorityQueue]) item.reject(error);
+    this.highPriorityQueue = [];
+    this.normalPriorityQueue = [];
+  }
+}
