@@ -1,0 +1,87 @@
+const pageFragments = ["/admin/pages/commerce/products.html","/admin/pages/commerce/cloud-warehouse.html?v=202611060002","/admin/pages/commerce/starter-gift.html?v=202611111118","/admin/pages/commerce/redeem-codes.html","/admin/pages/commerce/rewards.html","/admin/pages/commerce/activities-lottery.html?v=202611111010","/admin/pages/commerce/stock-market.html?v=202611050012","/admin/pages/overview/dashboard.html?v=202611070001","/admin/pages/fulfillment/orders.html","/admin/pages/fulfillment/game-claims.html?v=202611080014","/admin/pages/fulfillment/announcements.html?v=202611080024","/admin/pages/fulfillment/operations.html","/admin/pages/operations/store-settings.html","/admin/pages/players/membership.html?v=202611070003","/admin/pages/players/vehicle-management.html?v=202611151358","/admin/pages/players/teleport-management.html?v=202611161500","/admin/pages/players/accounts.html?v=202611060004","/admin/pages/operations/gateway.html","/admin/pages/system/config.html?v=202611171510","/admin/pages/system/domain-access.html?v=202611180846"];
+const adminScripts = ["/admin/js/core.js?v=202611151215","/admin/js/fulfillment/operations.js?v=202611111900","/admin/js/system/config.js?v=202611080002","/admin/js/fulfillment/game-claims.js?v=202611080015","/admin/js/fulfillment/announcements.js?v=202611080024","/admin/js/overview/dashboard.js?v=202611060002","/admin/js/commerce/products.js?v=202611111106","/admin/js/commerce/starter-gift.js?v=202611111950","/admin/js/commerce/redeem-codes.js","/admin/js/commerce/rewards.js","/admin/js/players/accounts.js?v=202611060019","/admin/js/players/membership.js?v=202611070004","/admin/js/players/vehicle-management.js?v=202611151358","/admin/js/players/teleport-management.js?v=202611161500","/admin/js/fulfillment/orders.js","/admin/js/commerce/activities-lottery.js?v=202611111020","/admin/js/operations/store-settings.js","/admin/js/operations/gateway.js","/admin/js/system/domain-access.js?v=202611180846","/admin/js/commerce/stock-market.js?v=202611050023","/admin/js/commerce/cloud-warehouse.js?v=202611060002","/admin/js/core-events.js?v=202611110410","/admin/app.js?v=202611060007"];
+const adminAssetVersion = '202611231925';
+const cacheUrl = (url, version) => url + (url.includes('?') ? '&' : '?') + 'v=' + version;
+async function loadAdminScriptsInOrder() {
+  const sources = adminScripts.map((url) => cacheUrl(url, adminAssetVersion));
+  const preloads = sources.map((source) => {
+    const link = document.createElement('link');
+    link.rel = 'preload';
+    link.as = 'script';
+    link.href = source;
+    document.head.append(link);
+    return link;
+  });
+  try {
+    for (const [index, source] of sources.entries()) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.async = false;
+        script.src = source;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('脚本加载失败：' + adminScripts[index]));
+        document.body.append(script);
+      });
+    }
+  } finally {
+    preloads.forEach((link) => link.remove());
+  }
+}
+async function loadPageFragments() {
+  const mount = document.getElementById('pageMount');
+  mount.hidden = true;
+  try {
+    const responses = await Promise.all(pageFragments.map((url) => fetch(cacheUrl(url, adminAssetVersion))));
+    const failed = responses.find((response) => !response.ok);
+    if (failed) throw new Error(failed.url + '（HTTP ' + failed.status + '）');
+    mount.innerHTML = (await Promise.all(responses.map((response) => response.text()))).join('');
+    await loadAdminScriptsInOrder();
+  } catch (error) {
+    mount.hidden = false;
+    mount.innerHTML = '<section class="card"><h2>页面加载失败</h2><p>后台文件加载失败，请刷新页面。</p></section>'; console.error(error);
+  }
+}
+loadPageFragments();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

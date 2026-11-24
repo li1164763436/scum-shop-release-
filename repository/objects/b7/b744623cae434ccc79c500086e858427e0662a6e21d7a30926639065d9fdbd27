@@ -1,0 +1,58 @@
+﻿#requires -Version 5.1
+[CmdletBinding()]
+param(
+  [ValidateSet('Sync','Check','Build')][string]$Action = 'Check',
+  [string]$SourceRoot,
+  [string]$BuildRoot,
+  [string]$ManifestUrl = 'https://update.scum0.cn/release-v1/version.json',
+  [string]$NodeSource = 'C:\Program Files\nodejs\node.exe',
+  [string]$MySqlSource = 'C:\Program Files\MySQL\MySQL Server 8.4',
+  [switch]$SkipTests
+)
+$ErrorActionPreference = 'Stop'
+if (-not $SourceRoot) { $SourceRoot = Split-Path -Parent $PSScriptRoot }
+$SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
+if (-not $BuildRoot) { $BuildRoot = Join-Path (Split-Path -Parent $SourceRoot) '构建' }
+$BuildRoot = [IO.Path]::GetFullPath($BuildRoot)
+$installerSource = Join-Path $SourceRoot 'installer'
+$packageRoot = Join-Path $BuildRoot 'PackagedApp'
+$installerTarget = Join-Path $packageRoot 'installer'
+$sourceLink = Join-Path $BuildRoot 'ShopSource'
+
+if (-not (Test-Path -LiteralPath (Join-Path $installerSource 'build-installer.ps1') -PathType Leaf)) {
+  throw "仓库缺少安装器源文件：$installerSource"
+}
+New-Item -ItemType Directory -Force -Path $BuildRoot,$packageRoot,$installerTarget | Out-Null
+
+if (Test-Path -LiteralPath $sourceLink) {
+  $item = Get-Item -LiteralPath $sourceLink -Force
+  $target = @($item.Target)[0]
+  if (-not $target -or -not ([IO.Path]::GetFullPath($target).Equals($SourceRoot, [StringComparison]::OrdinalIgnoreCase))) {
+    throw "构建源码链接已存在但目标不正确：$sourceLink"
+  }
+} else {
+  New-Item -ItemType Junction -Path $sourceLink -Target $SourceRoot | Out-Null
+}
+
+& robocopy.exe $installerSource $installerTarget /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:1 /XD '.tools' 'staging-*' /XF '*.log' /NFL /NDL /NP | Out-Null
+if ($LASTEXITCODE -gt 7) { throw "同步安装器工作区失败，robocopy 退出码：$LASTEXITCODE" }
+
+if ($Action -eq 'Sync') {
+  Write-Host "构建工作区已同步：$packageRoot"
+  exit 0
+}
+if ($Action -eq 'Check') {
+  & (Join-Path $installerTarget 'test-installer.ps1') -SourceRoot $SourceRoot -PackageRoot $packageRoot
+  exit $LASTEXITCODE
+}
+
+$parameters = @{
+  SourceRoot = $SourceRoot
+  PackageRoot = $packageRoot
+  ManifestUrl = $ManifestUrl
+  NodeSource = $NodeSource
+  MySqlSource = $MySqlSource
+  SkipTests = $SkipTests
+}
+& (Join-Path $installerTarget 'build-installer.ps1') @parameters
+exit $LASTEXITCODE

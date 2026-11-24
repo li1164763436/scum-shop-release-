@@ -1,0 +1,161 @@
+﻿#requires -Version 5.1
+[CmdletBinding()]
+param([string]$InstallRoot, [string]$Action)
+$ErrorActionPreference = 'Stop'
+if (-not $InstallRoot) { $InstallRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
+function Ensure-Admin([string]$RequestedAction) {
+  $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+  if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $args = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',('"{0}"' -f $PSCommandPath),'-InstallRoot',('"{0}"' -f $InstallRoot),'-Action',$RequestedAction)
+    Start-Process powershell.exe -Verb RunAs -ArgumentList ($args -join ' ')
+    exit
+  }
+}
+function Invoke-ServiceAction([string]$RequestedAction) {
+  Ensure-Admin $RequestedAction
+  switch ($RequestedAction) {
+    'start-database' { Start-Service ScumRconMySQL }
+    'start-application' { Start-Service ScumRconBridge; Start-Service ScumRconApp }
+    'start' { Start-Service ScumRconMySQL; Start-Service ScumRconBridge; Start-Service ScumRconApp }
+    'stop' { Stop-Service ScumRconApp -Force -ErrorAction SilentlyContinue; Stop-Service ScumRconBridge -Force -ErrorAction SilentlyContinue; Stop-Service ScumRconMySQL -Force -ErrorAction SilentlyContinue }
+    'restart' { Invoke-ServiceAction stop; Invoke-ServiceAction start }
+  }
+  Write-Host '操作完成。'
+}
+function Show-Status { Get-Service ScumRconMySQL,ScumRconBridge,ScumRconApp -ErrorAction SilentlyContinue | Format-Table Name,Status,StartType -AutoSize }
+function Read-Config { [IO.File]::ReadAllText((Join-Path $InstallRoot 'data\config.json'), (New-Object Text.UTF8Encoding($false))) | ConvertFrom-Json }
+function Backup-Database {
+  Ensure-Admin backup
+  $config = Read-Config
+  $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $target = Join-Path $InstallRoot "backups\scum_shop-$stamp.sql"
+  $defaults = Join-Path $env:TEMP "scum-rcon-dump-$PID.cnf"
+  try {
+    $clientDefaults = @('[client]', "host=$($config.mysql.host)", "port=$($config.mysql.port)", "user=$($config.mysql.user)", "password=$($config.mysql.password)")
+    Set-Content -LiteralPath $defaults -Value $clientDefaults -Encoding ASCII
+    & icacls.exe $defaults /inheritance:r /grant:r ('{0}:(F)' -f $env:USERNAME) '*S-1-5-32-544:(F)' '*S-1-5-18:(F)' | Out-Null
+    $dump = Join-Path $InstallRoot 'runtime\mysql\bin\mysqldump.exe'
+    $stderr = Join-Path $env:TEMP "scum-rcon-dump-$PID.err"
+    $arguments = @(
+      ('"--defaults-extra-file={0}"' -f $defaults),
+      '--single-transaction', '--routines', '--events', '--triggers', '--set-gtid-purged=OFF',
+      [string]$config.mysql.database
+    )
+    $process = Start-Process -FilePath $dump -ArgumentList $arguments -RedirectStandardOutput $target -RedirectStandardError $stderr -Wait -PassThru -NoNewWindow
+    if ($process.ExitCode -ne 0) {
+      $detail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Raw).Trim() } else { '' }
+      Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+      throw "数据库备份失败（退出码 $($process.ExitCode)）：$detail"
+    }
+    Write-Host "备份已保存：$target"
+  } finally {
+    Remove-Item -LiteralPath $defaults -Force -ErrorAction SilentlyContinue
+    if ($stderr) { Remove-Item -LiteralPath $stderr -Force -ErrorAction SilentlyContinue }
+  }
+}
+function Restore-Database {
+  Ensure-Admin restore
+  $source = Read-Host '请输入要导入的 .sql 文件完整路径'
+  $source = $source.Trim('"')
+  if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "导入文件不存在：$source" }
+  $config = Read-Config
+  $defaults = Join-Path $env:TEMP "scum-rcon-import-$PID.cnf"
+  $stderr = Join-Path $env:TEMP "scum-rcon-import-$PID.err"
+  try {
+    $clientDefaults = @('[client]', "host=$($config.mysql.host)", "port=$($config.mysql.port)", "user=$($config.mysql.user)", "password=$($config.mysql.password)")
+    Set-Content -LiteralPath $defaults -Value $clientDefaults -Encoding ASCII
+    & icacls.exe $defaults /inheritance:r /grant:r ('{0}:(F)' -f $env:USERNAME) '*S-1-5-32-544:(F)' '*S-1-5-18:(F)' | Out-Null
+    Stop-Service ScumRconApp -Force -ErrorAction SilentlyContinue
+    Stop-Service ScumRconBridge -Force -ErrorAction SilentlyContinue
+    if ((Get-Service -Name 'ScumRconMySQL').Status -ne 'Running') { Start-Service ScumRconMySQL }
+    $mysql = Join-Path $InstallRoot 'runtime\mysql\bin\mysql.exe'
+    $arguments = @(('"--defaults-extra-file={0}"' -f $defaults), [string]$config.mysql.database)
+    $process = Start-Process -FilePath $mysql -ArgumentList $arguments -RedirectStandardInput $source -RedirectStandardError $stderr -Wait -PassThru -NoNewWindow
+    if ($process.ExitCode -ne 0) {
+      $detail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Raw).Trim() } else { '' }
+      throw "数据库导入失败（退出码 $($process.ExitCode)）：$detail"
+    }
+    Write-Host '数据库导入完成。'
+  } finally {
+    Remove-Item -LiteralPath $defaults -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderr -Force -ErrorAction SilentlyContinue
+  }
+}
+function ConvertTo-PlainText([Security.SecureString]$SecureValue) {
+  $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+  try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) }
+  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
+}
+function Create-InitialSuperAdmin {
+  $username = Read-Host '请输入初始超级管理员用户名'
+  $password = Read-Host '请输入密码（10-128 位）' -AsSecureString
+  $confirmation = Read-Host '请再次输入密码' -AsSecureString
+  $plainPassword = ConvertTo-PlainText $password
+  $plainConfirmation = ConvertTo-PlainText $confirmation
+  try {
+    if ($plainPassword -cne $plainConfirmation) { throw '两次输入的密码不一致' }
+    $env:SCUM_RCON_INITIAL_ADMIN_PASSWORD = $plainPassword
+    & (Join-Path $InstallRoot 'runtime\node\node.exe') (Join-Path $InstallRoot 'scripts\promote-super-admin.js') '--create-initial' '--username' $username
+    if ($LASTEXITCODE -ne 0) { throw '创建初始超级管理员失败' }
+  } finally {
+    Remove-Item Env:\SCUM_RCON_INITIAL_ADMIN_PASSWORD -ErrorAction SilentlyContinue
+    $plainPassword = $null
+    $plainConfirmation = $null
+  }
+}
+function Promote-RegisteredPlayer {
+  $steamId = Read-Host '请输入已注册玩家的 SteamID64'
+  if ($steamId -notmatch '^7656119\d{10}$') { throw 'SteamID64 格式无效' }
+  & (Join-Path $InstallRoot 'runtime\node\node.exe') (Join-Path $InstallRoot 'scripts\promote-super-admin.js') '--steam-id' $steamId '--reason' '客户控制台任命'
+  if ($LASTEXITCODE -ne 0) { throw '设置超级管理员失败' }
+}
+function Promote-Admin {
+  Ensure-Admin promote
+  Write-Host '1 创建初始超级管理员（无需 SteamID，用于首次配置 RCON）'
+  Write-Host '2 将已注册玩家设为超级管理员'
+  switch (Read-Host '请选择') {
+    '1' { Create-InitialSuperAdmin }
+    '2' { Promote-RegisteredPlayer }
+    default { throw '无效选项' }
+  }
+}
+if (-not $Action) { Ensure-Admin console }
+if ($Action -and $Action -ne 'console') {
+  switch ($Action) { 'start-database' { Invoke-ServiceAction start-database }; 'start-application' { Invoke-ServiceAction start-application }; 'start' { Invoke-ServiceAction start }; 'stop' { Invoke-ServiceAction stop }; 'restart' { Invoke-ServiceAction restart }; 'backup' { Backup-Database }; 'restore' { Restore-Database }; 'promote' { Promote-Admin }; default { throw '未知操作' } }
+  exit
+}
+$initialStartSucceeded = $false
+$initialStartError = $null
+try {
+  Invoke-ServiceAction start
+  $initialStartSucceeded = $true
+} catch { $initialStartError = "初始启动服务失败：$($_.Exception.Message)" }
+if ($initialStartSucceeded) { Start-Process 'http://127.0.0.1:3090/' }
+do {
+  Clear-Host
+  Write-Host '=== SCUM 商城控制台 ==='
+  if ($initialStartError) { Write-Host $initialStartError -ForegroundColor Red; $initialStartError = $null }
+  Write-Host '1 启动全部  2 停止全部  3 重启全部  4 查看状态'
+  Write-Host '5 打开商城  6 打开后台  7 设置超级管理员'
+  Write-Host '8 备份数据库  9 导入数据库  L 打开日志目录  0 退出'
+  $choice = Read-Host '请选择'
+  try {
+    switch ($choice) {
+      '1' { Invoke-ServiceAction start }
+      '2' { Invoke-ServiceAction stop }
+      '3' { Invoke-ServiceAction restart }
+      '4' { Show-Status }
+      '5' { Start-Process 'http://127.0.0.1:3090/' }
+      '6' { Start-Process 'http://127.0.0.1:3090/admin/' }
+      '7' { Promote-Admin }
+      '8' { Backup-Database }
+      '9' { Restore-Database }
+      'L' { Start-Process explorer.exe -ArgumentList ('"{0}"' -f (Join-Path $InstallRoot 'logs')) }
+      'l' { Start-Process explorer.exe -ArgumentList ('"{0}"' -f (Join-Path $InstallRoot 'logs')) }
+      '0' { break }
+      default { Write-Host '无效选项。' }
+    }
+  } catch { Write-Host "失败：$($_.Exception.Message)" -ForegroundColor Red }
+  if ($choice -ne '0') { Read-Host '按 Enter 继续' | Out-Null }
+} while ($choice -ne '0')

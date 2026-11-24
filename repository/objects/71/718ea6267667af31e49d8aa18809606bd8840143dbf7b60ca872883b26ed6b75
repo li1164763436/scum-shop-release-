@@ -1,0 +1,5 @@
+﻿#requires -version 5.1
+[CmdletBinding()]
+param()
+$ErrorActionPreference = 'Stop'
+throw '旧目录迁移已于 2026-11-24 完成并退役。禁止再次运行迁移切换；请使用正式安装器或更新器维护 C:\ProgramData\ScumRcon。'

@@ -1,0 +1,66 @@
+﻿#requires -Version 5.1
+param([Parameter(Mandatory = $true)][string]$AppRoot)
+$ErrorActionPreference = 'Stop'
+$AppRoot = [IO.Path]::GetFullPath($AppRoot)
+$launcherPath = [IO.Path]::GetFullPath((Join-Path $AppRoot 'ScumShopLauncher.exe'))
+$interactiveUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+if (-not $interactiveUser) {
+  $explorer = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue | Sort-Object SessionId -Descending | Select-Object -First 1
+  if ($explorer) {
+    $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction SilentlyContinue
+    if ($owner.User) { $interactiveUser = if ($owner.Domain) { "$($owner.Domain)\$($owner.User)" } else { [string]$owner.User } }
+  }
+}
+$serviceNames = @('ScumRconMySQL','ScumRconBridge','ScumRconApp')
+$serviceMode = @($serviceNames | Where-Object { Get-Service -Name $_ -ErrorAction SilentlyContinue }).Count -eq $serviceNames.Count
+foreach ($process in Get-CimInstance Win32_Process -Filter "Name='ScumShopLauncher.exe'" -ErrorAction SilentlyContinue) {
+  if ($process.ExecutablePath -and [IO.Path]::GetFullPath($process.ExecutablePath).Equals($launcherPath, [StringComparison]::OrdinalIgnoreCase)) {
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+Start-Sleep -Seconds 3
+if ($serviceMode) {
+  Stop-Service ScumRconApp -Force -ErrorAction SilentlyContinue
+  Stop-Service ScumRconBridge -Force -ErrorAction SilentlyContinue
+  Stop-Service ScumRconMySQL -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+  Start-Service ScumRconMySQL
+  (Get-Service ScumRconMySQL).WaitForStatus('Running',[TimeSpan]::FromSeconds(60))
+  Start-Service ScumRconBridge
+  (Get-Service ScumRconBridge).WaitForStatus('Running',[TimeSpan]::FromSeconds(60))
+  Start-Service ScumRconApp
+  (Get-Service ScumRconApp).WaitForStatus('Running',[TimeSpan]::FromSeconds(60))
+} else {
+  $runtimeRoots = @((Join-Path $AppRoot 'runtime'))
+  foreach ($process in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) {
+    if ($process.Name -notin @('node.exe','mysqld.exe','ScumShopHost.exe')) { continue }
+    if (-not $process.ExecutablePath) { continue }
+    $executable = [IO.Path]::GetFullPath($process.ExecutablePath)
+    $inRuntime = @($runtimeRoots | Where-Object { $executable.StartsWith(([IO.Path]::GetFullPath($_) + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    if (-not $inRuntime) { continue }
+    if ($process.Name -eq 'node.exe' -and $process.CommandLine -notmatch 'src[\/]server[.]js') { continue }
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+  Start-Sleep -Seconds 2
+}
+if ($interactiveUser -and (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
+  $scheduler = New-Object -ComObject 'Schedule.Service'
+  $scheduler.Connect()
+  $task = $scheduler.NewTask(0)
+  $task.RegistrationInfo.Description = 'Restart store desktop launcher after services restart'
+  $task.Principal.UserId = $interactiveUser
+  $task.Principal.LogonType = 3
+  $task.Principal.RunLevel = 1
+  $task.Settings.Enabled = $true
+  $task.Settings.StartWhenAvailable = $true
+  $task.Settings.DeleteExpiredTaskAfter = 'PT1M'
+  $trigger = $task.Triggers.Create(1)
+  $trigger.StartBoundary = (Get-Date).AddSeconds(2).ToString('s')
+  $trigger.EndBoundary = (Get-Date).AddMinutes(5).ToString('s')
+  $action = $task.Actions.Create(0)
+  $action.Path = $launcherPath
+  $action.WorkingDirectory = $AppRoot
+  $name = 'ScumRconLauncherRestart-' + [guid]::NewGuid().ToString('N')
+  $registered = $scheduler.GetFolder('\').RegisterTaskDefinition($name, $task, 6, $null, $null, 3, $null)
+  $registered.Run($null) | Out-Null
+}

@@ -1,0 +1,35 @@
+﻿#requires -Version 5.1
+[CmdletBinding()]
+param(
+  [string]$InstallRoot = 'C:\ProgramData\ScumRcon',
+  [string]$SourceRoot = 'E:\SCUM商城\源码'
+)
+$ErrorActionPreference = 'Stop'
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
+$SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
+$expectedServices = @('ScumRconMySQL','ScumRconBridge','ScumRconApp')
+$services = Get-CimInstance Win32_Service | Where-Object { $expectedServices -contains $_.Name }
+if (@($services).Count -ne 3) { throw '正式安装版服务未完整注册' }
+foreach ($service in $services) {
+  if ($service.StartMode -ne 'Manual') { throw "服务不是手动启动：$($service.Name)" }
+  if ($service.State -ne 'Running') { throw "服务未运行：$($service.Name)" }
+  if ($service.PathName -notlike "*$InstallRoot*") { throw "服务仍引用安装目录之外的文件：$($service.Name)" }
+  if ($service.PathName -like "*$SourceRoot*") { throw "服务引用了 Git 源码目录：$($service.Name)" }
+}
+$response = Invoke-WebRequest -Uri 'http://127.0.0.1:3090/api/health' -UseBasicParsing -TimeoutSec 5
+$health = $response.Content | ConvertFrom-Json
+$healthySubject = $health.data.status -eq 'ok' -or $health.data.subject -eq 'running'
+if ($response.StatusCode -ne 200 -or $health.success -ne $true -or -not $healthySubject) { throw '商城健康检查失败' }
+$listener3307 = Get-NetTCPConnection -State Listen -LocalPort 3307 -ErrorAction SilentlyContinue
+if (-not $listener3307) { throw '正式 MySQL 未监听 3307' }
+$listener3306 = Get-NetTCPConnection -State Listen -LocalPort 3306 -ErrorAction SilentlyContinue
+if ($listener3306) { throw '旧开发 MySQL 仍监听 3306' }
+$sourceProcesses = Get-CimInstance Win32_Process | Where-Object { ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($SourceRoot, [StringComparison]::OrdinalIgnoreCase)) -or ($_.CommandLine -and $_.CommandLine.Contains($SourceRoot)) }
+if ($sourceProcesses) { throw '仍有进程从 Git 源码目录启动' }
+[pscustomobject]@{
+  InstallRoot = $InstallRoot
+  Health = 'OK'
+  Services = ($expectedServices -join ', ')
+  MySqlPort = 3307
+  SourceProcessCount = 0
+} | Format-List

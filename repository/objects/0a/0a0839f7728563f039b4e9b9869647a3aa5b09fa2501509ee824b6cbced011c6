@@ -1,0 +1,5 @@
+﻿#requires -version 5.1
+[CmdletBinding()]
+param()
+$ErrorActionPreference = 'Stop'
+throw '旧运行目录已于 2026-11-24 退役并删除。禁止回滚到旧源码；请使用正式安装器或更新器的版本备份执行回滚。'
