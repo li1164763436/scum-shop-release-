@@ -1,0 +1,243 @@
+import { randomUUID } from 'node:crypto';
+import { ServiceError } from './commerce-service.js';
+import { buildMessageCommand } from './command-policy.js';
+
+const SOURCE_TYPE = 'scum_locked_vehicle';
+function integer(value, { min, max, name }) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < min || number > max) throw new ServiceError(`${name}必须是 ${min}-${max} 的整数`, 400, 'INVALID_VEHICLE_LIMIT_SETTING');
+  return number;
+}
+
+function vehicleIdentity(vehicle) {
+  return [vehicle.assetId, vehicle.vehicleAlias, vehicle.entityClass].map((value) => String(value || '').trim().toLowerCase()).join('|').slice(0, 500);
+}
+
+function accessTime(vehicle) {
+  const numeric = Number(vehicle.lastAccessTime);
+  const date = new Date(Number.isFinite(numeric) && numeric > 0 && numeric < 10_000_000_000 ? numeric * 1000 : vehicle.lastAccessTime || 0);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
+function oldestFirst(left, right) {
+  return accessTime(left) - accessTime(right) || Number(left.entityId) - Number(right.entityId);
+}
+
+function responseText(result) {
+  const response = result?.response;
+  if (typeof response === 'string') return response;
+  if (typeof response?.response === 'string') return response.response;
+  return '';
+}
+
+function commandSucceeded(result) {
+  return result?.success !== false && responseText(result).split(/\r?\n/).includes('admin_command=executed');
+}
+
+function deliverySucceeded(result) {
+  return result?.success !== false && result?.response?.success !== false;
+}
+
+function safeError(error) {
+  return String(error?.message || error?.code || '载具数量治理执行失败').replace(/[A-Za-z]:\\[^\r\n]*/g, '[路径已隐藏]').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 500);
+}
+
+function groupVehicles(vehicles, removedTasks = []) {
+  const removed = new Map(removedTasks.filter((task) => task.status === 'removed').map((task) => [Number(task.sourceVehicleId), task]));
+  const groups = new Map();
+  for (const vehicle of vehicles) {
+    const task = removed.get(Number(vehicle.entityId));
+    if (task && task.vehicleIdentity === vehicleIdentity(vehicle)) continue;
+    const ownerSteamId = String(vehicle.ownerSteamId);
+    if (!groups.has(ownerSteamId)) groups.set(ownerSteamId, []);
+    groups.get(ownerSteamId).push(vehicle);
+  }
+  for (const group of groups.values()) group.sort(oldestFirst);
+  return groups;
+}
+
+export class VehicleLimitService {
+  constructor({ db, reader = null, clients = null, logger = null, clock = () => Date.now() } = {}) {
+    this.db = db;
+    this.reader = reader;
+    this.clients = clients;
+    this.logger = logger;
+    this.clock = clock;
+  }
+
+  async settings(connection = this.db) {
+    const rows = await connection.query('SELECT `是否启用` AS enabled,`每玩家允许数量` AS allowedCount,`宽限分钟数` AS graceMinutes,`提醒间隔分钟数` AS warningIntervalMinutes,`更新管理员名称` AS updatedBy,`更新时间` AS updatedAt FROM `载具数量治理配置` WHERE `配置编号`=1');
+    return rows[0] || { enabled: 0, allowedCount: 3, graceMinutes: 1440, warningIntervalMinutes: 60, updatedBy: null, updatedAt: null };
+  }
+
+  async saveSettings(input, actor = {}) {
+    const enabled = input?.enabled === true || input?.enabled === 1;
+    const allowedCount = integer(input?.allowedCount, { min: 1, max: 100, name: '每玩家允许数量' });
+    const graceMinutes = integer(input?.graceMinutes, { min: 5, max: 43200, name: '宽限期' });
+    const warningIntervalMinutes = integer(input?.warningIntervalMinutes, { min: 5, max: 1440, name: '提醒间隔' });
+    const actorName = String(actor?.username || actor?.name || 'admin').trim().slice(0, 100);
+    await this.db.query('INSERT INTO `载具数量治理配置` (`配置编号`,`是否启用`,`每玩家允许数量`,`宽限分钟数`,`提醒间隔分钟数`,`更新管理员名称`) VALUES (1,?,?,?,?,?) ON DUPLICATE KEY UPDATE `是否启用`=VALUES(`是否启用`),`每玩家允许数量`=VALUES(`每玩家允许数量`),`宽限分钟数`=VALUES(`宽限分钟数`),`提醒间隔分钟数`=VALUES(`提醒间隔分钟数`),`更新管理员名称`=VALUES(`更新管理员名称`)', [enabled ? 1 : 0, allowedCount, graceMinutes, warningIntervalMinutes, actorName]);
+    return this.settings();
+  }
+
+  async overview() {
+    const [settings, summaryRows, owners, tasks] = await Promise.all([
+      this.settings(),
+      this.db.query("SELECT SUM(`治理状态`='threshold') AS thresholdPlayers,SUM(`治理状态`='exceeded') AS exceededPlayers,SUM(`治理状态`='review') AS reviewPlayers,COALESCE(SUM(GREATEST(`当前上锁数量`-`允许数量快照`,0)),0) AS excessVehicles FROM `载具数量治理状态`"),
+      this.db.query("SELECT s.`玩家SteamID` AS steamId,COALESCE(NULLIF(u.`游戏名称`,''),NULLIF(u.`登录账号`,''),s.`玩家SteamID`) AS playerName,s.`当前上锁数量` AS lockedCount,s.`允许数量快照` AS allowedCount,s.`治理状态` AS status,s.`首次超限时间` AS exceededAt,s.`移除截止时间` AS removalDeadline,s.`最近提醒时间` AS lastWarnedAt,s.`更新时间` AS updatedAt FROM `载具数量治理状态` s LEFT JOIN `商城用户` u ON u.`SteamID`=s.`玩家SteamID` WHERE s.`治理状态`<>'compliant' ORDER BY FIELD(s.`治理状态`,'review','exceeded','threshold'),s.`移除截止时间`,s.`玩家SteamID` LIMIT 200"),
+      this.db.query("SELECT t.`任务编号` AS id,t.`玩家SteamID` AS steamId,t.`来源载具编号` AS sourceVehicleId,t.`载具显示名称` AS vehicleName,t.`任务状态` AS status,t.`首次超限时间` AS exceededAt,t.`移除截止时间` AS removalDeadline,t.`执行次数` AS attempts,t.`最后错误` AS lastError,t.`最近执行时间` AS lastAttemptAt,t.`完成时间` AS completedAt FROM `载具数量治理任务` t WHERE t.`任务状态` IN ('pending','removing','review','removed') ORDER BY FIELD(t.`任务状态`,'review','removing','pending','removed'),t.`更新时间` DESC LIMIT 200")
+    ]);
+    const row = summaryRows[0] || {};
+    return { settings, summary: { thresholdPlayers: Number(row.thresholdPlayers || 0), exceededPlayers: Number(row.exceededPlayers || 0), reviewPlayers: Number(row.reviewPlayers || 0), excessVehicles: Number(row.excessVehicles || 0) }, owners, tasks };
+  }
+
+  async snapshot() {
+    if (!this.reader || !this.clients) throw new Error('载具数量治理运行依赖未就绪');
+    const { config } = await this.clients();
+    const result = await this.reader.read(config?.ggcon?.serverDirectory);
+    if (result?.complete !== true || !Array.isArray(result?.lockedVehicles)) throw Object.assign(new Error('SCUM上锁载具快照不完整，已暂停数量治理'), { code: 'SCUM_VEHICLE_SNAPSHOT_INCOMPLETE' });
+    return { result, config };
+  }
+
+  async reconcile(vehicles, settings, now) {
+    await this.db.query("UPDATE `载具数量治理任务` SET `任务状态`='review',`最后错误`='进程在破坏性命令执行期间中断，禁止自动重发' WHERE `任务状态`='removing' AND `最近执行时间`<DATE_SUB(?,INTERVAL 10 MINUTE)", [now]);
+    const [taskRows, stateRows, claimRows] = await Promise.all([
+      this.db.query('SELECT `任务编号` AS id,`玩家SteamID` AS steamId,`来源载具编号` AS sourceVehicleId,`载具身份指纹` AS vehicleIdentity,`任务状态` AS status,`首次超限时间` AS exceededAt,`移除截止时间` AS removalDeadline FROM `载具数量治理任务`'),
+      this.db.query('SELECT `玩家SteamID` AS steamId,`治理状态` AS status,`首次超限时间` AS exceededAt,`移除截止时间` AS removalDeadline,`最近提醒时间` AS lastWarnedAt FROM `载具数量治理状态`'),
+      this.db.query("SELECT DISTINCT c.`原来源载具编号` AS sourceVehicleId FROM `载具保险索赔记录` c JOIN fulfillment_tasks f ON f.id=c.`发货任务编号` WHERE f.status IN ('pending','processing','dispatching','waiting_instance','waiting_offline','retry')")
+    ]);
+    const groups = groupVehicles(vehicles, taskRows);
+    const tasksByOwner = new Map();
+    for (const task of taskRows) {
+      if (!tasksByOwner.has(task.steamId)) tasksByOwner.set(task.steamId, []);
+      tasksByOwner.get(task.steamId).push(task);
+    }
+    const stateByOwner = new Map(stateRows.map((row) => [row.steamId, row]));
+    const blockedIds = new Set(claimRows.map((row) => Number(row.sourceVehicleId)));
+    const owners = new Set([...groups.keys(), ...stateByOwner.keys()]);
+    const notifications = [];
+
+    await this.db.transaction(async (tx) => {
+      for (const steamId of owners) {
+        const currentVehicles = groups.get(steamId) || [];
+        const count = currentVehicles.length;
+        const prior = stateByOwner.get(steamId);
+        const ownerTasks = tasksByOwner.get(steamId) || [];
+        const vehicleById = new Map(currentVehicles.map((vehicle) => [Number(vehicle.entityId), vehicle]));
+        const unresolvedReviews = ownerTasks.filter((task) => task.status === 'review' && vehicleById.has(Number(task.sourceVehicleId)) && vehicleIdentity(vehicleById.get(Number(task.sourceVehicleId))) === task.vehicleIdentity);
+        const resolvedReviews = ownerTasks.filter((task) => task.status === 'review' && !unresolvedReviews.includes(task));
+        for (const task of resolvedReviews) await tx.query("UPDATE `载具数量治理任务` SET `任务状态`='removed',`完成时间`=?,`最后错误`='后续完整快照已确认原载具不存在' WHERE `任务编号`=? AND `任务状态`='review'", [now, task.id]);
+        if (unresolvedReviews.length) {
+          await tx.query("INSERT INTO `载具数量治理状态` (`玩家SteamID`,`当前上锁数量`,`允许数量快照`,`治理状态`,`首次超限时间`,`移除截止时间`) VALUES (?,?,?,'review',?,?) ON DUPLICATE KEY UPDATE `当前上锁数量`=VALUES(`当前上锁数量`),`允许数量快照`=VALUES(`允许数量快照`),`治理状态`='review'", [steamId, count, settings.allowedCount, prior?.exceededAt || now, prior?.removalDeadline || now]);
+          continue;
+        }
+        const existingTasks = ownerTasks.filter((task) => task.status === 'pending');
+        const status = count < settings.allowedCount ? 'compliant' : count === settings.allowedCount ? 'threshold' : 'exceeded';
+        let exceededAt = status === 'exceeded' ? (prior?.status === 'exceeded' && prior.exceededAt ? new Date(prior.exceededAt) : now) : null;
+        let deadline = status === 'exceeded' ? (prior?.status === 'exceeded' && prior.removalDeadline ? new Date(prior.removalDeadline) : new Date(now.getTime() + settings.graceMinutes * 60000)) : null;
+        const availableIds = new Set(currentVehicles.map((vehicle) => Number(vehicle.entityId)));
+        const desired = Math.max(0, count - settings.allowedCount);
+        const retainedTasks = existingTasks.filter((task) => availableIds.has(Number(task.sourceVehicleId)) && !blockedIds.has(Number(task.sourceVehicleId))).slice(0, desired);
+        const retainedIds = new Set(retainedTasks.map((task) => Number(task.sourceVehicleId)));
+        const additions = currentVehicles.filter((vehicle) => !retainedIds.has(Number(vehicle.entityId)) && !blockedIds.has(Number(vehicle.entityId))).slice(0, Math.max(0, desired - retainedTasks.length));
+        const selectedIds = new Set([...retainedIds, ...additions.map((vehicle) => Number(vehicle.entityId))]);
+        await tx.query("UPDATE `载具数量治理任务` SET `任务状态`='cancelled',`最后错误`='玩家数量恢复合规或候选已变更',`更新时间`=? WHERE `玩家SteamID`=? AND `任务状态`='pending'" + (selectedIds.size ? ` AND \`来源载具编号\` NOT IN (${[...selectedIds].map(() => '?').join(',')})` : ''), [now, steamId, ...selectedIds]);
+        for (const vehicle of additions) {
+          const displayName = String(vehicle.vehicleAlias || vehicle.entityClass || vehicle.assetId || `SCUM载具 ${vehicle.entityId}`).slice(0, 120);
+          await tx.query("INSERT INTO `载具数量治理任务` (`任务编号`,`玩家SteamID`,`来源载具编号`,`载具身份指纹`,`载具显示名称`,`任务状态`,`首次超限时间`,`移除截止时间`) VALUES (?,?,?,?,?,'pending',?,?) ON DUPLICATE KEY UPDATE `任务状态`=IF(`任务状态`='removed' AND `载具身份指纹`=VALUES(`载具身份指纹`),'removed','pending'),`玩家SteamID`=VALUES(`玩家SteamID`),`载具身份指纹`=VALUES(`载具身份指纹`),`载具显示名称`=VALUES(`载具显示名称`),`首次超限时间`=VALUES(`首次超限时间`),`移除截止时间`=VALUES(`移除截止时间`),`最后错误`=NULL", [randomUUID(), steamId, Number(vehicle.entityId), vehicleIdentity(vehicle), displayName, exceededAt, deadline]);
+        }
+        const warningDue = status !== 'compliant' && (!prior?.lastWarnedAt || now.getTime() - new Date(prior.lastWarnedAt).getTime() >= settings.warningIntervalMinutes * 60000);
+        await tx.query("INSERT INTO `载具数量治理状态` (`玩家SteamID`,`当前上锁数量`,`允许数量快照`,`治理状态`,`首次超限时间`,`移除截止时间`) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `当前上锁数量`=VALUES(`当前上锁数量`),`允许数量快照`=VALUES(`允许数量快照`),`最近提醒时间`=IF(VALUES(`治理状态`)='compliant' OR (`治理状态`<>'exceeded' AND VALUES(`治理状态`)='exceeded'),NULL,`最近提醒时间`),`治理状态`=VALUES(`治理状态`),`首次超限时间`=VALUES(`首次超限时间`),`移除截止时间`=VALUES(`移除截止时间`)", [steamId, count, settings.allowedCount, status, exceededAt, deadline]);
+        if (warningDue) notifications.push({ steamId, count, status, deadline });
+      }
+    });
+    return { groups, notifications };
+  }
+
+  async notify(notifications, settings, config) {
+    if (!notifications.length) return { sent: 0, failed: 0 };
+    const { ggcon } = await this.clients();
+    const online = new Set((await ggcon.players()).map((player) => String(player.steamId)));
+    let sent = 0, failed = 0;
+    for (const item of notifications) {
+      if (!online.has(item.steamId)) continue;
+      const text = item.status === 'threshold'
+        ? `载具提醒：你已上锁 ${item.count} 辆载具，已达到服务器上限 ${settings.allowedCount} 辆；继续增加将进入限期清理。`
+        : `载具超限：你已上锁 ${item.count} 辆，允许 ${settings.allowedCount} 辆。请在 ${new Date(item.deadline).toLocaleString('zh-CN', { hour12: false })} 前处理超出载具，逾期将优先移除最久未访问的载具。`;
+      try {
+        const command = buildMessageCommand({ steamId: item.steamId, message: text }, config.commandPolicy);
+        const result = await ggcon.command(command, { retry: false, priority: 'normal' });
+        if (!deliverySucceeded(result)) throw new Error('载具数量提醒未返回成功结果');
+        await this.db.query('UPDATE `载具数量治理状态` SET `最近提醒时间`=CURRENT_TIMESTAMP(3) WHERE `玩家SteamID`=?', [item.steamId]);
+        sent += 1;
+      } catch (error) {
+        failed += 1;
+        this.logger?.warn?.('载具数量提醒发送失败', { component: 'vehicle-limit', steamId: item.steamId, errorCode: error?.code || error?.name || 'MESSAGE_FAILED' });
+      }
+    }
+    return { sent, failed };
+  }
+
+  async enforce(vehicles, groups, settings, now) {
+    const due = await this.db.query("SELECT t.`任务编号` AS id,t.`玩家SteamID` AS steamId,t.`来源载具编号` AS sourceVehicleId,t.`载具身份指纹` AS vehicleIdentity,t.`载具显示名称` AS vehicleName,s.`当前上锁数量` AS lockedCount,s.`最近提醒时间` AS lastWarnedAt FROM `载具数量治理任务` t JOIN `载具数量治理状态` s ON s.`玩家SteamID`=t.`玩家SteamID` WHERE t.`任务状态`='pending' AND t.`移除截止时间`<=? AND s.`治理状态`='exceeded' AND s.`最近提醒时间` IS NOT NULL ORDER BY t.`移除截止时间`,t.`来源载具编号`", [now]);
+    if (!due.length) return { removed: 0, review: 0, failed: 0 };
+    const byEntity = new Map(vehicles.map((vehicle) => [Number(vehicle.entityId), vehicle]));
+    const removalsByOwner = new Map();
+    const blockedOwners = new Set();
+    const { ggcon } = await this.clients();
+    let removed = 0, review = 0, failed = 0;
+    for (const task of due) {
+      if (blockedOwners.has(task.steamId)) continue;
+      const ownerVehicles = groups.get(task.steamId) || [];
+      const alreadyRemoved = removalsByOwner.get(task.steamId) || 0;
+      if (ownerVehicles.length - alreadyRemoved <= settings.allowedCount) continue;
+      const vehicle = byEntity.get(Number(task.sourceVehicleId));
+      if (!vehicle || String(vehicle.ownerSteamId) !== task.steamId || vehicleIdentity(vehicle) !== task.vehicleIdentity) {
+        await this.db.query("UPDATE `载具数量治理任务` SET `任务状态`='cancelled',`最后错误`='执行前快照核对不通过',`更新时间`=? WHERE `任务编号`=? AND `任务状态`='pending'", [now, task.id]);
+        continue;
+      }
+      const claim = await this.db.query("UPDATE `载具数量治理任务` t JOIN `载具数量治理配置` c ON c.`配置编号`=1 SET t.`任务状态`='removing',t.`执行次数`=t.`执行次数`+1,t.`最近执行时间`=?,t.`最后错误`=NULL WHERE t.`任务编号`=? AND t.`任务状态`='pending' AND c.`是否启用`=1 AND c.`每玩家允许数量`=?", [now, task.id, settings.allowedCount]);
+      if (!claim.affectedRows) continue;
+      try {
+        const result = await ggcon.command(`#DestroyVehicle ${Number(task.sourceVehicleId)}`, { retry: false, deliveryToken: `vehicle-limit:${task.id}`, priority: 'high' });
+        if (!commandSucceeded(result)) {
+          const error = new Error('载具移除未返回明确成功结果');
+          error.uncertainDelivery = true;
+          throw error;
+        }
+        await this.db.transaction(async (tx) => {
+          const claimed = await tx.query("UPDATE `载具数量治理任务` SET `任务状态`='removed',`完成时间`=?,`最后错误`=NULL WHERE `任务编号`=? AND `任务状态`='removing'", [now, task.id]);
+          if (!claimed.affectedRows) throw new Error('载具数量治理任务状态已变化');
+          const archived = await tx.query("UPDATE `载具档案` SET `来源失联前状态`=CASE WHEN `档案状态`<>'lost' THEN `档案状态` ELSE `来源失联前状态` END,`档案状态`='lost',`来源同步状态`='missing',`来源缺失时间`=COALESCE(`来源缺失时间`,?),`最后观测时间`=? WHERE `车主SteamID`=? AND `来源类型`=? AND `来源载具编号`=?", [now, now, task.steamId, SOURCE_TYPE, Number(task.sourceVehicleId)]);
+          if (!archived.affectedRows) throw Object.assign(new Error('游戏内载具已移除但档案更新失败'), { uncertainDelivery: true });
+          await tx.query("INSERT INTO `载具操作审计` (`载具档案编号`,`载具档案编码快照`,`操作动作`,`变更内容`,`操作管理员名称`) SELECT `载具档案编号`,`载具档案编码`,'limit_removed',JSON_OBJECT('sourceVehicleId',`来源载具编号`,'allowedCount',?),'vehicle-limit-worker' FROM `载具档案` WHERE `来源类型`=? AND `来源载具编号`=?", [settings.allowedCount, SOURCE_TYPE, Number(task.sourceVehicleId)]);
+        });
+        removalsByOwner.set(task.steamId, alreadyRemoved + 1);
+        removed += 1;
+      } catch (error) {
+        await this.db.query("UPDATE `载具数量治理任务` SET `任务状态`='review',`最后错误`=? WHERE `任务编号`=? AND `任务状态`='removing'", [safeError(error), task.id]);
+        review += 1;
+        blockedOwners.add(task.steamId);
+        this.logger?.warn?.('载具数量治理移除结果需人工复核', { component: 'vehicle-limit', steamId: task.steamId, sourceVehicleId: Number(task.sourceVehicleId), errorCode: error?.code || error?.name || 'REMOVE_REVIEW_REQUIRED' });
+      }
+    }
+    return { removed, review, failed };
+  }
+
+  async run() {
+    const settings = await this.settings();
+    if (!settings.enabled) return { enabled: false, scanned: 0, notified: 0, removed: 0, review: 0, failed: 0 };
+    const now = new Date(this.clock());
+    const { result, config } = await this.snapshot();
+    const { notifications } = await this.reconcile(result.lockedVehicles, settings, now);
+    const notification = await this.notify(notifications, settings, config);
+    const currentSettings = await this.settings();
+    if (!currentSettings.enabled || currentSettings.allowedCount !== settings.allowedCount) return { enabled:Boolean(currentSettings.enabled), scanned:result.lockedVehicles.length, notified:notification.sent, notificationFailed:notification.failed, removed:0, review:0, failed:0, policyChanged:true, completedAt:now.toISOString() };
+    const currentSnapshot = await this.snapshot();
+    const current = await this.reconcile(currentSnapshot.result.lockedVehicles, currentSettings, now);
+    const enforcement = await this.enforce(currentSnapshot.result.lockedVehicles, current.groups, currentSettings, now);
+    return { enabled: true, scanned: result.lockedVehicles.length, notified: notification.sent, notificationFailed: notification.failed, ...enforcement, completedAt: now.toISOString() };
+  }
+}
+
+export { groupVehicles, vehicleIdentity, oldestFirst, commandSucceeded };

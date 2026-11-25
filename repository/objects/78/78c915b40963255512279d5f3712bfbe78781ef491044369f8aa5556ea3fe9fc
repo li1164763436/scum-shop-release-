@@ -1,0 +1,94 @@
+function fillStoreSettingsForm() {
+  const config = state.config || {};
+  const fulfillment = config.fulfillment || {};
+  const monitoring = config.monitoring || {};
+  const form = $('#storeSettingsForm');
+  if (!form) return;
+  const fields = form.elements;
+  const sitePort = location.port || (location.protocol === 'https:' ? '443' : '80');
+
+  $('#sitePortValue').value = sitePort;
+  $('#storeSitePortSummary').textContent = sitePort;
+  fields.fulfillmentInstance.value = fulfillment.instanceId || '';
+  fields.workerEnabled.checked = Boolean(fulfillment.workerEnabled);
+  fields.workerPollMs.value = fulfillment.pollIntervalMs || 5000;
+  fields.workerCommandIntervalMs.value = fulfillment.commandIntervalMs || 0;
+  fields.workerMaxAttempts.value = fulfillment.maxAttempts || 5;
+  fields.monitoringEnabled.checked = monitoring.enabled !== false;
+  fields.monitoringPollSeconds.value = Math.round((monitoring.pollIntervalMs || 10000) / 1000);
+  fields.monitoringRetentionDays.value = monitoring.retentionDays || 7;
+  const canManageSharedSecret = state.currentUser?.role === 'super_admin' || state.currentUser?.adminPermissions?.includes('system');
+  fields.sharedSecret.disabled = !canManageSharedSecret;
+  fields.sharedSecret.placeholder = canManageSharedSecret ? '留空保留当前密钥' : '需要系统配置权限';
+  $('#sharedSecretState').textContent = fulfillment.hasSharedSecret ? '（已配置）' : '（未配置）';
+  renderStoreSettingsSummary();
+}
+
+function renderStoreSettingsSummary() {
+  const form = $('#storeSettingsForm');
+  if (!form) return;
+  const fields = form.elements;
+  const selected = fields.fulfillmentInstance.selectedOptions[0];
+  $('#storeFulfillmentSummary').textContent = fields.fulfillmentInstance.value ? selected?.textContent || '已选择实例' : '手动 RCON';
+  $('#storeWorkerSummary').textContent = fields.workerEnabled.checked ? '已启用' : '已停用';
+  $('#storeWorkerSummary').classList.toggle('is-enabled', fields.workerEnabled.checked);
+  $('#storeMonitoringSummary').textContent = fields.monitoringEnabled.checked ? '已启用' : '已停用';
+  $('#storeMonitoringSummary').classList.toggle('is-enabled', fields.monitoringEnabled.checked);
+}
+
+async function loadStoreInstanceOptions() {
+  const select = $('#storeSettingsForm')?.elements.fulfillmentInstance;
+  if (!select) return;
+  try {
+    const data = await api('/api/store-settings/instances');
+    state.instances = list(data, ['instances', 'items']);
+    const selected = select.value || state.config?.fulfillment?.instanceId || '';
+    select.innerHTML = '<option value="">手动 RCON</option>' + state.instances.map((item) => `<option value="${esc(pick(item, ['id', 'instanceId']))}">${esc(pick(item, ['name'], '未命名实例'))}</option>`).join('');
+    select.value = selected;
+    $('#fulfillmentInstanceState').textContent = state.instances.length ? `已发现 ${state.instances.length} 个可用实例。` : '未发现实例，继续使用手动 RCON。';
+  } catch {
+    $('#fulfillmentInstanceState').textContent = '实例服务暂不可用，仍可保存其他设置。';
+  }
+  renderStoreSettingsSummary();
+}
+
+async function saveStoreSettings(payload) {
+  const saved = await api('/api/store-settings', { method: 'PUT', body: JSON.stringify(payload) });
+  state.config = saved || state.config;
+}
+
+async function loadStoreSettings() {
+  try {
+    state.config = await api('/api/store-settings') || {};
+    fillStoreSettingsForm();
+    await loadStoreInstanceOptions();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+$('#storeSettingsForm')?.addEventListener('change', renderStoreSettingsSummary);
+$('#storeSettingsForm')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  await withBusy(event.submitter, async () => {
+    const fields = event.currentTarget.elements;
+    await saveStoreSettings({
+      fulfillment: {
+        instanceId: fields.fulfillmentInstance.value,
+        sharedSecret: fields.sharedSecret.value,
+        workerEnabled: fields.workerEnabled.checked,
+        pollIntervalMs: Number(fields.workerPollMs.value),
+        commandIntervalMs: Number(fields.workerCommandIntervalMs.value),
+        maxAttempts: Number(fields.workerMaxAttempts.value)
+      },
+      monitoring: {
+        enabled: fields.monitoringEnabled.checked,
+        pollIntervalMs: Number(fields.monitoringPollSeconds.value) * 1000,
+        retentionDays: Number(fields.monitoringRetentionDays.value)
+      }
+    });
+    fields.sharedSecret.value = '';
+    toast('商城设置已保存');
+    await loadStoreSettings();
+  });
+});

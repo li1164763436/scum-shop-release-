@@ -1,0 +1,71 @@
+function safeError(error) {
+  return String(error?.message || error?.code || '载具数量治理失败').replace(/[A-Za-z]:\\[^\r\n]*/g, '[路径已隐藏]').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 500);
+}
+
+export class VehicleLimitWorker {
+  constructor({ service, logger, intervalMs = 60000, setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout } = {}) {
+    this.service = service;
+    this.logger = logger;
+    this.intervalMs = Math.max(15000, Number(intervalMs) || 60000);
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+    this.timer = null;
+    this.activeTick = null;
+    this.stopped = true;
+    this.running = false;
+    this.lastStartedAt = null;
+    this.lastCompletedAt = null;
+    this.lastSuccessAt = null;
+    this.lastError = null;
+    this.lastResult = null;
+  }
+
+  status() {
+    return { enabled: !this.stopped, running: this.running, polling: Boolean(this.timer), intervalMs: this.intervalMs, lastStartedAt: this.lastStartedAt, lastCompletedAt: this.lastCompletedAt, lastSuccessAt: this.lastSuccessAt, lastError: this.lastError, lastResult: this.lastResult };
+  }
+
+  async start() {
+    if (!this.stopped) return this.status();
+    this.stopped = false;
+    void this.tick();
+    return this.status();
+  }
+
+  schedule() {
+    if (this.stopped || this.timer) return;
+    this.timer = this.setTimer(() => { this.timer = null; void this.tick(); }, this.intervalMs);
+    this.timer?.unref?.();
+  }
+
+  async tick() {
+    if (this.stopped || this.activeTick) return this.activeTick;
+    this.running = true;
+    this.lastStartedAt = new Date().toISOString();
+    this.activeTick = (async () => {
+      try {
+        this.lastResult = await this.service.run();
+        this.lastSuccessAt = new Date().toISOString();
+        this.lastError = null;
+      } catch (error) {
+        this.lastError = safeError(error);
+        this.logger?.warn?.('载具数量治理执行失败', { component: 'vehicle-limit', errorCode: error?.code || error?.name || 'VEHICLE_LIMIT_FAILED' });
+      } finally {
+        this.lastCompletedAt = new Date().toISOString();
+        this.running = false;
+        this.activeTick = null;
+        this.schedule();
+      }
+    })();
+    return this.activeTick;
+  }
+
+  async stopAndDrain() {
+    this.stopped = true;
+    if (this.timer) this.clearTimer(this.timer);
+    this.timer = null;
+    if (this.activeTick) await this.activeTick;
+    return this.status();
+  }
+}
+
+export { safeError as safeVehicleLimitError };
