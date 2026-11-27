@@ -1,7 +1,7 @@
 {
     "name":  "scum-rcon-console",
     "version":  "1.0.1",
-    "releaseRevision":  20,
+    "releaseRevision":  25,
     "private":  true,
     "type":  "module",
     "engines":  {
