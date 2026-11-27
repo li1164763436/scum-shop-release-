@@ -1,0 +1,81 @@
+<section class="page vehicle-management-page" id="page-vehicle-management">
+  <div class="page-toolbar vehicle-toolbar">
+    <div><span class="section-kicker">VEHICLE INSURANCE</span><h2>保险管理</h2><p>管理保险销售、上锁载具档案与玩家载具数量规则。</p></div>
+  </div>
+
+  <nav class="vehicle-section-nav" aria-label="保险管理功能" role="tablist">
+    <button type="button" role="tab" aria-selected="false" data-vehicle-panel="insurance"><span>保险销售</span><small>策略与保单</small></button>
+    <button type="button" role="tab" aria-selected="true" class="active" data-vehicle-panel="management"><span>载具档案</span><small>档案与同步</small></button>
+    <button type="button" role="tab" aria-selected="false" data-vehicle-panel="restrictions"><span>数量治理</span><small>上限与移除</small></button>
+  </nav>
+
+  <div class="vehicle-summary-grid" data-vehicle-section="management">
+    <article data-tone="neutral"><span>载具总数</span><strong id="vehicleTotalCount">--</strong><small>上锁载具档案</small></article>
+    <article data-tone="success"><span>正常使用</span><strong id="vehicleActiveCount">--</strong><small>状态为正常</small></article>
+    <article data-tone="gold"><span>有效保险</span><strong id="vehicleInsuredCount">--</strong><small>当前有效保单</small></article>
+    <article data-tone="danger"><span>需要关注</span><strong id="vehicleAttentionCount">--</strong><small>丢失或损毁</small></article>
+  </div>
+
+  <section class="vehicle-sync-status" data-vehicle-section="management" aria-label="载具同步状态" aria-live="polite">
+    <div><span>档案来源</span><strong>RCON + SCUM.db</strong><small>仅同步上锁载具</small></div>
+    <div><span>自动同步</span><strong id="vehicleSyncState">读取中</strong><small>后台同步任务</small></div>
+    <div><span>已同步档案</span><strong id="vehicleSynchronizedCount">--</strong><small>当前有效记录</small></div>
+    <div><span>最后同步</span><strong id="vehicleLastSynchronizedAt">--</strong><small>最近成功时间</small></div>
+  </section>
+
+  <section class="card vehicle-directory" data-vehicle-section="management">
+    <div class="vehicle-directory-head">
+      <div><h3>载具档案</h3><p>查询上锁载具、车主、保险及最近同步状态。</p></div>
+      <span class="result-count" id="vehicleResultCount">0 辆载具</span>
+    </div>
+    <div class="vehicle-filter-bar">
+      <label class="vehicle-search-field"><span>搜索档案</span><div class="search-box wide"><input id="vehicleSearch" placeholder="档案号、车主、型号或车牌" aria-label="搜索载具档案"></div></label>
+      <label><span>载具状态</span><select id="vehicleStatusFilter"><option value="">全部状态</option><option value="active">正常</option><option value="lost">消失</option><option value="recovered">回收</option></select></label>
+      <label><span>保险状态</span><select id="vehicleInsuranceFilter"><option value="">全部保险</option><option value="active">已投保</option><option value="expired">已过期</option><option value="suspended">已暂停</option><option value="claimed">已索赔</option><option value="none">无保单</option></select></label>
+      <button class="btn secondary vehicle-search-button" id="searchVehicles" type="button">查询</button>
+    </div>
+    <div class="table-wrap"><table class="vehicle-table vehicle-archive-table"><thead><tr><th>载具 ID</th><th>载具名称</th><th>拥有者</th><th>保险</th><th>载具位置</th><th>更新时间</th><th>载具状态</th><th>操作</th></tr></thead><tbody id="vehicleRows"><tr><td colspan="8" class="empty loading">正在加载载具...</td></tr></tbody></table></div>
+    <div class="vehicle-pagination table-pagination"><button class="btn secondary small" id="vehiclePreviousPage" type="button">上一页</button><span id="vehiclePageStatus">第 1 页</span><button class="btn secondary small" id="vehicleNextPage" type="button">下一页</button></div>
+  </section>
+
+  <section class="card vehicle-subpage" data-vehicle-section="insurance" hidden>
+    <div class="vehicle-subpage-heading"><div><span class="vehicle-heading-kicker">INSURANCE SALES</span><h3>载具保险</h3><p>配置玩家可自助购买的保险策略，并查看已生效保单。</p></div><button class="btn primary" id="createVehicleInsuranceStrategy" type="button">新增策略</button></div>
+    <div class="vehicle-insurance-strategy-block">
+      <div class="vehicle-block-title"><div><strong>保险销售策略</strong><small>策略名称不可重复，售价以商城币计算。</small></div><span id="vehicleInsuranceStrategyCount">0 个策略</span></div>
+      <div class="table-wrap"><table class="vehicle-table"><thead><tr><th>操作</th><th>保险名称</th><th>载具类型</th><th>总赔付次数</th><th>每日赔付次数</th><th>有效时长</th><th>售价</th><th>状态</th></tr></thead><tbody id="vehicleInsuranceStrategyRows"><tr><td colspan="8" class="empty loading">正在加载保险策略...</td></tr></tbody></table></div>
+    </div>
+    <div class="vehicle-insurance-record-block">
+      <div class="vehicle-block-title"><div><strong>已登记保险</strong><small>查看载具当前保单状态与有效期。</small></div><span id="vehicleInsuranceCount">0 条保险记录</span></div>
+      <div class="table-wrap"><table class="vehicle-table"><thead><tr><th>载具</th><th>车主</th><th>保险状态</th><th>保单编号</th><th>保险价值</th><th>生效时间</th><th>到期时间</th><th>操作</th></tr></thead><tbody id="vehicleInsuranceRows"><tr><td colspan="8" class="empty">暂无保险记录</td></tr></tbody></table></div>
+    </div>
+  </section>
+
+  <section class="vehicle-subpage vehicle-restrictions" data-vehicle-section="restrictions" hidden>
+    <div class="vehicle-subpage-heading"><div><span class="vehicle-heading-kicker">VEHICLE GOVERNANCE</span><h3>数量治理</h3><p>依据 SCUM.db 上锁载具快照监测玩家数量，并在宽限期结束后移除超出部分。</p></div><span class="badge inactive" id="vehicleLimitWorkerState">读取中</span></div>
+    <div class="vehicle-limit-summary">
+      <article data-tone="neutral"><span>达到上限</span><strong id="vehicleLimitThresholdCount">--</strong><small>继续增加将超限</small></article>
+      <article data-tone="warning"><span>超限玩家</span><strong id="vehicleLimitExceededCount">--</strong><small>处于宽限期或待处理</small></article>
+      <article data-tone="danger"><span>超出载具</span><strong id="vehicleLimitExcessCount">--</strong><small>等待玩家自行处理</small></article>
+      <article data-tone="review"><span>人工复核</span><strong id="vehicleLimitReviewCount">--</strong><small>禁止自动重发命令</small></article>
+    </div>
+    <section class="vehicle-limit-settings">
+      <div class="vehicle-block-title"><div><strong>执行策略</strong><small>仅统计完整快照中的上锁载具；达到上限只提醒，超过上限才开始宽限倒计时。</small></div></div>
+      <form id="vehicleLimitSettingsForm" class="vehicle-limit-form">
+        <label class="vehicle-switch"><input id="vehicleLimitEnabled" type="checkbox"><span>启用游戏内提醒与自动治理</span></label>
+        <label><span>每玩家允许数量</span><input id="vehicleLimitAllowedCount" type="number" min="1" max="100" step="1" required></label>
+        <label><span>超限宽限期（分钟）</span><input id="vehicleLimitGraceMinutes" type="number" min="5" max="43200" step="1" required></label>
+        <label><span>提醒间隔（分钟）</span><input id="vehicleLimitWarningMinutes" type="number" min="5" max="1440" step="1" required></label>
+        <div class="vehicle-limit-actions"><button class="btn primary" type="submit">保存策略</button></div>
+      </form>
+      <div class="vehicle-limit-rule"><strong>移除顺序</strong><span>优先移除最久未访问的超出载具；宽限期内候选保持固定。删除前重新核对实体 ID、锁主和载具身份。</span></div>
+    </section>
+    <section class="vehicle-limit-block">
+      <div class="vehicle-block-title"><div><strong>玩家状态</strong><small>仅列出达到上限、已超限或需要人工复核的玩家。</small></div><span id="vehicleLimitOwnerCount">0 名玩家</span></div>
+      <div class="table-wrap"><table class="vehicle-table"><thead><tr><th>玩家</th><th>上锁数量</th><th>状态</th><th>首次超限</th><th>移除截止</th><th>最近提醒</th></tr></thead><tbody id="vehicleLimitOwnerRows"><tr><td colspan="6" class="empty loading">正在加载治理状态...</td></tr></tbody></table></div>
+    </section>
+    <section class="vehicle-limit-block">
+      <div class="vehicle-block-title"><div><strong>移除任务</strong><small>投递结果不明确的破坏性命令会停在人工复核状态，不会自动重试。</small></div><span id="vehicleLimitTaskCount">0 条任务</span></div>
+      <div class="table-wrap"><table class="vehicle-table"><thead><tr><th>状态</th><th>玩家</th><th>载具</th><th>移除截止</th><th>执行次数</th><th>结果</th></tr></thead><tbody id="vehicleLimitTaskRows"><tr><td colspan="6" class="empty loading">正在加载移除任务...</td></tr></tbody></table></div>
+    </section>
+  </section>
+</section>

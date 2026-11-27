@@ -1,0 +1,87 @@
+<section class="page store-settings-page" id="page-store-settings">
+  <div class="page-toolbar">
+    <div>
+      <p class="breadcrumb-inline">运维 / 商城设置</p>
+      <h2>商城设置</h2>
+      <p>管理网站入口、自动发货 Worker 与服务器监控。</p>
+    </div>
+    <div class="toolbar-actions">
+      <button class="btn primary" type="submit" form="storeSettingsForm">保存设置</button>
+    </div>
+  </div>
+
+  <section class="store-settings-summary" aria-label="商城服务配置摘要">
+    <article><span>网站端口</span><strong id="storeSitePortSummary">--</strong><small>当前管理服务</small></article>
+    <article><span>发货目标</span><strong id="storeFulfillmentSummary">读取中</strong><small>实例或手动 RCON</small></article>
+    <article><span>自动发货</span><strong id="storeWorkerSummary">读取中</strong><small>Worker 运行策略</small></article>
+    <article><span>服务器监控</span><strong id="storeMonitoringSummary">读取中</strong><small>状态与玩家快照</small></article>
+  </section>
+
+  <form id="storeSettingsForm" class="store-settings-form">
+    <section class="card form-card store-service-card">
+      <div class="card-head">
+        <div>
+          <span class="store-settings-index">01</span>
+          <h3>网站与发货服务</h3>
+          <p>设置商城网站服务端口。</p>
+        </div>
+      </div>
+      <div class="form-grid store-website-fields">
+        <label>网站端口
+          <input id="sitePortValue" name="sitePort" type="number" min="1" max="65535" step="1" inputmode="numeric" required>
+          <span class="field-hint">修改后商城服务将重启并更新 Windows 防火墙规则；端口需未被占用。</span>
+        </label>
+        <div class="store-settings-hidden" hidden aria-hidden="true">
+          <label>发货实例
+            <select name="fulfillmentInstance"><option value="">手动 RCON</option></select>
+            <span class="field-hint" id="fulfillmentInstanceState">自动发现可用实例。</span>
+          </label>
+          <label>共享密钥 <span class="hint" id="sharedSecretState"></span>
+            <input name="sharedSecret" type="password" autocomplete="new-password" placeholder="留空保留当前密钥">
+            <span class="field-hint">用于订单回调验签，更换密钥需要系统配置权限。</span>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <div class="store-settings-grid">
+      <section class="card form-card store-service-card">
+        <div class="card-head">
+          <div>
+            <span class="store-settings-index">02</span>
+            <h3>自动发货 Worker</h3>
+            <p>控制任务轮询、命令节奏和失败重试。</p>
+          </div>
+          <label class="switch"><input name="workerEnabled" type="checkbox"><span></span>启用 Worker</label>
+        </div>
+        <div class="form-grid cols-3">
+          <label>轮询间隔（毫秒）<input name="workerPollMs" type="number" min="250" max="3600000" placeholder="5000"></label>
+          <label>命令间隔（毫秒）<input name="workerCommandIntervalMs" type="number" min="0" max="5000" placeholder="0"></label>
+          <label>最大尝试次数<input name="workerMaxAttempts" type="number" min="1" max="20" placeholder="5"></label>
+        </div>
+        <p class="store-settings-note" id="workerBridgeReason">命令间隔仅作用于同一任务内的多条物品命令。</p>
+      </section>
+
+      <section class="card form-card store-service-card">
+        <div class="card-head">
+          <div>
+            <span class="store-settings-index">03</span>
+            <h3>服务器监控</h3>
+            <p>周期保存连接状态、在线玩家与上下线事件。</p>
+          </div>
+          <label class="switch"><input name="monitoringEnabled" type="checkbox"><span></span>启用监控</label>
+        </div>
+        <div class="form-grid cols-3">
+          <label>轮询间隔（秒）<input name="monitoringPollSeconds" type="number" min="5" max="300" required></label>
+          <label>数据保留天数<input name="monitoringRetentionDays" type="number" min="1" max="90" required></label>
+        </div>
+        <p class="store-settings-note">监控数据用于运行状态、玩家在线记录和服务诊断。</p>
+      </section>
+    </div>
+
+    <div class="store-settings-savebar">
+      <div><strong>商城服务配置</strong><span>修改网站端口需要系统配置权限；Windows 服务将自动重启。</span></div>
+      <button class="btn primary" type="submit">保存设置</button>
+    </div>
+  </form>
+</section>

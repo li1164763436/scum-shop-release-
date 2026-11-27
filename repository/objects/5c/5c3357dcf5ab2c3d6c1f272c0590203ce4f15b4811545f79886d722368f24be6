@@ -1,0 +1,94 @@
+#page-teleport-management{--teleport-green:#27664b;--teleport-green-soft:#eaf4ee;--teleport-amber:#b97816;--teleport-amber-soft:#fff5df;--teleport-red:#a43b42;--teleport-ink:#24342b;--teleport-muted:#6b7a72}
+#page-teleport-management .teleport-management-toolbar{align-items:flex-end;margin-bottom:18px}
+#page-teleport-management .teleport-management-toolbar>div{max-width:720px}
+#page-teleport-management .teleport-management-toolbar h2{margin-bottom:5px}
+#page-teleport-management .teleport-settings-card,#page-teleport-management .teleport-fixed-card,#page-teleport-management .teleport-safety-card,#page-teleport-management .teleport-operations-card{margin-bottom:16px;overflow:hidden}
+#page-teleport-management .card-head{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:17px 20px;border-bottom:1px solid var(--line)}
+#page-teleport-management .card-head>div:first-child{min-width:0}
+#page-teleport-management .card-head h3{margin:0 0 4px;color:var(--teleport-ink);font-size:15px}
+#page-teleport-management .card-head p{margin:0;color:var(--teleport-muted);line-height:1.5}
+#page-teleport-management .teleport-section-index{display:block;margin:0 0 5px;color:var(--teleport-green);font-size:9px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+#page-teleport-management .teleport-safety-card{border-color:#bfcfc5}
+#page-teleport-management .teleport-safety-card .card-head{color:#fff;background:#243d30;border-bottom-color:#365544}
+#page-teleport-management .teleport-safety-card .card-head h3{color:#fff}
+#page-teleport-management .teleport-safety-card .card-head p{color:#b9c9bf}
+#page-teleport-management .teleport-safety-card .teleport-section-index{color:#e5b95f}
+#page-teleport-management .teleport-safety-state{flex:0 0 auto;padding:6px 10px;border:1px solid rgba(255,255,255,.22);border-radius:4px;color:#f6d48d;background:rgba(255,255,255,.06);font-size:10px;font-weight:800;letter-spacing:.06em}
+#page-teleport-management .teleport-rule-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:#f8faf8}
+#page-teleport-management .teleport-rule-grid article{display:grid;grid-template-columns:28px minmax(0,1fr);gap:10px;min-width:0;padding:17px 18px;border-right:1px solid var(--line)}
+#page-teleport-management .teleport-rule-grid article:last-child{border-right:0}
+#page-teleport-management .teleport-rule-grid article>span{display:grid;place-items:center;width:27px;height:27px;border-radius:50%;color:var(--teleport-green);background:var(--teleport-green-soft);font-size:9px;font-weight:900}
+#page-teleport-management .teleport-rule-grid strong{color:var(--teleport-ink);font-size:12px}
+#page-teleport-management .teleport-rule-grid p{margin:5px 0 0;color:#68766e;font-size:10px;line-height:1.6}
+#page-teleport-management .teleport-settings-card>.card-head>span{color:var(--teleport-muted);font-size:10px;font-weight:700;white-space:nowrap}
+#page-teleport-management .teleport-settings-form{padding:20px;display:grid;gap:16px;background:#f7f9f7}
+#page-teleport-management .teleport-pricing-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+#page-teleport-management .teleport-pricing-panel{display:grid;grid-template-rows:auto auto auto 1fr auto;align-content:start;gap:15px;min-width:0;margin:0;padding:18px;border:1px solid var(--line);border-radius:6px;background:#fff}
+#page-teleport-management .teleport-setting-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-bottom:12px;border-bottom:1px solid #e6ebe7}
+#page-teleport-management .teleport-setting-heading strong{color:var(--teleport-ink);font-size:13px}
+#page-teleport-management .teleport-setting-heading small,#page-teleport-management .teleport-switch-row small{color:#758078;line-height:1.45}
+#page-teleport-management .teleport-category-switch{min-height:78px}
+#page-teleport-management .teleport-switch-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 14px;border-left:3px solid var(--teleport-green);background:#f5f8f6}
+#page-teleport-management .teleport-switch-row span{display:grid;gap:3px}
+#page-teleport-management .teleport-switch-row strong{color:var(--teleport-ink)}
+#page-teleport-management .teleport-switch-row input{width:20px;height:20px;flex:0 0 auto;accent-color:var(--teleport-green)}
+#page-teleport-management .teleport-pricing-mode{display:flex;align-items:center;gap:0;margin:0;padding:0;border:0}
+#page-teleport-management .teleport-pricing-mode legend{margin-bottom:7px;color:#536078;font-weight:700}
+#page-teleport-management .teleport-pricing-mode label{position:relative;cursor:pointer}
+#page-teleport-management .teleport-pricing-mode input{position:absolute;opacity:0;pointer-events:none}
+#page-teleport-management .teleport-pricing-mode span{display:block;padding:8px 14px;border:1px solid var(--line);background:#fff;font-weight:700}
+#page-teleport-management .teleport-pricing-mode label:first-of-type span{border-radius:5px 0 0 5px}
+#page-teleport-management .teleport-pricing-mode label:last-of-type span{margin-left:-1px;border-radius:0 5px 5px 0}
+#page-teleport-management .teleport-pricing-mode input:checked+span{position:relative;border-color:var(--teleport-green);background:var(--teleport-green-soft);color:var(--teleport-green)}
+#page-teleport-management .teleport-pricing-mode input:focus-visible+span{outline:2px solid var(--teleport-green);outline-offset:2px}
+#page-teleport-management .teleport-pricing-help{display:block;margin:-6px 0 0;padding:9px 11px;border-left:3px solid var(--teleport-amber);color:#735315;background:var(--teleport-amber-soft);font-size:10px;line-height:1.55}
+#page-teleport-management .teleport-pricing-help[hidden]{display:none}
+#page-teleport-management .teleport-number-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;gap:12px}
+#page-teleport-management .teleport-number-grid label{display:grid;gap:6px;color:#536078;font-size:10px;font-weight:700}
+#page-teleport-management .teleport-number-grid label[hidden]{display:none}
+#page-teleport-management .teleport-number-grid input{width:100%}
+#page-teleport-management .teleport-input-suffix{position:relative;display:block}
+#page-teleport-management .teleport-input-suffix>input{padding-right:78px}
+#page-teleport-management .teleport-input-suffix>span{position:absolute;top:50%;right:10px;max-width:64px;overflow:hidden;transform:translateY(-50%);color:#718078;font-size:9px;font-weight:700;white-space:nowrap;pointer-events:none}
+#page-teleport-management .teleport-form-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;padding-top:15px;border-top:1px solid #e6ebe7;color:#718078}
+#page-teleport-management .teleport-form-actions .btn{min-width:150px}
+#page-teleport-management .teleport-head-actions{display:flex;align-items:center;gap:12px;flex:0 0 auto}
+#page-teleport-management .teleport-head-actions>span,#page-teleport-management #teleportOperationCount{color:var(--teleport-muted);font-size:10px;font-weight:800;white-space:nowrap}
+#page-teleport-management .teleport-table-intro{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 20px;color:var(--teleport-green);background:var(--teleport-green-soft);border-bottom:1px solid #d5e4da;font-size:10px;font-weight:700}
+#page-teleport-management .teleport-table-intro small{color:#748078;font-weight:600}
+#page-teleport-management .teleport-fixed-table table{min-width:860px}
+#page-teleport-management .teleport-fixed-table th{background:#f7f9f7;color:#5f6d64;font-size:9px;letter-spacing:.05em;text-transform:uppercase}
+#page-teleport-management .teleport-fixed-table td{vertical-align:middle}
+#page-teleport-management .teleport-location-name{color:var(--teleport-ink);font-size:11px}
+#page-teleport-management .teleport-coordinate-value{display:inline-block;color:#315d49;font:600 10px Consolas,"Courier New",monospace;white-space:nowrap}
+#page-teleport-management .teleport-visibility,#page-teleport-management .teleport-location-state{display:inline-flex;align-items:center;padding:4px 8px;border-radius:4px;font-size:9px;font-weight:800;white-space:nowrap}
+#page-teleport-management .teleport-visibility.public,#page-teleport-management .teleport-location-state.enabled{color:#246348;background:#e3f1e8}
+#page-teleport-management .teleport-visibility.private{color:#825c00;background:#fff0c9}
+#page-teleport-management .teleport-location-state.disabled{color:#69756e;background:#e9ecea}
+#page-teleport-management .teleport-owner-id{display:block;margin-top:4px;color:#78847c;font:600 9px Consolas,"Courier New",monospace}
+#page-teleport-management .teleport-sort-value{display:inline-grid;place-items:center;min-width:28px;height:25px;border:1px solid var(--line);border-radius:4px;color:#526057;background:#fafbfa;font-weight:800}
+#page-teleport-management .teleport-row-actions{display:flex;gap:7px;white-space:nowrap}
+#page-teleport-management .teleport-row-actions .btn{min-height:30px;padding:4px 10px}
+#page-teleport-management .teleport-operations-card .table-wrap table{min-width:900px}
+#page-teleport-management .teleport-status{display:inline-flex;padding:4px 9px;border-radius:4px;background:#e8ece9;color:#526057;font-weight:700;white-space:nowrap}
+#page-teleport-management .teleport-status-completed,#page-teleport-management .teleport-status-verified{background:#e3f1e8;color:#246348}
+#page-teleport-management .teleport-status-failed{background:#f8e4e4;color:#9d3333}
+#page-teleport-management .teleport-status-manual_review,#page-teleport-management .teleport-status-command_result_unknown{background:#fff0c9;color:#825c00}
+#modalBackdrop.centered-modal:has(.teleport-fixed-modal-grid) .modal{width:min(680px,94vw)}
+#modalBackdrop:has(.teleport-fixed-modal-grid) .modal-body{display:block;padding:20px}
+#modalBackdrop:has(.teleport-fixed-modal-grid) .modal-head{border-bottom-color:#d9a23d}
+#modalBackdrop:has(.teleport-fixed-modal-grid) .modal-actions{background:#f5f7f5}
+.teleport-fixed-modal-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(150px,.7fr);gap:16px}
+.teleport-fixed-modal-grid>[hidden]{display:none}
+.teleport-modal-field{display:grid;align-content:start;gap:7px;min-width:0;color:#536078;font-size:10px;font-weight:800}
+.teleport-modal-field>span{color:#425149}
+.teleport-modal-field input,.teleport-modal-field select{width:100%}
+.teleport-modal-field small{color:#7b877f;font-size:9px;font-weight:500;line-height:1.45}
+.teleport-modal-name,.teleport-modal-coordinates,.teleport-modal-owner{grid-column:1/-1}
+.teleport-modal-toggle{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:13px 14px;border-left:3px solid #27664b;background:#edf5f0;color:#2b4637}
+.teleport-modal-toggle>span{display:grid;gap:3px}
+.teleport-modal-toggle small{color:#6d7e74;font-size:9px;font-weight:500}
+.teleport-modal-toggle input{width:20px;height:20px;flex:0 0 auto;accent-color:#27664b}
+@media(max-width:1120px){#page-teleport-management .teleport-rule-grid{grid-template-columns:repeat(2,minmax(0,1fr))}#page-teleport-management .teleport-rule-grid article:nth-child(2){border-right:0}#page-teleport-management .teleport-rule-grid article:nth-child(-n+2){border-bottom:1px solid var(--line)}}
+@media(max-width:980px){#page-teleport-management .teleport-pricing-grid{grid-template-columns:1fr}}
+@media(max-width:640px){#page-teleport-management .teleport-management-toolbar,#page-teleport-management .card-head{align-items:stretch;flex-direction:column}#page-teleport-management .teleport-management-toolbar .btn{width:100%}#page-teleport-management .teleport-rule-grid,#page-teleport-management .teleport-number-grid{grid-template-columns:1fr}#page-teleport-management .teleport-rule-grid article{border-right:0;border-bottom:1px solid var(--line)}#page-teleport-management .teleport-rule-grid article:last-child{border-bottom:0}#page-teleport-management .teleport-head-actions{justify-content:space-between}#page-teleport-management .teleport-table-intro{align-items:flex-start;flex-direction:column}#page-teleport-management .teleport-switch-row{align-items:flex-start}#page-teleport-management .teleport-form-actions{align-items:stretch;flex-direction:column}#page-teleport-management .teleport-form-actions .btn{width:100%}.teleport-fixed-modal-grid{grid-template-columns:1fr}.teleport-modal-name,.teleport-modal-coordinates,.teleport-modal-owner,.teleport-modal-toggle{grid-column:1}}

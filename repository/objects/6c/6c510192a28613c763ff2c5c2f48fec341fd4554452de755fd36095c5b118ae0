@@ -1,0 +1,205 @@
+let teleportFixedLocations = [];
+let teleportSettingsSnapshot = null;
+
+function normalizeTeleportFixedCoordinates(value) {
+  const text = String(value || '').trim();
+  const number = '([+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+))';
+  const match = text.match(new RegExp(`^\\{\\s*X=${number}\\s+Y=${number}\\s+Z=${number}(?:\\s*\\|[^}]*)?\\s*\\}$`, 'i'));
+  return match ? `${match[1]}, ${match[2]}, ${match[3]}` : text;
+}
+
+function teleportFixedLocationPayload(form) {
+  return {
+    name: form.elements.name.value.trim(),
+    coordinates: normalizeTeleportFixedCoordinates(form.elements.coordinates.value),
+    sortOrder: Number(form.elements.sortOrder.value),
+    visibility: form.elements.visibility.value,
+    ownerSteamId: form.elements.visibility.value === 'private' ? form.elements.ownerSteamId.value.trim() : '',
+    enabled: form.elements.enabled.checked
+  };
+}
+
+function syncTeleportFixedOwnerField(form) {
+  const privateLocation = form.elements.visibility.value === 'private';
+  const field = $('[data-teleport-fixed-owner]', form);
+  if (!field) return;
+  field.hidden = !privateLocation;
+  form.elements.ownerSteamId.required = privateLocation;
+  if (!privateLocation) form.elements.ownerSteamId.value = '';
+}
+
+function openTeleportFixedLocationModal(item = null) {
+  const editing = Boolean(item);
+  const coordinates = editing ? `${Number(item.worldX)}, ${Number(item.worldY)}, ${Number(item.worldZ)}` : '';
+  openModal({
+    title: editing ? '编辑固定位置' : '新增固定位置',
+    description: '配置玩家与载具传送使用的服务端授权地图目标',
+    submitText: editing ? '保存更改' : '添加位置',
+    body: `<div class="teleport-fixed-modal-grid">
+      <input name="id" type="hidden" value="${editing ? Number(item.id) : ''}">
+      <label class="teleport-modal-field teleport-modal-name"><span>位置名称</span><input name="name" maxlength="100" required placeholder="例如：交易区入口" value="${editing ? esc(item.name) : ''}"><small>该名称会显示在商城地图目标中</small></label>
+      <label class="teleport-modal-field teleport-modal-coordinates"><span>XYZ 坐标</span><input name="coordinates" type="text" maxlength="180" required placeholder="粘贴游戏坐标，或输入 X, Y, Z" value="${coordinates}"><small>支持自动识别 {X=... Y=... Z=...|P=... Y=... R=...}</small></label>
+      <label class="teleport-modal-field"><span>可见范围</span><select name="visibility"><option value="public"${item?.visibility !== 'private' ? ' selected' : ''}>全部玩家</option><option value="private"${item?.visibility === 'private' ? ' selected' : ''}>指定私人玩家</option></select></label>
+      <label class="teleport-modal-field"><span>显示排序</span><input name="sortOrder" type="number" min="0" max="1000000" placeholder="数值越小越靠前" value="${editing ? Number(item.sortOrder || 0) : 0}" required><small>范围 0-1000000，数值越小越靠前</small></label>
+      <label class="teleport-modal-field teleport-modal-owner" data-teleport-fixed-owner${item?.visibility === 'private' ? '' : ' hidden'}><span>私人玩家 SteamID</span><input name="ownerSteamId" inputmode="numeric" pattern="[0-9]{17}" maxlength="17" placeholder="填写 17 位 SteamID" value="${editing ? esc(item.ownerSteamId || '') : ''}"><small>只有该玩家能看到并使用此位置</small></label>
+      <label class="teleport-modal-toggle"><span><strong>启用此位置</strong><small>启用后才会出现在商城传送地图</small></span><input name="enabled" type="checkbox"${!editing || item.enabled ? ' checked' : ''}></label>
+    </div>`,
+    onSubmit: async (form) => {
+      const id = form.elements.id.value;
+      await api(id ? `/api/teleport-management/fixed-locations/${id}` : '/api/teleport-management/fixed-locations', { method: id ? 'PUT' : 'POST', body: JSON.stringify(teleportFixedLocationPayload(form)) });
+      toast(id ? '固定位置已更新' : '固定位置已添加');
+      closeModal();
+      await loadTeleportManagement();
+    }
+  });
+  $('#modalBackdrop').classList.add('centered-modal');
+  const form = $('#modalForm');
+  form.elements.visibility.addEventListener('change', () => syncTeleportFixedOwnerField(form));
+  form.elements.coordinates.addEventListener('input', () => {
+    const normalized = normalizeTeleportFixedCoordinates(form.elements.coordinates.value);
+    if (normalized !== form.elements.coordinates.value.trim()) form.elements.coordinates.value = normalized;
+  });
+  syncTeleportFixedOwnerField(form);
+}
+
+function renderTeleportFixedLocations(items) {
+  const root = $('#page-teleport-management');
+  teleportFixedLocations = Array.isArray(items) ? items : [];
+  $('#teleportFixedLocationCount', root).textContent = `${teleportFixedLocations.length} 个位置`;
+  $('#teleportFixedLocationRows', root).innerHTML = teleportFixedLocations.length ? teleportFixedLocations.map((item) => `<tr><td><strong class="teleport-location-name">${esc(item.name)}</strong></td><td><span class="teleport-coordinate-value">${Number(item.worldX)}, ${Number(item.worldY)}, ${Number(item.worldZ)}</span></td><td>${item.visibility === 'private' ? `<span class="teleport-visibility private">私人玩家</span><small class="teleport-owner-id">${esc(item.ownerSteamId || '--')}</small>` : '<span class="teleport-visibility public">全部玩家</span>'}</td><td><span class="teleport-location-state ${item.enabled ? 'enabled' : 'disabled'}">${item.enabled ? '已启用' : '已停用'}</span></td><td><span class="teleport-sort-value">${Number(item.sortOrder || 0)}</span></td><td><div class="teleport-row-actions"><button class="btn secondary" type="button" data-fixed-edit="${Number(item.id)}">编辑</button><button class="btn danger" type="button" data-fixed-delete="${Number(item.id)}">删除</button></div></td></tr>`).join('') : '<tr><td colspan="6" class="empty">暂无固定位置，点击右上角“新增位置”进行配置</td></tr>';
+}
+
+function syncTeleportPricingFields(form, category) {
+  const mode = form.elements[`${category}PricingMode`].value || 'fixed';
+  for (const field of form.querySelectorAll('[data-pricing-field]')) {
+    const hidden = field.dataset.pricingField !== mode;
+    field.hidden = hidden;
+    field.querySelector('input').disabled = hidden;
+  }
+  for (const help of form.querySelectorAll('[data-pricing-help]')) help.hidden = help.dataset.pricingHelp !== mode;
+}
+
+function teleportSettingsPayload(category, form) {
+  const settings = teleportSettingsSnapshot || {};
+  const payload = {
+    characterPricingMode: settings.characterPricingMode || 'fixed',
+    characterFixedPrice: Number(settings.characterFixedPrice || 0),
+    characterPerKilometerPrice: Number(settings.characterPerKilometerPrice || 0),
+    characterDailyLimit: Number(settings.characterDailyLimit || 0),
+    characterIntervalSeconds: Number(settings.characterIntervalSeconds || 0),
+    vehiclePricingMode: settings.vehiclePricingMode || 'fixed',
+    vehicleFixedPrice: Number(settings.vehicleFixedPrice || 0),
+    vehiclePerKilometerPrice: Number(settings.vehiclePerKilometerPrice || 0),
+    vehicleDailyLimit: Number(settings.vehicleDailyLimit || 0),
+    vehicleIntervalSeconds: Number(settings.vehicleIntervalSeconds || 0),
+    playerEnabled: Boolean(settings.playerEnabled),
+    ownedVehicleEnabled: Boolean(settings.ownedVehicleEnabled),
+    territoryFlagEnabled: Boolean(settings.territoryFlagEnabled),
+    fixedLocationEnabled: Boolean(settings.fixedLocationEnabled),
+    vehicleToTerritoryFlagEnabled: Boolean(settings.vehicleToTerritoryFlagEnabled),
+    vehicleToPlayerEnabled: Boolean(settings.vehicleToPlayerEnabled),
+    vehicleToFixedLocationEnabled: Boolean(settings.vehicleToFixedLocationEnabled)
+  };
+  if (category === 'character') {
+    const enabled = form.elements.characterEnabled.checked;
+    Object.assign(payload, {
+      characterPricingMode: form.elements.characterPricingMode.value,
+      characterFixedPrice: Number(form.elements.characterFixedPrice.value),
+      characterPerKilometerPrice: Number(form.elements.characterPerKilometerPrice.value),
+      characterDailyLimit: Number(form.elements.characterDailyLimit.value),
+      characterIntervalSeconds: Number(form.elements.characterIntervalSeconds.value),
+      playerEnabled: enabled,
+      ownedVehicleEnabled: enabled,
+      territoryFlagEnabled: enabled,
+      fixedLocationEnabled: enabled
+    });
+  } else {
+    const enabled = form.elements.vehicleEnabled.checked;
+    Object.assign(payload, {
+      vehiclePricingMode: form.elements.vehiclePricingMode.value,
+      vehicleFixedPrice: Number(form.elements.vehicleFixedPrice.value),
+      vehiclePerKilometerPrice: Number(form.elements.vehiclePerKilometerPrice.value),
+      vehicleDailyLimit: Number(form.elements.vehicleDailyLimit.value),
+      vehicleIntervalSeconds: Number(form.elements.vehicleIntervalSeconds.value),
+      vehicleToTerritoryFlagEnabled: enabled,
+      vehicleToPlayerEnabled: enabled,
+      vehicleToFixedLocationEnabled: enabled
+    });
+  }
+  return payload;
+}
+
+function renderTeleportManagement(data) {
+  const root = $('#page-teleport-management');
+  if (!root) return;
+  const settings = data.settings || {};
+  teleportSettingsSnapshot = { ...settings };
+  const characterForm = $('#teleportCharacterSettingsForm', root);
+  const vehicleForm = $('#teleportVehicleSettingsForm', root);
+  characterForm.elements.characterEnabled.checked = ['playerEnabled', 'ownedVehicleEnabled', 'territoryFlagEnabled', 'fixedLocationEnabled'].some((key) => Boolean(settings[key]));
+  vehicleForm.elements.vehicleEnabled.checked = ['vehicleToTerritoryFlagEnabled', 'vehicleToPlayerEnabled', 'vehicleToFixedLocationEnabled'].some((key) => Boolean(settings[key]));
+  for (const key of ['characterFixedPrice', 'characterPerKilometerPrice', 'characterDailyLimit', 'characterIntervalSeconds']) characterForm.elements[key].value = Number(settings[key] || 0);
+  for (const key of ['vehicleFixedPrice', 'vehiclePerKilometerPrice', 'vehicleDailyLimit', 'vehicleIntervalSeconds']) vehicleForm.elements[key].value = Number(settings[key] || 0);
+  characterForm.elements.characterPricingMode.value = settings.characterPricingMode || 'fixed';
+  vehicleForm.elements.vehiclePricingMode.value = settings.vehiclePricingMode || 'fixed';
+  syncTeleportPricingFields(characterForm, 'character');
+  syncTeleportPricingFields(vehicleForm, 'vehicle');
+  characterForm.querySelector('button[type="submit"]').disabled = false;
+  vehicleForm.querySelector('button[type="submit"]').disabled = false;
+  $('#teleportSettingsUpdatedAt', root).textContent = settings.updatedAt ? `最近更新：${date(settings.updatedAt)}` : '尚无更新时间';
+  renderTeleportFixedLocations(data.fixedLocations);
+  const operations = Array.isArray(data.operations) ? data.operations : [];
+  $('#teleportOperationCount', root).textContent = `${operations.length} 条`;
+  $('#teleportOperationRows', root).innerHTML = operations.length ? operations.map((item) => `<tr><td><span class="teleport-status teleport-status-${esc(item.status)}">${item.status === 'manual_review' ? '人工复核' : item.status === 'verified' ? '已验证' : item.status === 'success_pending_persistence' ? '等待持久化复核' : item.status === 'command_result_unknown' ? '命令结果未知' : item.status === 'refunded' ? '已退款' : item.status === 'completed' ? '已完成' : item.status === 'failed' ? '失败' : '处理中'}</span></td><td>${esc(item.steamId)}</td><td>${esc(item.targetName || item.targetType)}</td><td>${Number(item.chargedAmount || 0)}</td><td>${esc(item.errorMessage || item.errorCode || '--')}</td><td>${date(item.completedAt || item.createdAt)}</td></tr>`).join('') : '<tr><td colspan="6" class="empty">暂无传送记录</td></tr>';
+}
+
+async function loadTeleportManagement() {
+  const root = $('#page-teleport-management');
+  if (!root) return;
+  try {
+    renderTeleportManagement(await api('/api/teleport-management'));
+  } catch (error) {
+    $('#teleportFixedLocationRows', root).innerHTML = '<tr><td colspan="6" class="empty">固定位置读取失败，请刷新重试</td></tr>';
+    $('#teleportOperationRows', root).innerHTML = '<tr><td colspan="6" class="empty">传送记录读取失败，请刷新重试</td></tr>';
+    $('#teleportOperationCount', root).textContent = '读取失败';
+    throw error;
+  }
+}
+
+(function bindTeleportManagement() {
+  const root = $('#page-teleport-management');
+  if (!root || root.dataset.bound === '1') return;
+  root.dataset.bound = '1';
+  $('#refreshTeleportManagement', root).addEventListener('click', (event) => withBusy(event.currentTarget, loadTeleportManagement));
+  $('#openTeleportFixedLocation', root).addEventListener('click', () => openTeleportFixedLocationModal());
+  for (const [formId, category, label] of [['teleportCharacterSettingsForm', 'character', '玩家传送'], ['teleportVehicleSettingsForm', 'vehicle', '载具传送']]) {
+    const form = $(`#${formId}`, root);
+    form.addEventListener('change', (event) => {
+      if (event.target.name === `${category}PricingMode`) syncTeleportPricingFields(form, category);
+    });
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = event.submitter || form.querySelector('button[type="submit"]');
+      await withBusy(button, async () => {
+        await api('/api/teleport-management/settings', { method: 'PUT', body: JSON.stringify(teleportSettingsPayload(category, form)) });
+        toast(`${label}设置已保存`);
+        await loadTeleportManagement();
+      });
+    });
+  }
+  $('#teleportFixedLocationRows', root).addEventListener('click', async (event) => {
+    const editButton = event.target.closest('[data-fixed-edit]');
+    const deleteButton = event.target.closest('[data-fixed-delete]');
+    if (editButton) {
+      const item = teleportFixedLocations.find((entry) => entry.id === Number(editButton.dataset.fixedEdit));
+      if (item) openTeleportFixedLocationModal(item);
+    }
+    if (deleteButton && confirm('确定删除这个固定位置？')) {
+      await withBusy(deleteButton, async () => {
+        await api(`/api/teleport-management/fixed-locations/${deleteButton.dataset.fixedDelete}`, { method: 'DELETE' });
+        toast('固定位置已删除');
+        await loadTeleportManagement();
+      });
+    }
+  });
+})();

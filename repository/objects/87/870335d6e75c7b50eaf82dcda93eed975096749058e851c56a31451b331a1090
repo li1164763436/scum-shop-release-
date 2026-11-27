@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#17382c">
+  <title>SCUM商城管理后台</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
+  <link rel="stylesheet" href="/admin/styles.css?v=202611271338">
+  <link rel="stylesheet" href="/admin/css/admin-unified.css?v=202611070001">
+  <link rel="stylesheet" href="/admin/css/overview/dashboard.css?v=202611010028">
+  <link rel="stylesheet" href="/admin/css/system/domain-access.css?v=202611180846">
+  <script src="/admin/page-loader.js?v=202611271338" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand-mark"><b>SC</b><i>OPS</i></span>
+        <div><strong>SCUM-发货中心</strong><small>Fulfillment Operations</small></div>
+      </div>
+      <nav class="nav" aria-label="主导航">
+        <div class="nav-group"><span>总览</span>
+          <button class="nav-item active" data-page="dashboard"><i>01</i><b>运行总览</b></button>
+        </div>
+        <div class="nav-group"><span>商城</span>
+          <button class="nav-item" data-page="products"><i>02</i><b>商品管理</b></button>
+          <button class="nav-item" data-page="starter-gift"><i>03</i><b>礼包管理</b></button>
+          <button class="nav-item" data-page="redeem-codes"><i>04</i><b>兑换管理</b></button>
+          <button class="nav-item" data-page="rewards"><i>05</i><b>签到管理</b></button>
+          <button class="nav-item" data-page="activities-lottery"><i>05A</i><b>抽奖管理</b></button>
+          <button class="nav-item" data-page="stock-market"><i>05B</i><b>股市管理</b></button>
+          <button class="nav-item" data-page="cloud-warehouse"><i>05C</i><b>云储管理</b></button>
+        </div>
+        <div class="nav-group"><span>玩家</span>
+          <button class="nav-item" data-page="accounts"><i>06</i><b>玩家管理</b></button>
+          <button class="nav-item" data-page="membership"><i>06A</i><b>会员中心</b></button>
+          <button class="nav-item" data-page="vehicle-management"><i>06B</i><b>保险管理</b></button>
+          <button class="nav-item" data-page="teleport-management"><i>06C</i><b>传送管理</b></button>
+        </div>
+        <div class="nav-group"><span>履约</span>
+          <button class="nav-item" data-page="orders"><i>07</i><b>订单管理</b></button>
+          <button class="nav-item" data-page="game-claims"><i>07A</i><b>内置管理</b></button>
+          <button class="nav-item" data-page="announcements"><i>07B</i><b>定时公告</b></button>
+        </div>
+        <div class="nav-group"><span>运维</span>
+          <button class="nav-item" data-page="operations"><i>08</i><b>日志总览</b></button>
+          <button class="nav-item" data-page="store-settings"><i>09</i><b>商城设置</b></button>
+          <button class="nav-item" data-page="gateway" aria-label="网关状态"><i>10</i><b>网关状态</b></button>
+        </div>
+        <div class="nav-group"><span>系统</span>
+          <button class="nav-item" data-page="config"><i>11</i><b>对接配置</b></button>
+          <button class="nav-item" data-page="domain-access"><i>12</i><b>域名接入</b></button>
+        </div>
+      </nav>
+      <div class="sidebar-foot"><span class="pulse"></span><div><strong>自动发货服务</strong><small id="serviceStatus">状态检测中</small></div></div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <button class="icon-btn mobile-menu" id="menuToggle" aria-label="展开菜单">☰</button>
+        <div class="page-heading"><p id="breadcrumb">总览 / 运行总览</p><h1 id="pageTitle">运行总览</h1></div>
+        <div class="top-actions">
+          <span class="admin-identity" id="adminIdentity" hidden><strong id="adminIdentityName">--</strong><small id="adminIdentityRole">--</small></span>
+          <button class="btn secondary admin-logout" id="adminLogout" type="button" hidden>返回前台</button>
+          <span class="topbar-console-label">LIVE CONSOLE</span>
+          <span class="connection-pill"><i id="gatewayDot"></i><span id="gatewayStatus">网关检测中</span></span>
+          <button class="icon-btn" id="refreshPage" title="刷新当前页面" aria-label="刷新当前页面">↻</button>
+        </div>
+      </header>
+      <main class="content" id="pageMount" aria-live="polite"></main>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modalBackdrop" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-head"><div><h2 id="modalTitle">表单</h2><p id="modalDescription"></p></div><button class="icon-btn" id="closeModal" aria-label="关闭">×</button></div>
+      <form id="modalForm"><div class="modal-body" id="modalBody"></div><div class="modal-actions"><button type="button" class="btn secondary" id="cancelModal">取消</button><button type="submit" class="btn primary" id="submitModal">确认</button></div></form>
+    </div>
+  </div>
+  <div class="account-menu" id="accountMenu" hidden>
+    <button data-account-action="profile">查看附加信息</button>
+    <button data-account-action="gifts">礼包记录</button>
+    <button data-account-action="orders">消费记录</button>
+    <span></span>
+    <button data-account-action="add-balance">增减商城币</button>
+    <button data-account-action="add-coins">增减金条</button>
+    <button data-account-action="member">赠送会员</button>
+    <button data-account-action="pass">修改属性</button>
+    <span></span>
+    <button data-account-action="squad-owner">赠送建家权限</button>
+    <button data-account-action="insurance">赠送载具保险</button>
+    <button data-account-action="unlock">赠送开锁通知</button>
+    <button data-account-action="delivery-count">设置自由传送次数</button>
+    <button data-account-action="restore-rank">恢复该玩家上榜</button>
+    <button data-account-action="edit-account">修改账户/密码/邮箱</button>
+    <button data-account-action="reminder">自定义上线/下线提醒</button>
+    <button class="danger" data-account-action="delete-account">删除注册信息</button>
+  </div>
+  <div class="modal-backdrop centered-modal version-update-config-backdrop" id="versionUpdateConfigModal" aria-hidden="true">
+    <section class="modal version-update-config-modal" role="dialog" aria-modal="true" aria-labelledby="versionUpdateConfigTitle">
+      <div class="modal-head"><div><h2 id="versionUpdateConfigTitle">版本更新</h2><p>检查新版本并执行自动覆盖更新</p></div><button class="icon-btn" id="closeVersionUpdateConfig" aria-label="关闭">×</button></div>
+      <div class="version-update-config-body">
+        <div class="version-update-summary"><div><span>当前版本</span><strong id="versionUpdateCurrentVersion">--</strong></div><div><span>远程版本</span><strong id="versionUpdateRemoteVersion">--</strong></div><div><span>更新文件数</span><strong id="versionUpdateFileCount">--</strong></div></div>
+        <div class="version-update-checksums"><div><span>当前校验码</span><code id="versionUpdateCurrentChecksum">--</code></div><div><span>远程校验码</span><code id="versionUpdateRemoteChecksum">--</code></div></div>
+        <section class="version-update-file-section"><div class="version-update-file-head"><strong>更新列表</strong><span id="versionUpdateChangedCount">0 个文件需要更新</span></div><div class="version-update-file-columns"><span>安装</span><span>名称</span><span>当前大小</span><span>新文件大小</span><span>校验码</span></div><div class="version-update-file-list" id="versionUpdateFileList"><div class="empty">正在读取更新清单</div></div><div class="version-update-file-pager"><button type="button" class="btn secondary" id="versionUpdatePrevPage">上一页</button><span id="versionUpdatePageInfo">第 1 / 1 页</span><button type="button" class="btn secondary" id="versionUpdateNextPage">下一页</button></div></section>
+        <div class="version-update-current-status" id="versionUpdateStatusCard"><div class="version-update-status-head"><strong id="versionUpdateMessage">等待检查</strong><span class="version-update-status-badge" id="versionUpdateStatus">待检查</span></div><div class="version-update-status-track"><i id="versionUpdateStatusBar"></i></div><div class="version-update-status-detail" id="versionUpdateStatusDetail"><span id="versionUpdateCurrentFile">当前文件：--</span><small>更新时间：<b id="versionUpdateTime">--</b></small></div></div>
+      </div>
+      <div class="modal-actions"><button type="button" class="btn secondary" id="reloadVersionUpdate">刷新状态</button><button type="button" class="btn secondary" id="downloadVersionUpdate">下载文件</button><button type="button" class="btn primary" id="installVersionUpdate" disabled>安装更新</button></div>
+    </section>
+  </div>
+  <div id="toastStack" class="toast-stack" aria-live="polite"></div>
+</body>
+</html>
+
