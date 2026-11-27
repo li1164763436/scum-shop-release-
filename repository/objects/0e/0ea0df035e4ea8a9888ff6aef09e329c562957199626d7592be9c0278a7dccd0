@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0d0d">
+  <meta name="description" content="SCUM 生存物资商城，使用商城币购买并自动发放到游戏内。">
+  <title>SCUM · 边境补给站</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
+  <link rel="stylesheet" href="/shop/styles.css?v=202611231649">
+  <link rel="stylesheet" href="/shop/css/store.css?v=202611131955">
+  <link rel="stylesheet" href="/shop/css/activity.css?v=202611131955">
+  <link rel="stylesheet" href="/shop/css/teleport.css?v=202611221245">
+  <link rel="stylesheet" href="/shop/css/insurance.css?v=202611231649">
+  <link rel="stylesheet" href="/shop/css/account.css?v=202611131955">
+  <link rel="stylesheet" href="/shop/css/membership.css?v=202611131955">
+  <link rel="stylesheet" href="/shop/css/errors.css?v=202611231649">
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+  <header class="site-header">
+    <a class="brand" href="#store" data-route="store" aria-label="返回商城首页">
+      <span class="brand-stamp">S</span>
+      <span><strong>边境补给站</strong><small>SCUM 生存补给</small></span>
+    </a>
+    <button class="menu-toggle" id="menuToggle" type="button" aria-expanded="false" aria-controls="mainNav">菜单</button>
+    <nav class="main-nav" id="mainNav" aria-label="主导航">
+      <button class="nav-link active" type="button" data-route="store">物资仓库</button>
+      <button class="nav-link" type="button" data-route="activity">活动</button>
+      <button class="nav-link auth-only" type="button" data-route="account" hidden>我的账户</button>
+      
+      <button class="nav-link" type="button" data-route="membership">会员中心</button>
+    </nav>
+    <div class="header-actions">
+      <div class="header-account auth-only" id="headerAccount" hidden>
+        <button class="header-account-trigger" id="accountMenuButton" type="button" aria-expanded="false" aria-controls="accountMenu" aria-haspopup="true"><span class="header-account-name"><span class="online-dot" aria-hidden="true"></span><span id="chipUsername">幸存者</span></span><small class="header-account-balance">余额：<b id="headerCoinBalance">0</b>币</small><span class="header-account-chevron" aria-hidden="true">⌄</span></button>
+        <div class="header-account-menu" id="accountMenu" hidden>
+          <div class="header-account-meta" id="chipRole" hidden>超级管理员</div>
+          <a id="adminPortalLink" href="/admin/" hidden>管理后台</a>
+          <button type="button" data-auth-open="change">修改密码</button>
+          <button id="logoutButton" type="button">退出登录</button>
+        </div>
+      </div>
+      <button class="button ghost guest-only" type="button" data-auth-open="login">登录</button>
+      <button class="button primary guest-only" type="button" data-auth-open="register">建立档案</button>
+    </div>
+  </header>
+
+  <main id="shopPageMount"></main>
+
+  <footer><span>SCUM 生存补给网络</span><span>所有商品均为游戏内虚拟物品 · 无现金支付与充值服务</span><span>连接状态：<b>待命</b></span></footer>
+
+  <div id="shopModalMount"></div>
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+  <script src="/shop/page-loader.js?v=202611272353" defer></script>
+</body>
+</html>

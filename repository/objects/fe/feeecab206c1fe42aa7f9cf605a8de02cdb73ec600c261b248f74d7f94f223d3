@@ -1,0 +1,186 @@
+const rewardRuleTypes = { daily_checkin: '每日签到', checkin_streak: '连续签到', checkin_total: '累计签到', online_total: '可信累计在线' };
+function rewardThreshold(type, value) {
+  const amount = number(value);
+  if (type !== 'online_total') return `${amount} 天`;
+  const hours = Math.floor(amount / 3600);
+  const minutes = Math.ceil((amount % 3600) / 60);
+  return hours ? `${hours} 小时${minutes ? ` ${minutes} 分钟` : ''}` : `${Math.max(1, minutes)} 分钟`;
+}
+async function loadRewards() {
+  $('#rewardRuleRows').innerHTML = empty(5, '正在加载奖励规则...', true);
+  const claimRows = $('#rewardClaimRows');
+  if (claimRows) claimRows.innerHTML = empty(6, '正在加载领取记录...', true);
+  const request = (url) => api(url, { signal: AbortSignal.timeout(15000) });
+  const failureMessage = (error) => error.name === 'TimeoutError' ? '加载超时，请点击刷新重试' : error.message;
+  await Promise.allSettled([
+    request('/api/reward-rules').then((data) => {
+      state.rewardRules = list(data, ['items', 'rules']);
+      renderRewardRules();
+    }).catch((error) => { state.rewardRules = []; renderRewardRules(failureMessage(error)); }),
+    claimRows ? request('/api/reward-claims?limit=50').then((data) => {
+      state.rewardClaims = list(data, ['items', 'claims']);
+      renderRewardClaims();
+    }).catch((error) => { state.rewardClaims = []; renderRewardClaims(failureMessage(error)); }) : Promise.resolve(),
+    request('/api/gifts').then((data) => { state.gifts = list(data, ['gifts', 'items']); }).catch((error) => toast(failureMessage(error), true)),
+    request('/api/products?enabled=true').then((data) => { state.rewardProducts = list(data, ['products', 'items']); }).catch((error) => { state.rewardProducts = []; toast(failureMessage(error), true); })
+  ]);
+}
+function renderRewardRules(error = '') {
+  if (error) { $('#rewardRuleRows').innerHTML = empty(5, error); return; }
+  $('#rewardRuleRows').innerHTML = state.rewardRules.length ? state.rewardRules.map((rule) => `<tr><td><strong>${esc(rewardRuleTypes[rule.ruleType] || rule.ruleType)}</strong></td><td>${esc(rewardThreshold(rule.ruleType, rule.threshold))}</td><td><strong>${esc(rule.rewardType === 'product' ? rule.productName || `商品 #${rule.productId}` : rule.rewardType === 'combined' ? '组合奖励' : rule.coinAmount != null ? `${number(rule.coinAmount)} 商城币` : rule.giftName || `礼包 #${rule.giftId}`)}</strong>${rule.legacyGift ? '<br><span class="muted">历史礼包规则</span>' : ''}</td><td>${status(rule.enabled ? 'active' : 'inactive').replace('上架中', '启用').replace('已下架', '停用')}</td><td><div class="row-actions reward-rule-actions"><button class="row-btn reward-rule-action edit" data-edit-reward-rule="${esc(rule.id)}">编辑</button><button class="row-btn reward-rule-action delete" data-delete-reward-rule="${esc(rule.id)}">删除</button></div></td></tr>`).join('') : empty(5, '暂无奖励规则');
+}
+function renderRewardClaims(error = '') {
+  if (!$('#rewardClaimRows')) return;
+  if (error) { $('#rewardClaimRows').innerHTML = empty(6, error); return; }
+  $('#rewardClaimRows').innerHTML = state.rewardClaims.length ? state.rewardClaims.map((claim) => `<tr><td><code>${esc(claim.steamId || '--')}</code></td><td><strong>${esc(rewardRuleTypes[claim.ruleType] || claim.ruleType)}</strong><br><span class="muted">${esc(rewardThreshold(claim.ruleType, claim.threshold))}</span></td><td><strong>${esc(claim.productId ? claim.productName || `商品 #${claim.productId}` : claim.coinAmount != null ? `${number(claim.coinAmount)} 商城币` : claim.giftName || `礼包 #${claim.giftId}`)}</strong></td><td><code>${esc(claim.orderNo || claim.orderId || '--')}</code></td><td>${claim.status ? status(claim.status) : '<span class="badge waiting">待生成</span>'}</td><td>${esc(date(claim.createdAt))}</td></tr>`).join('') : empty(6, '暂无奖励领取记录');
+}
+function rewardRuleModal(rule = {}) {
+  const editing = Boolean(rule.id);
+  const giftOptions = state.gifts.map((gift) => `<option value="${esc(gift.id)}">#${esc(gift.id)} ${esc(gift.name)}${gift.enabled === false ? '（已停用）' : ''}</option>`).join('');
+  openModal({
+    title: editing ? '编辑奖励规则' : '新建奖励规则',
+    description: '选择达成条件和奖励内容，保存后立即按启用状态生效。',
+    submitText: '保存规则',
+    body: `<section class="modal-section full reward-simple-form"><div class="modal-section-grid"><label>奖励条件<select name="ruleType" required><option value="daily_checkin">每日签到</option><option value="checkin_streak">连续签到</option><option value="checkin_total">累计签到</option><option value="online_total">可信累计在线</option></select></label><label>达成门槛<input name="threshold" type="number" min="1" step="1" required value="${esc(rule.ruleType === 'online_total' ? Math.max(1, Math.ceil(Number(rule.threshold || 60) / 60)) : rule.threshold ?? 1)}"><span class="field-hint" id="rewardThresholdHint">每日签到固定为 1 天</span></label><label id="rewardTypeField" hidden>奖励内容<select name="rewardType"><option value="shop_coin">商城币</option><option value="gift">礼包</option><option value="product">商品</option>${rule.rewardType === 'combined' ? '<option value="combined">原组合奖励</option>' : ''}</select></label><label id="rewardCoinField">商城币数量<input name="coinAmount" type="number" min="1" max="9007199254740991" step="1" required value="${esc(rule.coinAmount ?? '')}"></label><label id="rewardGiftField" hidden>选择礼包<select name="giftId"><option value="">请选择礼包</option>${giftOptions}</select></label><label>启用状态<select name="enabled"><option value="true">启用</option><option value="false">停用</option></select></label><div id="rewardProductField" class="reward-product-field reward-simple-product" hidden><input name="productId" type="hidden" value="${esc(rule.productId || '')}"><div id="rewardProductSelection" class="reward-product-selection"></div><button class="btn secondary" type="button" data-manage-reward-product>选择商品</button></div></div></section>`,
+    onSubmit: async (form) => {
+      const values = Object.fromEntries(new FormData(form));
+      const online = values.ruleType === 'online_total';
+      const productItems = JSON.parse(values.productItems || '[]');
+      if (online && ['product', 'combined'].includes(values.rewardType) && !productItems.length) throw new Error('请先选择奖励商品');
+      const reward = !online || values.rewardType === 'shop_coin' ? { rewardType: 'shop_coin', coinAmount: Number(values.coinAmount) } : values.rewardType === 'combined' ? { rewardType: 'combined', giftId: Number(values.giftId), productItems, coinAmount: Number(values.coinAmount) } : values.rewardType === 'product' ? { rewardType: 'product', productItems } : { rewardType: 'gift', giftId: Number(values.giftId) };
+      const threshold = values.ruleType === 'daily_checkin' ? 1 : online ? Math.max(1, Math.round(Number(values.threshold) * 60)) : Number(values.threshold);
+      const body = { ruleType: values.ruleType, threshold, ...reward, enabled: values.enabled === 'true' };
+      await api(editing ? `/api/reward-rules/${encodeURIComponent(rule.id)}` : '/api/reward-rules', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) });
+      toast(editing ? '奖励规则已更新' : '奖励规则已创建'); closeModal(); await loadRewards();
+    }
+  });
+  $('#modalBackdrop').classList.add('centered-modal');
+  const form = $('#modalForm');
+  form.elements.ruleType.value = rule.ruleType || 'daily_checkin';
+  form.elements.rewardType.value = rule.rewardType || (rule.productId ? 'product' : rule.giftId ? 'gift' : 'shop_coin');
+  form.elements.giftId.value = String(rule.giftId || '');
+  form.elements.productId.value = String(rule.productId || '');
+  const productQuantityInput = document.createElement('input');
+  productQuantityInput.type = 'hidden';
+  productQuantityInput.name = 'productQuantity';
+  productQuantityInput.value = String(rule.productQuantity || 1);
+  $('#rewardProductField', form).append(productQuantityInput);
+  const productItemsInput = document.createElement('input');
+  productItemsInput.type = 'hidden';
+  productItemsInput.name = 'productItems';
+  productItemsInput.value = JSON.stringify(rule.productItems?.length ? rule.productItems : rule.productId ? [{ productId: rule.productId, quantity: rule.productQuantity || 1 }] : []);
+  $('#rewardProductField', form).append(productItemsInput);
+  form.elements.enabled.value = rule.enabled === false ? 'false' : 'true';
+  renderRewardProductSelection(form);
+  $('[data-manage-reward-product]', form).addEventListener('click', () => openRewardProductPicker(form));
+  updateRewardThresholdField();
+}
+function renderRewardProductSelection(form) {
+  const items = JSON.parse(form.elements.productItems.value || '[]');
+  const selected = items.map((item) => ({ ...item, product: (state.rewardProducts || []).find((product) => Number(product.id) === Number(item.productId)) })).filter((item) => item.product);
+  $('#rewardProductSelection').innerHTML = selected.length ? selected.slice(0, 4).map(({ product, quantity }) => `<div class="reward-selected-product"><div class="reward-selected-product-media">${product.imagePath ? `<img src="${esc(product.imagePath)}" alt="${esc(product.name)}">` : '<span class="reward-product-placeholder">商品</span>'}<b>×${number(quantity)}</b></div><strong title="${esc(product.name)}">${esc(product.name)}</strong></div>`).join('') : '<div class="reward-product-empty">暂未选择商品</div>';
+}
+function openRewardProductPicker(form) {
+  const selectedProducts = new Map(JSON.parse(form.elements.productItems.value || '[]').map((item) => [String(item.productId), Number(item.quantity) || 1]));
+  const pageSize = 25;
+  const selectedPageSize = 6;
+  let page = 1;
+  let selectedPage = 1;
+  let keyword = '';
+  const backdrop = document.createElement('div');
+  backdrop.className = 'reward-product-picker-backdrop';
+  backdrop.innerHTML = '<section class="reward-product-picker"><div class="reward-product-picker-head"><div><h3>管理奖励商品</h3><p>选择可信累计在线达成后发放的商品。</p></div><button class="icon-btn" type="button" data-close-reward-product>×</button></div><div class="reward-product-picker-main"><div class="reward-product-picker-browser"><div class="reward-product-picker-search"><input type="search" placeholder="搜索商品名称、编号或 SKU" data-reward-product-search><button class="btn primary" type="button" data-search-reward-product>搜索</button></div><div class="reward-product-picker-list" data-reward-product-list></div><div class="reward-product-picker-pager"><button class="btn secondary" type="button" data-reward-page-prev>上一页</button><span data-reward-page-info></span><button class="btn secondary" type="button" data-reward-page-next>下一页</button></div></div><aside class="reward-product-selected-panel"><div class="reward-selected-head"><div><h4>已选清单</h4><p>可选择多个商品并分别设置数量。</p></div><b data-selected-count>0</b></div><div data-reward-product-selected></div><div class="reward-selected-pager"><button class="btn secondary" type="button" data-selected-page-prev>上一页</button><span data-selected-page-info></span><button class="btn secondary" type="button" data-selected-page-next>下一页</button></div><div class="reward-selected-actions"><button class="btn primary" type="button" data-confirm-reward-product>确认选择</button></div></aside></div></section>';
+  document.body.append(backdrop);
+  const close = () => backdrop.remove();
+  const render = () => {
+    const filtered = (state.rewardProducts || []).filter((product) => !keyword || [product.id, product.name, product.sku].some((value) => String(value || '').toLowerCase().includes(keyword)));
+    const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+    page = Math.min(page, pageCount);
+    const items = filtered.slice((page - 1) * pageSize, page * pageSize);
+    $('[data-reward-product-list]', backdrop).innerHTML = items.map((product) => `<button class="reward-product-picker-item${selectedProducts.has(String(product.id)) ? ' active' : ''}" type="button" data-select-reward-product="${esc(product.id)}">${product.imagePath ? `<img src="${esc(product.imagePath)}" alt="${esc(product.name)}">` : '<span class="reward-product-placeholder">商品</span>'}<strong>${esc(product.name)}</strong></button>`).join('') || '<div class="empty reward-product-picker-empty">暂无匹配商品</div>';
+    const selected = [...selectedProducts].map(([productId, quantity]) => ({ product: (state.rewardProducts || []).find((item) => String(item.id) === productId), productId, quantity })).filter((item) => item.product);
+    const selectedPageCount = Math.max(1, Math.ceil(selected.length / selectedPageSize));
+    selectedPage = Math.min(selectedPage, selectedPageCount);
+    const selectedItems = selected.slice((selectedPage - 1) * selectedPageSize, selectedPage * selectedPageSize);
+    $('[data-reward-product-selected]', backdrop).innerHTML = selectedItems.length ? selectedItems.map(({ product, productId, quantity }) => `<div class="reward-product-selected-card">${product.imagePath ? `<img src="${esc(product.imagePath)}" alt="${esc(product.name)}">` : '<span class="reward-product-placeholder">商品</span>'}<strong>${esc(product.name)}</strong><label>数量<input type="number" min="1" max="1000" step="1" value="${quantity}" data-reward-product-quantity="${esc(productId)}"></label><button class="btn danger" type="button" data-remove-reward-product="${esc(productId)}">移除</button></div>`).join('') : '<div class="reward-product-empty">暂未选择商品</div>';
+    $('[data-selected-page-info]', backdrop).textContent = `第 ${selectedPage} / ${selectedPageCount} 页 · 共 ${selected.length} 项`;
+    $('[data-selected-count]', backdrop).textContent = selected.length;
+    $('[data-selected-page-prev]', backdrop).disabled = selectedPage <= 1;
+    $('[data-selected-page-next]', backdrop).disabled = selectedPage >= selectedPageCount;
+    $('[data-reward-page-info]', backdrop).textContent = `第 ${page} / ${pageCount} 页 · 共 ${filtered.length} 个商品`;
+    $('[data-reward-page-prev]', backdrop).disabled = page <= 1;
+    $('[data-reward-page-next]', backdrop).disabled = page >= pageCount;
+  };
+  const search = () => { keyword = $('[data-reward-product-search]', backdrop).value.trim().toLowerCase(); page = 1; render(); };
+  backdrop.addEventListener('click', (event) => {
+    if (event.target === backdrop || event.target.closest('[data-close-reward-product]')) { close(); return; }
+    if (event.target.closest('[data-search-reward-product]')) { search(); return; }
+    if (event.target.closest('[data-reward-page-prev]')) { page -= 1; render(); return; }
+    if (event.target.closest('[data-reward-page-next]')) { page += 1; render(); return; }
+    if (event.target.closest('[data-selected-page-prev]')) { selectedPage -= 1; render(); return; }
+    if (event.target.closest('[data-selected-page-next]')) { selectedPage += 1; render(); return; }
+    if (event.target.closest('[data-confirm-reward-product]')) {
+      if (!selectedProducts.size) { toast('请先选择奖励商品', true); return; }
+      const values = [...selectedProducts].map(([productId, quantity]) => ({ productId: Number(productId), quantity }));
+      form.elements.productItems.value = JSON.stringify(values);
+      form.elements.productId.value = String(values[0].productId);
+      form.elements.productQuantity.value = String(values[0].quantity);
+      renderRewardProductSelection(form);
+      close();
+      return;
+    }
+    const removed = event.target.closest('[data-remove-reward-product]')?.dataset.removeRewardProduct;
+    if (removed) { selectedProducts.delete(removed); render(); return; }
+    const selected = event.target.closest('[data-select-reward-product]')?.dataset.selectRewardProduct;
+    if (!selected) return;
+    if (!selectedProducts.has(selected)) { selectedProducts.set(selected, 1); selectedPage = Math.ceil(selectedProducts.size / selectedPageSize); }
+    render();
+  });
+  backdrop.addEventListener('input', (event) => { const id = event.target.dataset.rewardProductQuantity; if (id) selectedProducts.set(id, Math.max(1, Math.min(1000, Number(event.target.value) || 1))); });
+  $('[data-reward-product-search]', backdrop).addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); search(); } });
+  render();
+}
+function updateRewardThresholdField() {
+  const form = $('#modalForm');
+  const type = form.elements.ruleType?.value;
+  const input = form.elements.threshold;
+  if (!input) return;
+  const online = type === 'online_total';
+  const rewardType = online ? form.elements.rewardType.value : 'shop_coin';
+  $('#rewardTypeField').hidden = !online;
+  form.elements.rewardType.disabled = !online;
+  const coinReward = ['shop_coin', 'combined'].includes(rewardType);
+  const giftReward = ['gift', 'combined'].includes(rewardType);
+  const productReward = ['product', 'combined'].includes(rewardType);
+  $('#rewardCoinField').hidden = !coinReward;
+  form.elements.coinAmount.disabled = !coinReward;
+  form.elements.coinAmount.required = coinReward;
+  $('#rewardGiftField').hidden = !giftReward;
+  form.elements.giftId.disabled = !giftReward;
+  form.elements.giftId.required = giftReward;
+  $('#rewardProductField').hidden = !productReward;
+  form.elements.productId.disabled = !productReward;
+  input.disabled = type === 'daily_checkin';
+  if (type === 'daily_checkin') input.value = '1';
+  $('#rewardThresholdHint').textContent = type === 'online_total' ? '单位：分钟，例如 60 表示 1 小时；每条规则仅领取一次' : type === 'daily_checkin' ? '每日签到固定为 1 天' : type === 'checkin_streak' ? '单位：天；每段连续签到达标奖励一次，断签后可重新达标领取' : '单位：天；累计签到达标奖励一次';
+  form.elements.rewardType.onchange = updateRewardThresholdField;
+}
+
+$('#reloadRewards').addEventListener('click', (event) => withBusy(event.currentTarget, loadRewards));
+
+async function handleRewardClick(event) {
+  const editRewardRuleId = event.target.closest('[data-edit-reward-rule]')?.dataset.editRewardRule;
+  if (editRewardRuleId) await withBusy(event.target.closest('button'), async () => rewardRuleModal(await api(`/api/reward-rules/${encodeURIComponent(editRewardRuleId)}`)));
+  const deleteRewardRuleId = event.target.closest('[data-delete-reward-rule]')?.dataset.deleteRewardRule;
+  if (deleteRewardRuleId && window.confirm('确认永久删除该奖励规则？相关领取、订单、履约和关联数据将全部删除，且无法恢复。')) await withBusy(event.target.closest('button'), async () => {
+    await api(`/api/reward-rules/${encodeURIComponent(deleteRewardRuleId)}`, { method: 'DELETE' });
+    toast('奖励规则已永久删除'); await loadRewards();
+  });
+}
+
+function handleRewardCreateClick(event) {
+  const action = event.target.closest('[data-action]')?.dataset.action;
+  if (action === 'new-reward-rule') rewardRuleModal();
+}
+
+

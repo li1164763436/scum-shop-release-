@@ -1,0 +1,200 @@
+
+#page-config .config-tabs { margin-bottom: 16px; }
+#page-config .config-database-card { position: relative; margin-bottom: 0; }
+#page-config .config-database-card .card-head { padding-left: 62px; }
+#page-config .config-database-card .card-head > strong {
+  padding: 5px 8px;
+  color: #3f6752;
+  background: #eef5f0;
+  border: 1px solid #d2e2d7;
+  border-radius: 5px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+#page-config .config-database-card .form-grid { padding: 20px; }
+
+@media (max-width: 620px) {
+  #page-config .config-tabs { overflow-x: auto; }
+  #page-config .config-tabs .tab { min-width: max-content; }
+  #page-config .config-database-card .card-head { padding-left: 54px; }
+}
+
+
+.dynamic-row.announcement { grid-template-columns: minmax(130px,.45fr) minmax(260px,1.5fr) minmax(120px,.45fr) auto; }
+
+
+.version-update-config-backdrop, .version-update-backdrop { z-index: 120; }
+
+
+.version-update-config-modal { width: min(880px, 94vw) !important; height: min(820px, 90vh); max-height: 90vh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; border-radius: 12px; overflow: hidden; }
+
+
+.version-update-config-body { min-height: 0; padding: 22px; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 16px; overflow: hidden; }
+.version-update-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.version-update-summary > div, .version-update-checksums > div { padding: 13px; display: grid; gap: 5px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; min-width: 0; }
+.version-update-summary span, .version-update-checksums span { color: var(--muted); font-size: 11px; }
+.version-update-summary strong { font-size: 16px; }
+.version-update-checksums { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.version-update-checksums code { overflow: hidden; color: #34425a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.version-update-file-section { min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.version-update-file-head { padding: 12px 14px; display: flex; justify-content: space-between; gap: 12px; background: #f5f7fa; }
+.version-update-file-head span { color: var(--muted); font-size: 12px; }
+.version-update-file-columns, .version-update-file { display: grid; grid-template-columns: 68px minmax(180px, 1fr) 82px 90px minmax(150px, .75fr); gap: 12px; align-items: center; }
+.version-update-file-columns { padding: 9px 14px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); background: #fbfcfe; }
+.version-update-file-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.version-update-file-list > .empty { min-height: 100%; display: grid; place-items: center; }
+.version-update-file { height: 52px; min-height: 52px; padding: 10px 14px; border-top: 1px solid var(--line); }
+.version-update-file div { display: grid; gap: 3px; min-width: 0; }
+.version-update-file strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.version-update-file small { color: var(--muted); font-size: 10px; }
+.version-update-file-size { min-width: 0; overflow: hidden; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.version-update-file-target-size { color: #246b50; font-weight: 700; }
+.version-update-file code { overflow: hidden; color: #536078; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.version-update-install-state { font-size: 11px; font-weight: 700; }
+.version-update-install-state.installed { color: #158566; }
+.version-update-install-state.downloaded { color: #246bd6; }
+.version-update-install-state.pending { color: #b76b12; }
+.version-update-file-pager { min-height: 52px; padding: 10px 14px; display: flex; justify-content: center; gap: 12px; align-items: center; border-top: 1px solid var(--line); background: #f8fafc; }
+.version-update-file-pager .btn { min-width: 74px; padding: 7px 12px; }
+.version-update-file-pager span { min-width: 150px; color: var(--muted); text-align: center; font-size: 11px; }
+
+
+.version-update-config-body label { display: grid; gap: 7px; color: #536078; font-size: 13px; }
+
+
+.version-update-config-body label small { color: var(--muted); font-size: 11px; }
+
+
+.version-update-current-status { padding: 16px; display: grid; gap: 14px; border: 1px solid #dbe2eb; border-radius: 12px; background: #f1f4f8; }
+
+
+.version-update-status-head, .version-update-status-detail { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
+
+
+.version-update-status-head strong { font-size: 15px; font-weight: 500; }
+
+
+.version-update-status-badge { padding: 6px 10px; border-radius: 8px; color: #087f4f; background: #e6f7ee; font-size: 11px; }
+.version-update-status-track { height: 8px; overflow: hidden; border-radius: 999px; background: #c5cad2; }
+.version-update-status-track i { display: block; width: 0; height: 100%; border-radius: inherit; background: #078856; transition: width .25s ease; }
+.version-update-status-detail { color: #657084; font-size: 11px; }
+.version-update-current-status.downloading .version-update-status-badge { color: #0b72c7; background: #e8f3fc; }
+.version-update-current-status.downloading .version-update-status-track i, .version-update-current-status.ready .version-update-status-track i { background: #1f2937; }
+.version-update-current-status.ready .version-update-status-badge { color: #8a5600; background: #f8b72b; }
+.version-update-current-status.installing .version-update-status-badge { color: #3759b8; background: #e8edff; }
+.version-update-current-status.installing .version-update-status-track i { background: #3759b8; }
+.version-update-current-status.failed .version-update-status-badge { color: #b42332; background: #fde9ec; }
+.version-update-current-status.failed .version-update-status-track i { background: #d94d5c; }
+
+
+@media (max-width: 680px) { .version-update-config-modal { height: 94vh; max-height: 94vh; } .version-update-config-body { padding: 14px; gap: 12px; } .version-update-summary, .version-update-checksums { grid-template-columns: 1fr; } .version-update-file-section { overflow-x: auto; } .version-update-file-columns, .version-update-file { min-width: 780px; } .version-update-current-status { padding: 12px; } }
+.license-account-card { overflow: hidden; }
+.license-account-state { margin: 16px; padding: 18px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 5px 12px; background: #f4f7fb; border: 1px solid #dce4ef; border-radius: 8px; }
+.license-account-state strong { color: #263249; font-size: 17px; }
+.license-account-state small { grid-column: 2; color: #778398; }
+.license-account-badge { grid-row: 1 / span 2; min-width: 70px; padding: 7px 9px; color: #637188; background: #e7ebf1; border: 1px solid #d1d8e3; border-radius: 6px; font-size: 12px; font-weight: 700; text-align: center; }
+.license-account-state.active { background: #eef9f5; border-color: #c7e8dc; }
+.license-account-badge.active { color: #13795b; background: #dff4ec; border-color: #acdcca; }
+.license-account-state.expired, .license-account-state.inactive { background: #fff4f5; border-color: #f0d1d5; }
+.license-account-badge.expired, .license-account-badge.inactive { color: #b23d49; background: #ffe8eb; border-color: #efbec4; }
+.license-account-details { margin: 0 16px 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.license-account-details div { min-height: 64px; padding: 11px 13px; display: grid; align-content: center; gap: 4px; background: #fff; border: 1px solid #e1e7ef; border-radius: 7px; }
+.license-account-details div.full { grid-column: 1 / -1; }
+.license-account-details dt { color: #7a8699; font-size: 11px; }
+.license-account-details dd { margin: 0; overflow-wrap: anywhere; color: #2b374d; font-weight: 700; }
+.license-account-note { margin: 0 16px 16px; padding: 10px 12px; color: #69768a; background: #f7f9fc; border-left: 3px solid #90a6c7; font-size: 12px; }
+@media (max-width: 680px) { .license-account-details { grid-template-columns: 1fr; } .license-account-details div.full { grid-column: auto; } }
+
+
+.rcon-config-stack { gap: 14px; }
+
+
+.rcon-config-card { position: relative; border-color: #dce5f2; box-shadow: 0 8px 24px rgba(31, 52, 84, .06); }
+
+
+.rcon-config-card .card-head { min-height: 70px; padding-left: 58px; background: linear-gradient(90deg, #f7faff, #fff 42%); }
+
+
+.config-card-index { position: absolute; left: 17px; top: 18px; width: 29px; height: 29px; display: grid; place-items: center; color: #fff; background: var(--blue); border-radius: 8px; font-size: 10px; font-weight: 800; }
+
+
+.rcon-config-card .form-grid { padding-top: 17px; padding-bottom: 17px; }
+
+
+.rcon-config-card .form-actions { min-height: 52px; align-items: center; justify-content: space-between; }
+
+
+.rcon-config-card .btn.primary { min-width: 126px; }
+
+
+
+#config-rcon .bridge-capabilities { background: #fbfcfe; }
+
+
+#config-rcon .bridge-capabilities p { padding: 3px 2px 0; }
+
+#rconPolicyConfigForm .form-grid > label { align-content: start; }
+#rconPolicyConfigForm .rcon-policy-input-unit { min-width: 0; height: 38px; display: flex; align-items: stretch; overflow: hidden; border: 1px solid #d4deea; border-radius: 6px; background: #fff; transition: border-color .15s, box-shadow .15s; }
+#rconPolicyConfigForm .rcon-policy-input-unit:focus-within { border-color: #6f9bdd; box-shadow: 0 0 0 3px rgba(76, 126, 207, .12); }
+#rconPolicyConfigForm .rcon-policy-input-unit input { flex: 1; min-width: 0; height: 100%; padding: 0 10px; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+#rconPolicyConfigForm .rcon-policy-input-unit input:focus { border: 0; box-shadow: none; }
+#rconPolicyConfigForm .rcon-policy-input-unit b { flex: 0 0 auto; min-width: 48px; padding: 0 10px; display: flex; align-items: center; justify-content: center; color: #63738a; background: #edf1f6; border-left: 1px solid #d4deea; font-size: 10px; font-weight: 700; white-space: nowrap; }
+#rconPolicyConfigForm .rcon-policy-delay-fields { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+#rconPolicyConfigForm .field-hint { min-height: 28px; display: block; color: #74839a; font-size: 10px; font-weight: 400; line-height: 1.45; }
+
+@media (max-width: 620px) {
+  #rconPolicyConfigForm .rcon-policy-delay-fields { grid-template-columns: 1fr; }
+}
+
+#page-config .config-tabs {
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px;
+  gap: 4px;
+  border: 1px solid #dce3ec;
+  border-radius: 8px;
+  background: #f3f5f8;
+}
+#page-config .config-tabs .tab { min-height: 34px; padding: 7px 14px; border: 0; border-radius: 6px; }
+#page-config .config-tabs .tab.active { color: #244f3d; background: #fff; box-shadow: 0 1px 4px rgba(31, 42, 55, .12); }
+#page-config .rcon-main-grid { grid-template-columns: minmax(0, 1.08fr) minmax(360px, .92fr); gap: 16px; }
+#page-config .rcon-config-card { overflow: hidden; border-color: #d8e0e9; box-shadow: 0 5px 16px rgba(31, 42, 55, .05); }
+#page-config .rcon-config-card .card-head { padding-left: 58px; background: #fff; border-bottom-color: #e3e8ef; }
+#page-config #tcpRconFields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#page-config #tcpRconFields > label:has(input[name='rconPassword']),
+#page-config #tcpRconFields > label:has(input[name='scumGameDirectory']) { grid-column: 1 / -1; }
+#page-config #rconPluginPanel .config-card-index { background: #2f6b50; }
+#page-config #rconPluginPanel .plugin-toolbar { min-height: 45px; padding: 10px 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; background: #f7f9fb; }
+#page-config #rconPluginPanel .plugin-toolbar span { min-width: 0; color: #647186; font-family: Consolas, "Microsoft YaHei UI", sans-serif; font-size: 11px; }
+#page-config #rconPluginPanel .plugin-toolbar b { min-width: 0; max-width: 100%; justify-self: start; padding: 4px 8px; overflow-wrap: anywhere; color: #276047; border: 1px solid #bdd8c9; border-radius: 5px; background: #edf7f1; font-size: 11px; line-height: 1.6; }
+#page-config #rconPluginPanel .plugin-toolbar b[data-status='pending'],
+#page-config #rconPluginPanel .plugin-toolbar b[data-status='checking'] { color: #365e91; border-color: #c7d8ed; background: #edf4fc; }
+#page-config #rconPluginPanel .plugin-toolbar b[data-status='outdated'],
+#page-config #rconPluginPanel .plugin-toolbar b[data-status='warning'] { color: #946114; border-color: #ead3aa; background: #fff7e8; }
+#page-config #rconPluginPanel .plugin-toolbar b[data-status='failed'] { color: #ad3947; border-color: #edc3ca; background: #fff0f2; }
+#page-config #rconPluginPanel .plugin-files { grid-template-columns: 1fr; gap: 0; padding: 0 16px; }
+#page-config #rconPluginPanel .plugin-file { min-height: 58px; padding: 10px 2px; align-content: center; border: 0; border-bottom: 1px solid #e5e9ef; border-radius: 0; background: #fff; }
+#page-config #rconPluginPanel .plugin-file:last-child { border-bottom: 0; }
+#page-config #rconPluginPanel .plugin-file strong { font-size: 12px; }
+#page-config #rconPluginPanel .plugin-file small { overflow-wrap: anywhere; font-size: 10px; }
+#page-config .rcon-plugin-checksums { grid-column: 1 / -1; min-width: 0; }
+#page-config .rcon-plugin-checksums summary { width: fit-content; color: #62788f; font-size: 10px; cursor: pointer; }
+#page-config .rcon-plugin-checksums small { display: block; margin-top: 5px; font-family: Consolas, "Microsoft YaHei UI", sans-serif; }
+#page-config .rcon-plugin-backup-note { margin: 0; padding: 10px 16px; border-top: 1px solid #e3e8ef; color: #708077; background: #f6faf7; font-size: 11px; line-height: 1.6; }
+#page-config #rconPluginPanel .form-actions { align-items: stretch; flex-direction: column; gap: 10px; }
+#page-config #rconPluginPanel .form-actions .inline-fields { display: flex; flex-wrap: wrap; gap: 8px; }
+#page-config #rconPluginPanel .form-actions .btn { flex: 1 1 130px; }
+
+@media (max-width: 1040px) {
+  #page-config .rcon-main-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  #page-config .config-tabs { width: 100%; }
+  #page-config .config-tabs .tab { flex: 1; }
+  #page-config #rconPluginPanel .form-actions .inline-fields { width: 100%; display: grid; grid-template-columns: 1fr; }
+  #page-config #rconPluginPanel .form-actions .btn { width: 100%; }
+}
+@media (max-width: 620px) {
+  #page-config #tcpRconFields { grid-template-columns: 1fr; }
+}
+
