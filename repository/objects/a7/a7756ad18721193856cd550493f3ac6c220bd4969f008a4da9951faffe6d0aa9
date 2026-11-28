@@ -26,7 +26,7 @@ const storefrontScripts = [
   '/shop/js/membership.js',
   '/shop/js/core-events.js'
 ];
-const storefrontAssetVersion = '202611231649';
+const storefrontAssetVersion = '202611281043';
 const storefrontCacheUrl = (url) => url + (url.includes('?') ? '&' : '?') + 'v=' + storefrontAssetVersion;
 async function loadStorefrontScriptsInOrder() {
   const sources = storefrontScripts.map((url) => storefrontCacheUrl(url));

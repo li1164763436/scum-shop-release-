@@ -53,6 +53,6 @@
 
   <div id="shopModalMount"></div>
   <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
-  <script src="/shop/page-loader.js?v=202611231649" defer></script>
+  <script src="/shop/page-loader.js?v=202611281043" defer></script>
 </body>
 </html>

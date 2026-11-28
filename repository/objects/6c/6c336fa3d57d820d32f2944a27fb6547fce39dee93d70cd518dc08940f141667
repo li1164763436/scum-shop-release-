@@ -1,0 +1,96 @@
+#page-dashboard .dashboard-metrics { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; margin:0 0 20px; }
+#page-dashboard .dashboard-metrics .status-card { min-width:0; min-height:132px; padding:20px; border-radius:14px; border:1px solid #dfe6ee; background:linear-gradient(145deg,#fff,#f7f9fc); box-shadow:0 4px 16px #21364b08; }
+#page-dashboard .dashboard-metrics .status-card > span { font-size:13px; font-weight:600; color:#657389; }
+#page-dashboard .dashboard-metrics .status-card > strong { display:block; margin:12px 0 8px; font-size:28px; line-height:1.25; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+#page-dashboard .dashboard-metrics .status-card > small { font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
+#page-dashboard .dashboard-metrics .metric-time > strong { font-size:19px; }
+#page-dashboard .dashboard-metrics .metric-time:last-child { grid-column:auto; }
+@media(max-width:1250px) { #page-dashboard .dashboard-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+@media(max-width:600px) { #page-dashboard .dashboard-metrics { grid-template-columns:1fr; gap:10px; } #page-dashboard .dashboard-metrics .metric-time:last-child { grid-column:auto; } }
+
+#page-dashboard .monitor-grid { grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr); }
+#page-dashboard .monitor-combined-card { grid-column:1/-1; }
+#page-dashboard .monitor-grid > .card { border-color:var(--admin-line); border-radius:10px; background:var(--admin-paper); box-shadow:var(--admin-shadow); overflow:hidden; }
+#page-dashboard .monitor-players-card > .card-head { align-items:center; }
+#page-dashboard .monitor-players-heading { min-width:0; }
+#page-dashboard #monitorPlayersMeta { overflow-wrap:anywhere; }
+#page-dashboard .monitor-player-count { width:72px; height:72px; padding:6px; flex:0 0 auto; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; border:4px solid #dfe5ec; border-radius:50%; background:#f7f9fb; color:#637083; box-shadow:0 4px 12px rgba(31,51,75,.08); }
+#page-dashboard .monitor-player-count strong { max-width:100%; font-size:22px; line-height:1.1; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+#page-dashboard .monitor-player-count span { font-size:10px; line-height:1.3; font-weight:600; white-space:nowrap; }
+#page-dashboard .monitor-player-count.has-players { border-color:#63bd91; background:#f2fbf7; color:#28734f; }
+#page-dashboard .monitor-player-count.no-players { border-color:#e7848e; background:#fff5f6; color:#a3313d; }
+#page-dashboard .monitor-players-card .table-wrap { width:100%; max-width:100%; }
+#page-dashboard .monitor-players-table { min-width:760px; table-layout:fixed; }
+#page-dashboard .monitor-player-shop, #page-dashboard .monitor-player-game { width:22%; }
+#page-dashboard .monitor-player-steam { width:22%; }
+#page-dashboard .monitor-player-time { width:22%; }
+#page-dashboard .monitor-player-actions { width:12%; }
+#page-dashboard .monitor-players-table th, #page-dashboard .monitor-players-table td { padding:13px 16px; }
+#page-dashboard .monitor-players-table td:nth-child(-n+2) { overflow-wrap:anywhere; }
+#page-dashboard .monitor-players-table code, #page-dashboard .monitor-players-table time { white-space:nowrap; font-variant-numeric:tabular-nums; }
+#page-dashboard .monitor-players-table code { font-size:11px; }
+#page-dashboard .monitor-players-table .monitor-player-unregistered { color:var(--admin-muted); font-weight:500; }
+#page-dashboard .monitor-players-table th:last-child, #page-dashboard .monitor-players-table td:last-child { text-align:right; }
+#page-dashboard .monitor-players-table .row-btn { min-height:30px; padding:5px 10px; white-space:nowrap; }
+#page-dashboard .monitor-players-table .row-btn:focus-visible { outline:2px solid #63bd91; outline-offset:2px; }
+#page-dashboard .monitor-copy-input { position:fixed; left:0; top:0; width:1px; height:1px; padding:0; opacity:0; pointer-events:none; }
+#page-dashboard .monitor-events > .card-head { flex-wrap:wrap; align-items:center; gap:14px 20px; }
+#page-dashboard .monitor-events-heading { min-width:0; flex:1 1 320px; }
+#page-dashboard .monitor-event-search { max-width:100%; margin:0 0 0 auto; flex:0 1 380px; display:flex; align-items:center; gap:8px; }
+#page-dashboard .monitor-event-search input { width:100%; min-width:0; min-height:36px; padding:8px 11px; flex:1 1 auto; font-size:12px; }
+#page-dashboard .monitor-event-search .btn { min-height:36px; padding:8px 16px; flex:0 0 auto; white-space:nowrap; }
+#page-dashboard .monitor-events .table-wrap { width:100%; max-width:100%; }
+#page-dashboard .monitor-events-table { min-width:980px; table-layout:fixed; }
+#page-dashboard .monitor-event-type { width:8%; }
+#page-dashboard .monitor-event-shop, #page-dashboard .monitor-event-game { width:19%; }
+#page-dashboard .monitor-event-steam { width:20%; }
+#page-dashboard .monitor-event-ip { width:16%; }
+#page-dashboard .monitor-event-time { width:18%; }
+#page-dashboard .monitor-events-table th, #page-dashboard .monitor-events-table td { padding:13px 16px; }
+#page-dashboard .monitor-events-table td:nth-child(2), #page-dashboard .monitor-events-table td:nth-child(3), #page-dashboard .monitor-events-table td:nth-child(5) { overflow-wrap:anywhere; }
+#page-dashboard .monitor-events-table code { font-size:11px; font-variant-numeric:tabular-nums; }
+#page-dashboard .monitor-events-table td:nth-child(4) code, #page-dashboard .monitor-events-table time { white-space:nowrap; font-variant-numeric:tabular-nums; }
+#page-dashboard .monitor-events-table .badge { min-width:46px; justify-content:center; white-space:nowrap; border:1px solid transparent; }
+#page-dashboard .monitor-events-table .monitor-event-login { color:#28734f; background:#edf8f1; border-color:#d2e9d9; }
+#page-dashboard .monitor-events-table .monitor-event-logout { color:#95616a; background:#fbf2f3; border-color:#eedce0; }
+#page-dashboard .monitor-events-table .monitor-event-unregistered { color:var(--admin-muted); font-weight:500; }
+@media(max-width:600px) { #page-dashboard .monitor-event-search { flex-basis:100%; margin-left:0; } #page-dashboard .monitor-event-search input, #page-dashboard .monitor-event-search .btn { min-height:40px; } }
+#page-dashboard .monitor-combined-layout { padding:14px 16px 16px; }
+#page-dashboard .monitor-service-group, #page-dashboard .monitor-collector-group { min-width:0; }
+#page-dashboard .monitor-combined-layout h4 { display:none; }
+#page-dashboard .service-status-card .service-list { padding:6px 0 14px; display:grid; grid-template-columns:repeat(5,minmax(88px,1fr)); gap:14px; }
+#page-dashboard .service-status-card [data-service="backend"], #page-dashboard .service-status-card [data-service="chatLogs"] { display:none; }
+#page-dashboard .service-status-card .service-list > div { width:80px; height:80px; min-height:0; padding:8px; justify-self:center; display:flex; flex-direction:column; justify-content:center; gap:5px; text-align:center; border:4px solid #dfe5ec; border-radius:50%; background:#fff; box-shadow:0 4px 12px rgba(31,51,75,.08); }
+#page-dashboard .service-status-card .service-list > div.service-ok { border-color:#63bd91; background:#f2fbf7; }
+#page-dashboard .service-status-card .service-list > div.service-bad { border-color:#e7848e; background:#fff5f6; }
+#page-dashboard .service-status-card .service-list > div.service-waiting { border-color:#e3b963; background:#fffaf0; }
+#page-dashboard .service-status-card .service-list span { display:flex; flex-direction:column; gap:5px; color:#334155; font-size:11px; font-weight:700; }
+#page-dashboard .service-status-card .service-list b { color:#667085; font-size:10px; font-weight:600; }
+#page-dashboard .service-status-card .status-dot { width:10px; height:10px; margin:auto; border-radius:50%; box-shadow:0 0 0 4px rgba(120,128,120,.1); }
+#page-dashboard .service-status-card .bridge-summary { display:none; }
+#page-dashboard .service-status-card .bridge-summary > i { width:9px; height:9px; margin-top:5px; flex:0 0 auto; border-radius:50%; background:#39a56c; box-shadow:0 0 0 4px rgba(57,165,108,.12); }
+#page-dashboard .service-status-card .bridge-summary > div { min-width:0; display:grid; gap:3px; }
+#page-dashboard .service-status-card .bridge-summary small { color:#648070; font-size:9px; font-weight:700; }
+#page-dashboard .service-status-card .bridge-summary strong { color:#254b38; font-size:11px; }
+#page-dashboard .service-status-card .bridge-summary span { color:#617267; font-size:10px; line-height:1.45; overflow-wrap:anywhere; }
+#page-dashboard .collector-process-card .monitor-details { min-height:0; padding:0; display:grid; grid-template-columns:repeat(5,minmax(92px,1fr)); gap:12px; }
+#page-dashboard .collector-process-card .monitor-details > div:not(.monitor-error-detail) { width:82px; height:82px; padding:8px; justify-self:center; display:flex; flex-direction:column; justify-content:center; gap:5px; text-align:center; border:4px solid #7ca8df; border-radius:50%; background:#f6f9fd; box-shadow:0 4px 12px rgba(31,51,75,.08); overflow:hidden; }
+#page-dashboard .collector-process-card .monitor-details dt { color:#637083; font-size:11px; }
+#page-dashboard .collector-process-card .monitor-details dd { max-width:68px; color:#172033; font-size:10px; line-height:1.25; font-weight:700; overflow-wrap:anywhere; }
+#page-dashboard .collector-process-card #monitorLastSuccess { font-size:9px; }
+#page-dashboard .collector-process-card #monitorProcessMemory { font-size:9px; line-height:1.35; }
+#page-dashboard .collector-process-card .monitor-details > div.connection-online { border-color:#63bd91; background:#f2fbf7; }
+#page-dashboard .collector-process-card .monitor-details > div.connection-online dt, #page-dashboard .collector-process-card .monitor-details > div.connection-online dd { color:#28734f; }
+#page-dashboard .collector-process-card .monitor-details > div.connection-offline { border-color:#e7848e; background:#fff5f6; }
+#page-dashboard .collector-process-card .monitor-details > div.connection-offline dt, #page-dashboard .collector-process-card .monitor-details > div.connection-offline dd { color:#a3313d; }
+#page-dashboard .collector-process-card .monitor-error-detail { grid-column:1/-1; padding:12px 14px; display:flex; gap:10px; align-items:flex-start; border:1px solid #ead9dc; border-radius:10px; background:#fff7f8; }
+#page-dashboard .collector-process-card .monitor-error-detail > i { width:9px; height:9px; margin-top:5px; flex:0 0 auto; border-radius:50%; background:#d95c69; box-shadow:0 0 0 4px rgba(217,92,105,.12); }
+#page-dashboard .collector-process-card .monitor-error-detail > div { min-width:0; display:grid; gap:4px; }
+#page-dashboard .collector-process-card .monitor-error-detail dt { color:#9a5a62; font-size:9px; font-weight:700; }
+#page-dashboard .collector-process-card .monitor-error-detail dd { max-width:none; color:#8f2531; font-size:10px; line-height:1.45; overflow-wrap:anywhere; }
+#page-dashboard .collector-process-card .monitor-error-detail.connection-ok { border-color:#cfe5d9; background:#f3faf6; }
+#page-dashboard .collector-process-card .monitor-error-detail.connection-ok > i { background:#39a56c; box-shadow:0 0 0 4px rgba(57,165,108,.12); }
+#page-dashboard .collector-process-card .monitor-error-detail.connection-ok dt, #page-dashboard .collector-process-card .monitor-error-detail.connection-ok dd { color:#316247; }
+@media(max-width:1100px) { #page-dashboard .service-status-card .service-list, #page-dashboard .collector-process-card .monitor-details { grid-template-columns:repeat(5,minmax(88px,1fr)); } }
+@media(max-width:900px) { #page-dashboard .monitor-grid { grid-template-columns:1fr; } #page-dashboard .collector-process-card .monitor-details { grid-template-columns:repeat(2,minmax(100px,1fr)); } }
+@media(max-width:600px) { #page-dashboard .service-status-card .service-list { grid-template-columns:repeat(2,minmax(88px,1fr)); } #page-dashboard .monitor-player-count { width:64px; height:64px; } #page-dashboard .monitor-player-count strong { font-size:20px; } #page-dashboard .monitor-players-table .row-btn { min-height:40px; } }

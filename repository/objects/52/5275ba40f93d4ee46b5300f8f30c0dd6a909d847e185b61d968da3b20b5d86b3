@@ -1,0 +1,40 @@
+<section class="page active" id="page-dashboard">
+          <div class="welcome-card">
+            <div class="summary-index"><span>SCUM</span><strong>OPS</strong></div>
+            <div class="welcome-copy"><span class="eyebrow">FULFILLMENT COMMAND CENTER</span><h2>自动发货运行中心</h2><p>统一管理商城订单、内置管理、自动发货任务与服务运行状态。</p><div class="welcome-tags"><span>订单履约</span><span>RCON 发货</span><span>异常追踪</span></div></div>
+            <div class="summary-actions"><span class="summary-signal"><i></i>管理服务持续监测中</span><div class="welcome-actions"><button class="btn primary" data-go="orders">查看订单</button><button class="btn secondary" data-go="operations">游戏日志</button><button class="btn secondary" id="startVersionUpdate">版本更新</button></div></div>
+          </div>
+          <div class="dashboard-overview-head"><div><span class="section-kicker">FULFILLMENT OVERVIEW</span><h2>履约业务概览</h2></div><p>关键指标实时汇总</p></div>
+          <div class="dashboard-metrics" id="dashboardStats">
+            <article class="status-card"><span>注册玩家数／总玩家数</span><strong id="dashboardPlayerCount">-- / --</strong><small>商城注册／玩家账户</small></article>
+            <article class="status-card"><span>当前在线</span><strong id="monitorOnlineCount">--</strong><small id="monitorOnlineDetail">暂无成功采样</small></article>
+            <article class="status-card"><span>插件延迟</span><strong id="monitorRconLatency">--</strong><small>最近成功查询</small></article>
+            <article class="status-card"><span>今日任务</span><strong id="dashboardTodayTasks">--</strong><small>今日完成或失败的任务</small></article>
+            <article class="status-card metric-time"><span>运行时间</span><strong id="serviceUptime">等待服务启动</strong><small>启动时间：<b id="serviceStartedAt">--</b></small></article>
+            <article class="status-card metric-time"><span>授权到期</span><strong id="licenseExpiresAt">--</strong><small>授权账号：<b id="licenseUsername">--</b></small></article>
+          </div>
+          <section class="monitor-section" id="serverMonitorSection">
+            <div class="section-heading"><div><span class="section-kicker">服务监控</span><h2>服务实时监控</h2><p id="monitorLastSample">正在读取数据库采样</p></div></div>
+            <div class="monitor-grid">
+              <section class="card service-status-card collector-process-card monitor-combined-card monitor-wide"><div class="card-head"><div><h3>服务状态与监控</h3><p>统一查看服务在线状态、监控服务和进程指标</p></div></div><div class="monitor-combined-layout"><div class="monitor-service-group"><h4>服务状态</h4><div class="service-list" id="serviceList"><div data-service="backend"><span><i class="status-dot waiting"></i>后台服务</span><b>检测中</b></div><div data-service="bridge"><span><i class="status-dot waiting"></i>游戏连接</span><b>检测中</b></div><div data-service="fulfillment"><span><i class="status-dot waiting"></i>自动发货</span><b>等待配置</b></div><div data-service="monitor"><span><i class="status-dot waiting"></i>服务监控</span><b>等待监控</b></div><div data-service="scumLogs"><span><i class="status-dot waiting"></i>游戏日志</span><b>等待配置</b></div><div data-service="chatLogs"><span><i class="status-dot waiting"></i>聊天领取</span><b>等待配置</b></div></div><div class="bridge-summary"><i></i><div><small>游戏连接说明</small><strong data-bridge-title>游戏连接检测中</strong><span data-bridge-reason>正在读取游戏连接能力</span></div></div></div><div class="monitor-collector-group"><h4>监控与进程</h4><dl class="monitor-details"><div><dt>监控状态</dt><dd id="monitorCollectorState">--</dd></div><div><dt>最近成功</dt><dd id="monitorLastSuccess">--</dd></div><div><dt>内存占用</dt><dd id="monitorProcessMemory">--</dd></div><div><dt>失败次数</dt><dd id="monitorFailureCount">--</dd></div><div class="monitor-error-detail"><i></i><div><dt>最近错误</dt><dd id="monitorLastError">无</dd></div></div></dl></div></div></section>
+              <section class="card monitor-wide monitor-players-card" aria-labelledby="monitorPlayersTitle">
+                <div class="card-head">
+                  <div class="monitor-players-heading"><h3 id="monitorPlayersTitle">在线玩家</h3><p id="monitorPlayersMeta" role="status">正在获取在线明细 · 获取时间 --</p></div>
+                  <div class="monitor-player-count" id="monitorPlayersCountBadge" aria-label="正在获取在线人数"><strong id="monitorPlayersCount">--</strong><span>在线人数</span></div>
+                </div>
+                <div class="table-wrap"><table class="monitor-table monitor-players-table" aria-labelledby="monitorPlayersTitle"><colgroup><col class="monitor-player-shop"><col class="monitor-player-game"><col class="monitor-player-steam"><col class="monitor-player-time"><col class="monitor-player-actions"></colgroup><thead><tr><th scope="col">商城名称</th><th scope="col">游戏名称</th><th scope="col">steamID</th><th scope="col">获取时间</th><th scope="col">操作</th></tr></thead><tbody id="monitorPlayerRows"><tr><td colspan="5" class="empty loading">正在获取在线玩家...</td></tr></tbody></table></div>
+              </section>
+              <section class="card monitor-events" aria-labelledby="monitorEventsTitle">
+                <div class="card-head">
+                  <div class="monitor-events-heading"><h3 id="monitorEventsTitle">登退详情</h3><p>最近游戏玩家登录、退出事件记录按时间记录倒序显示</p></div>
+                  <form id="monitorEventSearchForm" class="monitor-event-search" role="search" aria-label="搜索登退详情">
+                    <input id="monitorEventSearch" type="search" maxlength="100" placeholder="商城名称 / 游戏名称 / steamID / IP" aria-label="按商城名称、游戏名称、steamID 或 IP 模糊搜索" autocomplete="off" enterkeyhint="search">
+                    <button id="monitorEventSearchButton" type="submit" class="btn primary">搜索</button>
+                  </form>
+                </div>
+                <div class="table-wrap"><table class="monitor-events-table" aria-labelledby="monitorEventsTitle"><colgroup><col class="monitor-event-type"><col class="monitor-event-shop"><col class="monitor-event-game"><col class="monitor-event-steam"><col class="monitor-event-ip"><col class="monitor-event-time"></colgroup><thead><tr><th scope="col">事件</th><th scope="col">商城名称</th><th scope="col">游戏名称</th><th scope="col">steamID</th><th scope="col">IP</th><th scope="col">时间</th></tr></thead><tbody id="monitorEventRows" aria-live="polite" aria-busy="true"><tr><td colspan="6" class="empty loading">正在获取登退记录...</td></tr></tbody></table></div>
+              </section>
+            </div>
+          </section>
+        </section>
+

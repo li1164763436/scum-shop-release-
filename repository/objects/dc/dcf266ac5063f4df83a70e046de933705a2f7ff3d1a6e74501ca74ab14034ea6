@@ -1,0 +1,172 @@
+async function loadDashboard() {
+  const [dashboard] = await Promise.allSettled([api('/api/dashboard'), loadMonitor(), loadGameChatPlayers()]);
+  if (dashboard.status === 'fulfilled') {
+    const data = dashboard.value || {};
+    $('#dashboardPlayerCount').textContent = `${number(data.accounts?.registered_count)} / ${number(data.accounts?.count)}`;
+    $('#dashboardTodayTasks').textContent = optionalNumber(data.tasks?.today_processed_count);
+    const username = String(data?.license?.username || '');
+    $('#licenseUsername').textContent = !username ? '--' : username.length === 1 ? '*' : `${username[0]}${'*'.repeat(Math.max(1, username.length - 2))}${username.at(-1)}`;
+    $('#licenseExpiresAt').textContent = date(data?.license?.expiresAt);
+  } else {
+    $('#dashboardPlayerCount').textContent = '-- / --';
+    $('#dashboardTodayTasks').textContent = '--';
+    toast(dashboard.reason.message, true);
+  }
+  await loadHealth();
+ }
+const restartStoreButton = $('[data-go="operations"]', $('#page-dashboard'));
+if (restartStoreButton) {
+  restartStoreButton.removeAttribute('data-go');
+  restartStoreButton.id = 'restartStore';
+  restartStoreButton.textContent = '重启商城';
+  restartStoreButton.addEventListener('click', async (event) => {
+    if (!window.confirm('确认重启商城全部服务？重启期间页面会短暂断开。')) return;
+    await withBusy(event.currentTarget, async () => {
+      await api('/api/admin/system/restart', { method: 'POST' });
+      toast('商城正在重启，请稍候');
+    });
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = '重启中...';
+  });
+}
+$('[data-service="backend"]')?.remove();
+$('[data-service="chatLogs"]')?.remove();
+const monitorLastSuccessItem = $('#monitorLastSuccess')?.closest('div');
+if (monitorLastSuccessItem && !$('#monitorCpuUsage')) {
+  const cpuItem = document.createElement('div');
+  cpuItem.innerHTML = '<dt>CPU占用</dt><dd id="monitorCpuUsage">--</dd>';
+  monitorLastSuccessItem.after(cpuItem);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes)) return '--';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
+  return `${(bytes / 1073741824).toFixed(1)} GB`;
+}
+async function loadMonitor() {
+  if (state.page !== 'dashboard') return;
+  const [overview, players] = await Promise.allSettled([api('/api/monitor/overview'), api('/api/monitor/players'), loadMonitorEvents()]);
+  if (overview.status === 'fulfilled') renderMonitorOverview(overview.value); else renderMonitorOverviewError(overview.reason.message);
+  if (players.status === 'fulfilled') renderMonitorPlayers(players.value); else renderMonitorPlayersError(players.reason.message);
+}
+function renderMonitorOverview(data) {
+  const collector = data?.collector || {};
+  const hasSample = Boolean(data?.lastSampledAt);
+  const failed = Boolean(data?.queryFailed);
+  const hasSuccess = data?.onlineCount !== null && data?.onlineCount !== undefined;
+  $('#monitorOnlineCount').textContent = hasSuccess ? number(data.onlineCount) : '--';
+  $('#monitorOnlineDetail').textContent = !hasSuccess ? '暂无成功采样' : failed ? '查询失败，显示最近成功人数' : Number(data.onlineCount) === 0 ? '0 人在线' : '最近成功采样';
+  $('#monitorRconLatency').textContent = data?.rconLatencyMs === null || data?.rconLatencyMs === undefined ? '--' : `${number(data.rconLatencyMs)} ms`;
+  $('#monitorLastSample').textContent = data?.stale ? '无数据 · 等待获取最新监控信息' : hasSample ? `获取时间 ${date(data.lastSampledAt)}` : '无数据 · 等待获取监控信息';
+  $('#monitorCollectorState').textContent = !collector.enabled ? '未启用' : collector.running ? '采集中' : collector.polling ? '运行中' : '异常';
+  $('#monitorLastSuccess').textContent = collector.lastSuccessAt ? date(collector.lastSuccessAt) : date(data?.lastSuccessAt);
+  $('#monitorCpuUsage').textContent = `${Number(data?.process?.cpuPercent || 0).toFixed(1)}%`;
+  $('#monitorProcessMemory').innerHTML = data?.process ? `应用占用<br>${(Number(data.process.rssBytes || 0) / 1048576).toFixed(2)} MB` : '应用占用<br>0.00 MB';
+  const connectionMetric = $('#monitorFailureCount')?.closest('div');
+  if (connectionMetric) connectionMetric.dataset.retries = String(Number(collector.consecutiveFailures || 0));
+  renderMonitorConnectionMetric(state.gameConnectionOnline, Number(collector.consecutiveFailures || 0));
+}
+function renderMonitorOverviewError(message) {
+  $('#monitorLastSample').textContent = `监控概览加载失败：${message}`;
+}
+function renderMonitorPlayers(data) {
+  const players = list(data, ['items', 'players']);
+  const available = !data?.stale && data?.connected !== false && Boolean(data?.sampledAt);
+  const items = available ? players : [];
+  const count = available ? items.length : null;
+  const badge = $('#monitorPlayersCountBadge');
+  badge.classList.toggle('has-players', count > 0);
+  badge.classList.toggle('no-players', count === 0);
+  badge.setAttribute('aria-label', count === null ? '无数据，在线人数未知' : `${count} 人在线`);
+  $('#monitorPlayersCount').textContent = count === null ? '--' : number(count);
+  $('#monitorPlayersMeta').textContent = `${!available ? '无数据' : items.length ? '游戏内在线明细' : '暂无在线玩家'} · 获取时间 ${date(data?.sampledAt)}`;
+  $('#monitorPlayerRows').innerHTML = items.length ? items.map((player) => {
+    const username = String(player.username || '').trim();
+    const steamId = String(player.steamId || '').trim();
+    return `<tr><td><strong class="${username ? '' : 'monitor-player-unregistered'}">${esc(username || '未注册')}</strong></td><td>${esc(player.characterName || '未命名角色')}</td><td><code>${esc(steamId || '--')}</code></td><td><time>${esc(date(player.observedAt || data.sampledAt))}</time></td><td><button type="button" class="row-btn" data-monitor-copy-id="${esc(steamId)}" aria-label="复制 steamID ${esc(steamId)}"${steamId ? '' : ' disabled'}>复制ID</button></td></tr>`;
+  }).join('') : empty(5, available ? '暂无在线玩家' : '无数据');
+}
+function renderMonitorPlayersError(message) {
+  renderMonitorPlayers({ connected: false, stale: true });
+  $('#monitorPlayerRows').innerHTML = empty(5, message ? `无数据 · ${message}` : '无数据，请稍后重试');
+}
+$('#monitorPlayerRows')?.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-monitor-copy-id]');
+  if (!button || button.disabled) return;
+  event.stopPropagation();
+  const steamId = button.dataset.monitorCopyId;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(steamId);
+    } else {
+      const input = document.createElement('textarea');
+      input.className = 'monitor-copy-input';
+      input.value = steamId;
+      input.readOnly = true;
+      input.tabIndex = -1;
+      $('#page-dashboard').append(input);
+      try {
+        input.select();
+        if (!document.execCommand('copy')) throw new Error('复制失败');
+      } finally {
+        input.remove();
+        button.focus({ preventScroll: true });
+      }
+    }
+    toast('steamID 已复制');
+  } catch {
+    toast('复制失败，请手动复制 steamID', true);
+  }
+});
+let monitorEventsSearch = '';
+let monitorEventsRequest = 0;
+async function loadMonitorEvents(searching = false) {
+  if (state.page !== 'dashboard') return;
+  const request = ++monitorEventsRequest;
+  const query = new URLSearchParams({ limit: '50' });
+  if (monitorEventsSearch) query.set('search', monitorEventsSearch);
+  const rows = $('#monitorEventRows');
+  const button = $('#monitorEventSearchButton');
+  rows.setAttribute('aria-busy', 'true');
+  button.textContent = searching ? '搜索中...' : '搜索';
+  if (searching) rows.innerHTML = empty(6, '正在搜索登退记录...', true);
+  try {
+    const data = await api(`/api/monitor/events?${query}`);
+    if (request === monitorEventsRequest) renderMonitorEvents(list(data, ['items', 'events']));
+  } catch (error) {
+    if (request === monitorEventsRequest) rows.innerHTML = empty(6, `登退记录加载失败：${error.message}`);
+  } finally {
+    if (request === monitorEventsRequest) {
+      rows.setAttribute('aria-busy', 'false');
+      button.textContent = '搜索';
+    }
+  }
+}
+function renderMonitorEvents(items) {
+  $('#monitorEventRows').innerHTML = items.length ? items.map((item) => {
+    const login = item.eventType === 'online';
+    const username = String(item.username || '').trim();
+    return `<tr><td><span class="badge monitor-event-${login ? 'login' : 'logout'}">${login ? '登录' : '退出'}</span></td><td><strong class="${username ? '' : 'monitor-event-unregistered'}">${esc(username || '未注册')}</strong></td><td>${esc(item.characterName || '未命名角色')}</td><td><code>${esc(item.steamId || '--')}</code></td><td><code>${esc(item.ip || '--')}</code></td><td><time>${esc(date(item.observedAt))}</time></td></tr>`;
+  }).join('') : empty(6, monitorEventsSearch ? '未找到匹配的登退记录，请调整关键词' : '暂无游戏登录、退出记录');
+}
+const monitorEventSearchForm = $('#monitorEventSearchForm');
+monitorEventSearchForm?.addEventListener('click', (event) => event.stopPropagation());
+monitorEventSearchForm?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  monitorEventsSearch = $('#monitorEventSearch').value.trim();
+  loadMonitorEvents(true);
+});
+$('#monitorEventSearch')?.addEventListener('input', (event) => {
+  if (!event.currentTarget.value && monitorEventsSearch) {
+    monitorEventsSearch = '';
+    loadMonitorEvents(true);
+  }
+});
+
+$('#startVersionUpdate')?.addEventListener('click', openVersionUpdateConfig);
+
+
